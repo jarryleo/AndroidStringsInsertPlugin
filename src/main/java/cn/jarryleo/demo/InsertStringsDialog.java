@@ -4,7 +4,7 @@ import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 
-public class TestDialog extends JDialog {
+public class InsertStringsDialog extends JDialog {
     private JTable table;
     private JButton insertButton;
     private JButton cancelButton;
@@ -12,18 +12,18 @@ public class TestDialog extends JDialog {
     private JLabel stringsName;
     private JTextField stringNameText;
 
-    public TestDialog() {
-        setTitle("Test Dialog");
+    public InsertStringsDialog() {
+        setTitle("Insert Strings");
         setContentPane(rootPanel);
         setModal(true);
         getRootPane().setDefaultButton(insertButton);
         insertButton.addActionListener(e -> dispose());
         cancelButton.addActionListener(e -> dispose());
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        initTable();
+        initUI();
     }
 
-    private void initTable() {
+    private void initUI() {
         stringsName.setText("<string name=");
         String[] columnNames = {"language", "text"};
         Object[][] data = {
@@ -46,7 +46,7 @@ public class TestDialog extends JDialog {
 
     public static void showDialog() {
         EventQueue.invokeLater(() -> {
-            TestDialog dialog = new TestDialog();
+            InsertStringsDialog dialog = new InsertStringsDialog();
             dialog.pack();
             dialog.setSize(500, 500);
             final Dimension screenSize = Toolkit.getDefaultToolkit().getScreenSize();

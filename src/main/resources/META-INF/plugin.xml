@@ -1,21 +1,21 @@
 <!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
 <idea-plugin>
     <!-- Unique identifier of the plugin. It should be FQN. It cannot be changed between the plugin versions. -->
-    <id>cn.jarryleo.demo</id>
+    <id>cn.jarryleo.insert_strings</id>
 
     <!-- Public plugin name should be written in Title Case.
          Guidelines: https://plugins.jetbrains.com/docs/marketplace/plugin-overview-page.html#plugin-name -->
     <name>Demo</name>
 
     <!-- A displayed Vendor name or Organization ID displayed on the Plugins Page. -->
-    <vendor email="support@yourcompany.com" url="https://www.yourcompany.com">YourCompany</vendor>
+    <vendor email="yjtx256@qq.com" url="https://www.github.com/jarryleo">Jarry Leo</vendor>
 
     <!-- Description of the plugin displayed on the Plugin Page and IDE Plugin Manager.
          Simple HTML elements (text formatting, paragraphs, and lists) can be added inside of <![CDATA[ ]]> tag.
          Guidelines: https://plugins.jetbrains.com/docs/marketplace/plugin-overview-page.html#plugin-description -->
     <description><![CDATA[
-    Enter short description for your plugin here.<br>
-    <em>most HTML tags may be used</em>
+    android studio insert strings for I18n.<br>
+    <em>by Jarry Leo</em>
   ]]></description>
 
     <!-- Product and plugin compatibility requirements.
@@ -28,8 +28,8 @@
 
     </extensions>
     <actions>
-        <action id="TestDialogAction" class="cn.jarryleo.demo.TestDialogAction" text="TestDialogAction"
-                description="TestDialogAction">
+        <action id="InsertStringsAction" class="cn.jarryleo.demo.InsertStringsAction" text="Insert Strings"
+                description="Insert strings to xml">
             <add-to-group group-id="EditMenu" anchor="first"/>
         </action>
     </actions>
