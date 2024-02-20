@@ -24,6 +24,14 @@ class StringsScanner(private val actionEvent: AnActionEvent) {
             val lineStartPosition = editor.caretModel.visualLineStart
             val lineEndPosition = editor.caretModel.visualLineEnd
             currentLineText = editor.document.getText(TextRange(lineStartPosition, lineEndPosition))
+            //如果currentLineText 为空，则获取上一行文本
+            var line = editor.caretModel.logicalPosition.line
+            while (currentLineText.trim().isEmpty() && line > 0) {
+                line--
+                val lineStartOffset = editor.document.getLineStartOffset(line)
+                val lineEndOffset = editor.document.getLineEndOffset(line)
+                currentLineText = editor.document.getText(TextRange(lineStartOffset, lineEndOffset))
+            }
         } ?: run {
             actionEvent.getData(CommonDataKeys.PSI_FILE)?.let { psiFile ->
                 currentFile = psiFile.virtualFile
