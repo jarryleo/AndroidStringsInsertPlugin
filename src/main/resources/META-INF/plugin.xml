@@ -5,7 +5,7 @@
 
     <!-- Public plugin name should be written in Title Case.
          Guidelines: https://plugins.jetbrains.com/docs/marketplace/plugin-overview-page.html#plugin-name -->
-    <name>Demo</name>
+    <name>Android Strings Insert</name>
 
     <!-- A displayed Vendor name or Organization ID displayed on the Plugins Page. -->
     <vendor email="yjtx256@qq.com" url="https://www.github.com/jarryleo">Jarry Leo</vendor>
@@ -15,6 +15,7 @@
          Guidelines: https://plugins.jetbrains.com/docs/marketplace/plugin-overview-page.html#plugin-description -->
     <description><![CDATA[
     android studio insert strings for I18n.<br>
+    <em>Android Studio 国际化字符串资源快速插入和替换的插件</em>
     <em>by Jarry Leo</em>
   ]]></description>
 
