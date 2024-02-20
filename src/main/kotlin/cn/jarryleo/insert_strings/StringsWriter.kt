@@ -1,4 +1,4 @@
-package cn.jarryleo.demo
+package cn.jarryleo.insert_strings
 
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.fileEditor.FileDocumentManager

@@ -1,4 +1,4 @@
-package cn.jarryleo.demo
+package cn.jarryleo.insert_strings
 
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent

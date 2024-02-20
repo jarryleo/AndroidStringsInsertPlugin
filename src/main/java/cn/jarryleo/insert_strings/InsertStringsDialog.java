@@ -1,4 +1,4 @@
-package cn.jarryleo.demo;
+package cn.jarryleo.insert_strings;
 
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
