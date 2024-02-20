@@ -9,6 +9,8 @@ public class TestDialog extends JDialog {
     private JButton insertButton;
     private JButton cancelButton;
     private JPanel rootPanel;
+    private JLabel stringsName;
+    private JTextField stringNameText;
 
     public TestDialog() {
         setTitle("Test Dialog");
@@ -22,6 +24,7 @@ public class TestDialog extends JDialog {
     }
 
     private void initTable() {
+        stringsName.setText("<string name=");
         String[] columnNames = {"language", "text"};
         Object[][] data = {
                 {"en", ""},
@@ -37,7 +40,7 @@ public class TestDialog extends JDialog {
                 return column != 0;
             }
         });
-        table.setPreferredScrollableViewportSize(new Dimension(500, 100));
+        table.setPreferredScrollableViewportSize(new Dimension(500, 200));
         table.setFillsViewportHeight(true);
     }
 
@@ -45,7 +48,7 @@ public class TestDialog extends JDialog {
         EventQueue.invokeLater(() -> {
             TestDialog dialog = new TestDialog();
             dialog.pack();
-            dialog.setSize(500, 200);
+            dialog.setSize(500, 500);
             final Dimension screenSize = Toolkit.getDefaultToolkit().getScreenSize();
             final int x = (screenSize.width - dialog.getWidth()) / 2;
             final int y = (screenSize.height - dialog.getHeight()) / 2;
