@@ -25,11 +25,16 @@ repositories {
 //RR - Rust Rover
 //JPS - JPS-only
 //GW - Gateway
-intellij {
-    version.set("2023.1.5")
-    type.set("IC") // Target IDE Platform
 
-    plugins.set(listOf(/* Plugin Dependencies */))
+//编译器文件夹路径，根据自己的实际情况修改
+val idePath = "D:/Android/Android Studio"
+
+intellij {
+    //version.set("2023.1.5")
+    localPath.set(idePath)
+    type.set("AI") // Target IDE Platform
+
+    plugins.set(listOf("java", "Kotlin"))
 }
 
 tasks {
@@ -55,5 +60,9 @@ tasks {
 
     publishPlugin {
         token.set(System.getenv("PUBLISH_TOKEN"))
+    }
+
+    runIde {
+        ideDir.set(file(idePath))
     }
 }

@@ -6,17 +6,35 @@ import com.intellij.openapi.ui.Messages
 
 class InsertStringsAction : AnAction() {
     override fun actionPerformed(e: AnActionEvent) {
-        showDialog()
+        val stringsScanner = StringsScanner(e)
+        val xml = stringsScanner.isXml()
+        if (xml) {
+            val nodeName = stringsScanner.getStringName()
+            InsertStringsDialog.showDialog(
+                nodeName,
+                stringsScanner.getLanguageList().toTypedArray(),
+                object : OnStringsInsertListener {
+                    override fun onInsert(stringName: String, stringsInfoList: Map<String, String>) {
+                        val project = e.project ?: return
+                        StringsWriter(
+                            project,
+                            nodeName,
+                            stringName,
+                            stringsInfoList,
+                            stringsScanner.getStringsInfoList()
+                        ).write()
+                    }
+                }
+            )
+        } else {
+            showTips("Please select a string in the xml file.")
+        }
     }
 
-    private fun showDialog() {
-        InsertStringsDialog.showDialog()
-    }
-
-    private fun showTips() {
+    private fun showTips(tips: String, title: String = "Information") {
         Messages.showMessageDialog(
-            "Hello World!",
-            "Information",
+            tips,
+            title,
             Messages.getInformationIcon()
         )
     }

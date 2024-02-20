@@ -30,7 +30,8 @@
     <actions>
         <action id="InsertStringsAction" class="cn.jarryleo.demo.InsertStringsAction" text="Insert Strings"
                 description="Insert strings to xml">
-            <add-to-group group-id="EditMenu" anchor="first"/>
+            <add-to-group group-id="EditMenu" anchor="last"/>
+            <add-to-group group-id="XmlGenerateToolsGroup"/>
         </action>
     </actions>
 </idea-plugin>
