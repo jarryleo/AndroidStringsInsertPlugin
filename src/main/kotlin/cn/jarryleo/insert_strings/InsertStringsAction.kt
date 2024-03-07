@@ -9,7 +9,8 @@ class InsertStringsAction : AnAction() {
         val stringsScanner = StringsScanner(e)
         val xml = stringsScanner.isXml()
         if (xml) {
-            val nodeName = stringsScanner.getStringName()
+            val nodeName = stringsScanner.nodeName
+            val anchorNodeName = stringsScanner.anchorNodeName
             InsertStringsDialog.showDialog(
                 nodeName,
                 stringsScanner.getLanguageList().toTypedArray(),
@@ -18,7 +19,7 @@ class InsertStringsAction : AnAction() {
                         val project = e.project ?: return
                         StringsWriter(
                             project,
-                            nodeName,
+                            anchorNodeName,
                             stringName,
                             stringsInfoList,
                             stringsScanner.getStringsInfoList()

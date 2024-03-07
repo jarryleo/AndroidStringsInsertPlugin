@@ -12,8 +12,17 @@ class StringsScanner(private val actionEvent: AnActionEvent) {
 
     private var currentFile: VirtualFile? = null
     private var isXmlFile = false
-    private var selectText = ""
-    private var currentLineText = ""
+    private var selectText = "" //选中文本
+    private var currentLineText = "" //当前行文本
+    private var preLineText = "" //上一行文本
+    val nodeName by lazy {  //当前节点名称
+        getStringName()
+    }
+    val anchorNodeName by lazy {  //当前锚点节点名称，一般是鼠标选中行的上一行节点
+        getNodeName(preLineText)
+    }
+
+    //多语言stings.xml文件信息
     private val stringsInfoList = ArrayList<StringsInfo>()
 
     init {
@@ -31,6 +40,16 @@ class StringsScanner(private val actionEvent: AnActionEvent) {
                 val lineStartOffset = editor.document.getLineStartOffset(line)
                 val lineEndOffset = editor.document.getLineEndOffset(line)
                 currentLineText = editor.document.getText(TextRange(lineStartOffset, lineEndOffset))
+            }
+            var preLine = line - 1
+            while (preLine > 0) {
+                val lineStartOffset = editor.document.getLineStartOffset(preLine)
+                val lineEndOffset = editor.document.getLineEndOffset(preLine)
+                preLineText = editor.document.getText(TextRange(lineStartOffset, lineEndOffset))
+                if (preLineText.trim().isNotEmpty()) {
+                    break
+                }
+                preLine--
             }
         } ?: run {
             actionEvent.getData(CommonDataKeys.PSI_FILE)?.let { psiFile ->
@@ -104,12 +123,16 @@ class StringsScanner(private val actionEvent: AnActionEvent) {
     /**
      * 通过正则获取文本 <string name="app_name">text</string> 中的 app_name
      */
-    fun getStringName(): String {
+    private fun getStringName(): String {
         if (selectText.isNotEmpty()) {
             return selectText
         }
+        return getNodeName(currentLineText)
+    }
+
+    private fun getNodeName(text: String): String {
         val regex = "<string name=\"(.*?)\">".toRegex()
-        val matchResult = regex.find(currentLineText)
+        val matchResult = regex.find(text)
         return matchResult?.groupValues?.get(1) ?: ""
     }
 

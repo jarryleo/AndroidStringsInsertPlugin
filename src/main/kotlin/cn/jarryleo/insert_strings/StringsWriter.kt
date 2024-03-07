@@ -11,7 +11,7 @@ import com.intellij.openapi.vfs.VirtualFile
 class StringsWriter(
     private val project: Project,
     private val anchorName: String,
-    private val name: String,
+    private val nodeName: String,
     private val stringsInfoList: Map<String, String>,
     private val languagesInfoList: List<StringsInfo>
 ) {
@@ -28,8 +28,8 @@ class StringsWriter(
             if (text.isEmpty()) {
                 text = defaultText
             }
-            val node = "<string name=\"$name\">$text</string>"
-            writeToXml(xmlFile, name, node)
+            val node = "<string name=\"$nodeName\">$text</string>"
+            writeToXml(xmlFile, nodeName, node)
         }
     }
 
