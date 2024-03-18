@@ -16,7 +16,10 @@ public class InsertStringsDialog extends JDialog {
     private JLabel stringsName;
     private JTextField stringNameText;
 
-    public InsertStringsDialog(String name, String[] languages, OnStringsInsertListener listener) {
+    public InsertStringsDialog(String name,
+                               String[] languages,
+                               String[] texts,
+                               OnStringsInsertListener listener) {
         setTitle("Insert Strings");
         setContentPane(rootPanel);
         setModal(true);
@@ -42,17 +45,17 @@ public class InsertStringsDialog extends JDialog {
         });
         cancelButton.addActionListener(e -> dispose());
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        initUI(name, languages);
+        initUI(name, languages, texts);
     }
 
-    private void initUI(String name, String[] languages) {
+    private void initUI(String name, String[] languages, String[] texts) {
         stringsName.setText("<string name=");
         stringNameText.setText(name);
         String[] columnNames = {"language", "text"};
         Object[][] data = new Object[languages.length][2];
         for (int i = 0; i < languages.length; i++) {
             data[i][0] = languages[i];
-            data[i][1] = "";
+            data[i][1] = texts[i];
         }
         table.setModel(new DefaultTableModel(data, columnNames) {
             @Override
@@ -76,9 +79,9 @@ public class InsertStringsDialog extends JDialog {
         defaultEditor.setClickCountToStart(1);
     }
 
-    public static void showDialog(String name, String[] languages, OnStringsInsertListener listener) {
+    public static void showDialog(String name, String[] languages, String[] texts, OnStringsInsertListener listener) {
         EventQueue.invokeLater(() -> {
-            InsertStringsDialog dialog = new InsertStringsDialog(name, languages, listener);
+            InsertStringsDialog dialog = new InsertStringsDialog(name, languages, texts, listener);
             dialog.pack();
             dialog.setSize(500, 500);
             final Dimension screenSize = Toolkit.getDefaultToolkit().getScreenSize();

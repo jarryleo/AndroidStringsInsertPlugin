@@ -36,26 +36,26 @@ class StringsWriter(
     /**
      * 写入strings到xml文件，如果strings节点已存在，则更新，否则插入
      */
-    private fun writeToXml(xmlFile: VirtualFile, name: String, text: String) {
+    private fun writeToXml(xmlFile: VirtualFile, name: String, node: String) {
         val document = FileDocumentManager.getInstance().getDocument(xmlFile) ?: return
         WriteCommandAction.runWriteCommandAction(project) {
             val xml = document.text
             val start = xml.indexOf("<string name=\"$name\">")
             val end = xml.indexOf("</string>", start) + "</string>".length
             if (start != -1 && end != -1) {
-                document.replaceString(start, end, text)
+                document.replaceString(start, end, node)
             } else {
                 //查找插入位置为 anchorName 节点的下面
                 val anchorStart = xml.indexOf("<string name=\"$anchorName\">")
                 val anchorEnd = xml.indexOf("</string>", anchorStart) + "</string>".length
                 if (anchorStart != -1 && anchorEnd != -1) {
-                    document.insertString(anchorEnd, "\n\t$text")
+                    document.insertString(anchorEnd, "\n\t$node")
                 } else {
                     //查找插入位置为 </resources> 节点的上面
                     val insertIndex = xml.indexOf("</resources>")
                     if (insertIndex != -1) {
                         //插入新的节点
-                        document.insertString(insertIndex, "\t$text\n")
+                        document.insertString(insertIndex, "\t$node\n")
                     }
                 }
             }

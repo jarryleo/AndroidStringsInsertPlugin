@@ -14,6 +14,7 @@ class InsertStringsAction : AnAction() {
             InsertStringsDialog.showDialog(
                 nodeName,
                 stringsScanner.getLanguageList().toTypedArray(),
+                stringsScanner.getStringsInfoList().map { it.text }.toTypedArray(),
                 object : OnStringsInsertListener {
                     override fun onInsert(stringName: String, stringsInfoList: Map<String, String>) {
                         val project = e.project ?: return

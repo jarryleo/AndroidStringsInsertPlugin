@@ -2,12 +2,14 @@ package cn.jarryleo.insert_strings
 
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.vfs.VirtualFile
 
 /**
  * 通过用户点击的位置，扫描strings文件，并获取相关信息
  */
+@Suppress("unused")
 class StringsScanner(private val actionEvent: AnActionEvent) {
 
     private var currentFile: VirtualFile? = null
@@ -70,34 +72,90 @@ class StringsScanner(private val actionEvent: AnActionEvent) {
             .forEach { valuesDir ->
                 //查找名为 strings 的文件，
                 val stringsFile = valuesDir.children
-                    .find { it.name.contains("strings", ignoreCase = true) } ?: scanFile(valuesDir)
-                if (stringsFile != null) {
+                    .find { it.name.contains("strings", ignoreCase = true) && it.extension == "xml" }
+                //找到语言目录下的strings.xml文件，且含有指定的key
+                if (stringsFile != null && checkXmlFileContainsKey(stringsFile, nodeName)) {
                     stringsInfoList.add(
                         StringsInfo(
                             stringsFile,
-                            valuesDir.name.removePrefix("values-")
+                            valuesDir.name,
+                            getStringName(),
+                            getTextFromStringsXml(stringsFile)
                         )
                     )
+                } else {
+                    //查找values目录下的所有xml文件，看看有没有 <string> 标签且含有指定key
+                    val virtualFileList = valuesDir.children
+                        .filter { it.extension == "xml" }
+                        .filter { checkContainsStrings(it) }
+                    val xmlFile = virtualFileList
+                        .firstOrNull {
+                            checkXmlFileContainsKey(it, nodeName)
+                        }
+                    if (xmlFile != null) {
+                        stringsInfoList.add(
+                            StringsInfo(
+                                xmlFile,
+                                valuesDir.name,
+                                getStringName(),
+                                getTextFromStringsXml(xmlFile)
+                            )
+                        )
+                    } else {
+                        //如果没有找到含有指定key的xml文件，则取strings.xml文件
+                        if (stringsFile != null) {
+                            stringsInfoList.add(
+                                StringsInfo(
+                                    stringsFile,
+                                    valuesDir.name,
+                                    getStringName(),
+                                    getTextFromStringsXml(stringsFile)
+                                )
+                            )
+                        } else {
+                            //如果没有找到含有指定key的xml文件，则取values目录下的第一个含有<string>标签的xml文件
+                            val firstXmlFile = virtualFileList.firstOrNull()
+                            if (firstXmlFile != null) {
+                                stringsInfoList.add(
+                                    StringsInfo(
+                                        firstXmlFile,
+                                        valuesDir.name,
+                                        getStringName(),
+                                        getTextFromStringsXml(firstXmlFile)
+                                    )
+                                )
+                            }
+                        }
+                    }
                 }
             }
     }
 
     /**
-     * 扫描valuesDir下所有文件的内容，看看节点有没有 <string> 标签，有的话返回此文件
+     * 扫描文件，如果是xml文件且含有 <string> 标签，则返回
      */
-    private fun scanFile(valuesDir: VirtualFile): VirtualFile? {
-        valuesDir.children
-            .forEach { stringsFile ->
-                // 找不到的话就要扫描文件内容，看看节点有没有 <string> 标签
-                stringsFile.inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { line ->
-                        if (line.contains("<string")) {
-                            return stringsFile
-                        }
-                    }
+    private fun checkContainsStrings(virtualFile: VirtualFile): Boolean {
+        virtualFile.inputStream.bufferedReader().useLines { lines ->
+            lines.forEach { line ->
+                if (line.contains("<string")) {
+                    return true
                 }
             }
-        return null
+        }
+        return false
+    }
+
+    private fun getTextFromStringsXml(xmlFile: VirtualFile): String {
+        val key = getStringName()
+        val document = FileDocumentManager.getInstance().getDocument(xmlFile) ?: return ""
+        val xml = document.text
+        return getNodeText(xml, key)
+    }
+
+    private fun checkXmlFileContainsKey(xmlFile: VirtualFile, key: String): Boolean {
+        val document = FileDocumentManager.getInstance().getDocument(xmlFile) ?: return false
+        val xml = document.text
+        return xml.contains("<string name=\"$key\">")
     }
 
     fun isXml(): Boolean {
@@ -132,6 +190,12 @@ class StringsScanner(private val actionEvent: AnActionEvent) {
 
     private fun getNodeName(text: String): String {
         val regex = "<string name=\"(.*?)\">".toRegex()
+        val matchResult = regex.find(text)
+        return matchResult?.groupValues?.get(1) ?: ""
+    }
+
+    private fun getNodeText(text: String, key: String): String {
+        val regex = "<string name=\"$key\">(.*?)</string>".toRegex()
         val matchResult = regex.find(text)
         return matchResult?.groupValues?.get(1) ?: ""
     }
