@@ -65,6 +65,10 @@ public class InsertStringsDialog extends JDialog {
         });
         table.setPreferredScrollableViewportSize(new Dimension(500, 200));
         table.setFillsViewportHeight(true);
+        TableColumn column = table.getColumnModel().getColumn(0);
+        column.setMaxWidth(150);
+        column.setMinWidth(100);
+        column.setPreferredWidth(100);
         setTabSingleCLickEdit();
     }
 
