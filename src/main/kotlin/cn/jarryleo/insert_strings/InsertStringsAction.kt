@@ -18,9 +18,14 @@ class InsertStringsAction : AnAction() {
                 object : OnStringsInsertListener {
                     override fun onInsert(stringName: String, stringsInfoList: Map<String, String>) {
                         val project = e.project ?: return
+                        val anchorName = if (stringName == nodeName) {
+                            anchorNodeName
+                        } else {
+                            nodeName
+                        }
                         StringsWriter(
                             project,
-                            anchorNodeName,
+                            anchorName,
                             stringName,
                             stringsInfoList,
                             stringsScanner.getStringsInfoList()
