@@ -66,9 +66,9 @@ public class InsertStringsDialog extends JDialog {
         table.setPreferredScrollableViewportSize(new Dimension(500, 200));
         table.setFillsViewportHeight(true);
         TableColumn column = table.getColumnModel().getColumn(0);
-        column.setMaxWidth(150);
+        column.setMaxWidth(200);
         column.setMinWidth(100);
-        column.setPreferredWidth(100);
+        column.setPreferredWidth(150);
         setTabSingleCLickEdit();
     }
 
@@ -87,7 +87,7 @@ public class InsertStringsDialog extends JDialog {
         EventQueue.invokeLater(() -> {
             InsertStringsDialog dialog = new InsertStringsDialog(name, languages, texts, listener);
             dialog.pack();
-            dialog.setSize(500, 500);
+            dialog.setSize(600, 500);
             final Dimension screenSize = Toolkit.getDefaultToolkit().getScreenSize();
             final int x = (screenSize.width - dialog.getWidth()) / 2;
             final int y = (screenSize.height - dialog.getHeight()) / 2;
