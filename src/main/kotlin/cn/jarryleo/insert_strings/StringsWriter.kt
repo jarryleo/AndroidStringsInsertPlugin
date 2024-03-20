@@ -10,8 +10,9 @@ import com.intellij.openapi.vfs.VirtualFile
  */
 class StringsWriter(
     private val project: Project,
-    private val anchorName: String,
     private val nodeName: String,
+    private val anchorName: String,
+    private val stringName: String,
     private val stringsInfoList: Map<String, String>,
     private val languagesInfoList: List<StringsInfo>
 ) {
@@ -28,8 +29,8 @@ class StringsWriter(
             if (text.isEmpty()) {
                 text = defaultText
             }
-            val node = "<string name=\"$nodeName\">$text</string>"
-            writeToXml(xmlFile, nodeName, node)
+            val node = "<string name=\"$stringName\">$text</string>"
+            writeToXml(xmlFile, stringName, node)
         }
     }
 
@@ -43,13 +44,25 @@ class StringsWriter(
             val start = xml.indexOf("<string name=\"$name\">")
             val end = xml.indexOf("</string>", start) + "</string>".length
             if (start != -1 && end != -1) {
+                //替换原节点
                 document.replaceString(start, end, node)
             } else {
-                //查找插入位置为 anchorName 节点的下面
+                //插入原节点下面
+                if (nodeName.isNotEmpty()) {
+                    val nodeStart = xml.indexOf("<string name=\"$nodeName\">")
+                    if (nodeStart != -1) {
+                        val nodeEnd = xml.indexOf("</string>", nodeStart) + "</string>".length
+                        if (nodeEnd != -1) {
+                            document.insertString(nodeEnd, "\n\t$node")
+                            return@runWriteCommandAction
+                        }
+                    }
+                }
+
+                //查找插入位置为 anchorName 节点的上面
                 val anchorStart = xml.indexOf("<string name=\"$anchorName\">")
-                val anchorEnd = xml.indexOf("</string>", anchorStart) + "</string>".length
-                if (anchorStart != -1 && anchorEnd != -1) {
-                    document.insertString(anchorEnd, "\n\t$node")
+                if (anchorStart != -1) {
+                    document.insertString(anchorStart, "$node\n\t")
                 } else {
                     //查找插入位置为 </resources> 节点的上面
                     val insertIndex = xml.indexOf("</resources>")

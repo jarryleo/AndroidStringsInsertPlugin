@@ -16,12 +16,12 @@ class StringsScanner(private val actionEvent: AnActionEvent) {
     private var isXmlFile = false
     private var selectText = "" //选中文本
     private var currentLineText = "" //当前行文本
-    private var preLineText = "" //上一行文本
+    private var nextNodeLineText = "" //下一个节点的一行文本
     val nodeName by lazy {  //当前节点名称
         getStringName()
     }
-    val anchorNodeName by lazy {  //当前锚点节点名称，一般是鼠标选中行的上一行节点
-        getNodeName(preLineText)
+    val anchorNodeName by lazy {  //当前锚点节点名称，当前鼠标的下一个节点
+        getNodeName(nextNodeLineText)
     }
 
     //多语言stings.xml文件信息
@@ -36,15 +36,16 @@ class StringsScanner(private val actionEvent: AnActionEvent) {
             val lineEndPosition = editor.caretModel.visualLineEnd
             currentLineText = editor.document.getText(TextRange(lineStartPosition, lineEndPosition))
             val line = editor.caretModel.logicalPosition.line
-            var preLine = line - 1
-            while (preLine > 0) {
-                val lineStartOffset = editor.document.getLineStartOffset(preLine)
-                val lineEndOffset = editor.document.getLineEndOffset(preLine)
-                preLineText = editor.document.getText(TextRange(lineStartOffset, lineEndOffset))
-                if (preLineText.trim().isNotEmpty()) {
+            var nextLine = line + 1
+            val lineCount = editor.document.lineCount
+            while (nextLine < lineCount) {
+                val lineStartOffset = editor.document.getLineStartOffset(nextLine)
+                val lineEndOffset = editor.document.getLineEndOffset(nextLine)
+                nextNodeLineText = editor.document.getText(TextRange(lineStartOffset, lineEndOffset))
+                if (getNodeName(nextNodeLineText).isNotEmpty()) {
                     break
                 }
-                preLine--
+                nextLine++
             }
         } ?: run {
             actionEvent.getData(CommonDataKeys.PSI_FILE)?.let { psiFile ->
