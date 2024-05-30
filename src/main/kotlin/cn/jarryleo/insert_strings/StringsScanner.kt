@@ -10,7 +10,15 @@ import com.intellij.openapi.vfs.VirtualFile
  * 通过用户点击的位置，扫描strings文件，并获取相关信息
  */
 @Suppress("unused")
-class StringsScanner(private val actionEvent: AnActionEvent) {
+class StringsScanner(
+    private val actionEvent: AnActionEvent? = null,
+    file: VirtualFile? = null,
+    private val nodeText: String? = null,
+) {
+
+    constructor(actionEvent: AnActionEvent?) : this(actionEvent, null)
+
+    constructor(file: VirtualFile?, nodeText: String?) : this(null, file, nodeText)
 
     private var currentFile: VirtualFile? = null
     private var isXmlFile = false
@@ -28,7 +36,19 @@ class StringsScanner(private val actionEvent: AnActionEvent) {
     private val stringsInfoList = ArrayList<StringsInfo>()
 
     init {
-        actionEvent.getData(CommonDataKeys.EDITOR)?.let { editor ->
+        actionEvent?.let {
+            getStringsFromEvent()
+        }
+        file?.let {
+            currentFile = it
+            selectText = nodeText ?: ""
+            isXmlFile = currentFile?.extension == "xml"
+        }
+        scanResDir()
+    }
+
+    private fun getStringsFromEvent() {
+        actionEvent?.getData(CommonDataKeys.EDITOR)?.let { editor ->
             currentFile = editor.virtualFile
             isXmlFile = currentFile?.extension == "xml"
             selectText = editor.selectionModel.selectedText ?: ""
@@ -48,12 +68,11 @@ class StringsScanner(private val actionEvent: AnActionEvent) {
                 nextLine++
             }
         } ?: run {
-            actionEvent.getData(CommonDataKeys.PSI_FILE)?.let { psiFile ->
+            actionEvent?.getData(CommonDataKeys.PSI_FILE)?.let { psiFile ->
                 currentFile = psiFile.virtualFile
                 isXmlFile = currentFile?.extension == "xml"
             }
         }
-        scanResDir()
     }
 
     private fun scanResDir() {

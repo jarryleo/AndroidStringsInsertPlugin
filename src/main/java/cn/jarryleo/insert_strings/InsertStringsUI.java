@@ -1,7 +1,10 @@
 package cn.jarryleo.insert_strings;
 
+import com.intellij.openapi.fileEditor.FileEditor;
+import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
+import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowFactory;
 import org.jetbrains.annotations.NotNull;
@@ -46,6 +49,22 @@ public class InsertStringsUI implements ToolWindowFactory, UiCallback {
                 insert();
             }
         });
+        copyButton.addActionListener(e -> InsertStringsManager.INSTANCE.copy());
+        pasteButton.addActionListener(e -> paste());
+    }
+
+    private void paste() {
+        FileEditor selectedEditor = FileEditorManager.getInstance(project).getSelectedEditor();
+        if (selectedEditor == null) {
+            Messages.showMessageDialog(
+                    "Please open a strings.xml first!",
+                    "Error",
+                    Messages.getInformationIcon()
+            );
+        } else {
+            VirtualFile file = selectedEditor.getFile();
+            InsertStringsManager.INSTANCE.paste(file);
+        }
     }
 
     private void insert() {
@@ -112,6 +131,4 @@ public class InsertStringsUI implements ToolWindowFactory, UiCallback {
         }
         defaultEditor.setClickCountToStart(1);
     }
-
-
 }

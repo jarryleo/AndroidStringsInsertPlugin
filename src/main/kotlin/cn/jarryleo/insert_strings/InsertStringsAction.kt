@@ -14,25 +14,6 @@ class InsertStringsAction : AnAction() {
             val languageList = stringsScanner.getLanguageList()
             val stringsList = stringsScanner.getStringsInfoList()
             InsertStringsManager.updateUI(nodeName, anchorNodeName, languageList, stringsList)
-            /*InsertStringsDialog.showDialog(
-                nodeName,
-                stringsScanner.getLanguageList().toTypedArray(),
-                stringsScanner.getStringsInfoList().map { it.text }.toTypedArray(),
-                object : OnStringsInsertListener {
-                    override fun onInsert(stringName: String, stringsInfoList: Map<String, String>) {
-                        val project = e.project ?: return
-
-                        StringsWriter(
-                            project,
-                            nodeName,
-                            anchorNodeName,
-                            stringName,
-                            stringsInfoList,
-                            stringsScanner.getStringsInfoList()
-                        ).write()
-                    }
-                }
-            )*/
         } else {
             showTips("Please select a string in the xml file.")
         }

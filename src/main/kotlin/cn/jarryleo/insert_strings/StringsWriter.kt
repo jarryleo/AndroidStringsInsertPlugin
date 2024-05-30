@@ -20,7 +20,7 @@ class StringsWriter(
     fun write() {
         val defaultText = stringsInfoList.getOrDefault("values", "")
         languagesInfoList.forEach { stringsInfo ->
-            val xmlFile = stringsInfo.stringsFile
+            val xmlFile = stringsInfo.stringsFile ?: return
             var text = languagesInfoList.find { it.language == stringsInfo.language }?.let {
                 stringsInfoList.getOrDefault(it.language, defaultText)
             } ?: run {

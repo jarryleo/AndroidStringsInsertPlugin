@@ -33,10 +33,17 @@
                     icon="AllIcons.Actions.EnableNewUi"/>
     </extensions>
     <actions>
-        <action id="InsertStringsAction" class="cn.jarryleo.insert_strings.InsertStringsAction" text="Insert Strings"
+        <action id="InsertStringsAction"
+                class="cn.jarryleo.insert_strings.InsertStringsAction"
+                text="Insert Strings"
+                popup="true"
                 description="Insert strings to xml">
             <add-to-group group-id="EditMenu" anchor="last"/>
             <add-to-group group-id="EditorPopupMenu"/>
+            <keyboard-shortcut
+                    keymap="$default"
+                    first-keystroke="control INSERT"
+                    second-keystroke="control shift INSERT"/>
         </action>
     </actions>
 </idea-plugin>
