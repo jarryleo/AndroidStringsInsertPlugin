@@ -3,14 +3,40 @@ package cn.jarryleo.insert_strings
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 
-object InsertStringsManager : OnStringsInsertListener {
+class InsertStringsManager {
+
+    companion object {
+        private val instance = mutableMapOf<Project, InsertStringsManager>()
+
+        @JvmStatic
+        fun getInstance(project: Project): InsertStringsManager {
+            return instance.getOrPut(project) {
+                InsertStringsManager()
+            }
+        }
+
+        @JvmStatic
+        fun updateUI(
+            project: Project,
+            nodeName: String,
+            anchorNodeName: String,
+            languages: List<String>?,
+            stringsList: List<StringsInfo>?
+        ) {
+            getInstance(project).updateUI(nodeName, anchorNodeName, languages, stringsList)
+        }
+    }
+
     private var nodeName = ""
     private var anchorNodeName = ""
     var languages: List<String>? = emptyList()
-    var stringsList: List<StringsInfo>? = emptyList()
-    var uiCallBack: UiCallback? = null
+    private var stringsList: List<StringsInfo>? = emptyList()
+    private var uiCallBack: UiCallback? = null
 
-    @JvmStatic
+    fun setUiCallBack(uiCallBack: UiCallback) {
+        this.uiCallBack = uiCallBack
+    }
+
     fun updateUI(nodeName: String, anchorNodeName: String, languages: List<String>?, stringsList: List<StringsInfo>?) {
         this.nodeName = nodeName
         this.anchorNodeName = anchorNodeName
@@ -19,7 +45,7 @@ object InsertStringsManager : OnStringsInsertListener {
         uiCallBack?.updateUI(nodeName, languages, stringsList)
     }
 
-    override fun onInsert(project: Project, stringName: String, stringsInfoList: Map<String, String>) {
+    fun insert(project: Project, stringName: String, stringsInfoList: Map<String, String>) {
         StringsWriter(
             project,
             nodeName,

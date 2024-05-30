@@ -6,6 +6,7 @@ import com.intellij.openapi.ui.Messages
 
 class InsertStringsAction : AnAction() {
     override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
         val stringsScanner = StringsScanner(e)
         val xml = stringsScanner.isXml()
         if (xml) {
@@ -13,7 +14,7 @@ class InsertStringsAction : AnAction() {
             val anchorNodeName = stringsScanner.anchorNodeName
             val languageList = stringsScanner.getLanguageList()
             val stringsList = stringsScanner.getStringsInfoList()
-            InsertStringsManager.updateUI(nodeName, anchorNodeName, languageList, stringsList)
+            InsertStringsManager.updateUI(project, nodeName, anchorNodeName, languageList, stringsList)
         } else {
             showTips("Please select a string in the xml file.")
         }

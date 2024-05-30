@@ -5,8 +5,6 @@ import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.vfs.VirtualFile;
-import com.intellij.openapi.wm.ToolWindow;
-import com.intellij.openapi.wm.ToolWindowFactory;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -19,7 +17,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-public class InsertStringsUI implements ToolWindowFactory, UiCallback {
+public class InsertStringsUI implements UiCallback {
     private JTable table;
     private JPanel rootPanel;
     private JLabel stringsName;
@@ -28,12 +26,16 @@ public class InsertStringsUI implements ToolWindowFactory, UiCallback {
     private JButton copyButton;
     private JButton pasteButton;
     private Project project;
+    private InsertStringsManager insertStringsManager;
 
-    @Override
-    public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
-        toolWindow.getComponent().add(rootPanel);
+    public void createToolWindowContent(Project project) {
         this.project = project;
-        InsertStringsManager.INSTANCE.setUiCallBack(this);
+        insertStringsManager = InsertStringsManager.getInstance(project);
+        insertStringsManager.setUiCallBack(this);
+    }
+
+    public JPanel getRootPanel() {
+        return rootPanel;
     }
 
     public InsertStringsUI() {
@@ -49,7 +51,7 @@ public class InsertStringsUI implements ToolWindowFactory, UiCallback {
                 insert();
             }
         });
-        copyButton.addActionListener(e -> InsertStringsManager.INSTANCE.copy());
+        copyButton.addActionListener(e -> insertStringsManager.copy());
         pasteButton.addActionListener(e -> paste());
     }
 
@@ -63,12 +65,12 @@ public class InsertStringsUI implements ToolWindowFactory, UiCallback {
             );
         } else {
             VirtualFile file = selectedEditor.getFile();
-            InsertStringsManager.INSTANCE.paste(file);
+            insertStringsManager.paste(file);
         }
     }
 
     private void insert() {
-        List<String> languages = InsertStringsManager.INSTANCE.getLanguages();
+        List<String> languages = insertStringsManager.getLanguages();
         if (languages == null) {
             Messages.showMessageDialog(
                     "Please open a strings.xml first!",
@@ -84,7 +86,7 @@ public class InsertStringsUI implements ToolWindowFactory, UiCallback {
             String text = (String) table.getValueAt(i, 1);
             map.put(language, text);
         }
-        InsertStringsManager.INSTANCE.onInsert(project, nameText, map);
+        insertStringsManager.insert(project, nameText, map);
     }
 
     @Override
