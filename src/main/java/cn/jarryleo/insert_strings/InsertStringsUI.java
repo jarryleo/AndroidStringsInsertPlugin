@@ -91,9 +91,10 @@ public class InsertStringsUI implements UiCallback {
 
     @Override
     public void updateUI(@NotNull String nodeName,
-                         @Nullable List<String> languages,
                          @Nullable List<StringsInfo> stringsList) {
-        if (languages == null || stringsList == null) return;
+        if (stringsList == null) return;
+        stringsList.removeIf(stringsInfo -> stringsInfo.getLanguage().isEmpty());
+        List<String> languages = stringsList.stream().map(StringsInfo::getLanguage).toList();
         List<String> strings = stringsList.stream().map(StringsInfo::getText).toList();
         initUI(nodeName, languages, strings);
     }

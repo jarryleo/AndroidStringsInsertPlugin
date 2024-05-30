@@ -12,9 +12,8 @@ class InsertStringsAction : AnAction() {
         if (xml) {
             val nodeName = stringsScanner.nodeName
             val anchorNodeName = stringsScanner.anchorNodeName
-            val languageList = stringsScanner.getLanguageList()
             val stringsList = stringsScanner.getStringsInfoList()
-            InsertStringsManager.updateUI(project, nodeName, anchorNodeName, languageList, stringsList)
+            InsertStringsManager.updateUI(project, nodeName, anchorNodeName, stringsList)
         } else {
             showTips("Please select a string in the xml file.")
         }

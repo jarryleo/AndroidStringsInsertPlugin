@@ -20,29 +20,27 @@ class InsertStringsManager {
             project: Project,
             nodeName: String,
             anchorNodeName: String,
-            languages: List<String>?,
             stringsList: List<StringsInfo>?
         ) {
-            getInstance(project).updateUI(nodeName, anchorNodeName, languages, stringsList)
+            getInstance(project).updateUI(nodeName, anchorNodeName, stringsList)
         }
     }
 
     private var nodeName = ""
     private var anchorNodeName = ""
-    var languages: List<String>? = emptyList()
     private var stringsList: List<StringsInfo>? = emptyList()
+    val languages get() = stringsList?.map { it.language }
     private var uiCallBack: UiCallback? = null
 
     fun setUiCallBack(uiCallBack: UiCallback) {
         this.uiCallBack = uiCallBack
     }
 
-    fun updateUI(nodeName: String, anchorNodeName: String, languages: List<String>?, stringsList: List<StringsInfo>?) {
+    fun updateUI(nodeName: String, anchorNodeName: String, stringsList: List<StringsInfo>?) {
         this.nodeName = nodeName
         this.anchorNodeName = anchorNodeName
-        this.languages = languages
         this.stringsList = stringsList
-        uiCallBack?.updateUI(nodeName, languages, stringsList)
+        uiCallBack?.updateUI(nodeName, stringsList)
     }
 
     fun insert(project: Project, stringName: String, stringsInfoList: Map<String, String>) {
@@ -81,7 +79,6 @@ class InsertStringsManager {
         updateUI(
             nodeName,
             anchor,
-            languages,
             scanner.getStringsInfoList()
         )
     }
