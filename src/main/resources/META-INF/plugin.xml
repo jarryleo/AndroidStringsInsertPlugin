@@ -26,7 +26,11 @@
     <!-- Extension points defined by the plugin.
          Read more: https://plugins.jetbrains.com/docs/intellij/plugin-extension-points.html -->
     <extensions defaultExtensionNs="com.intellij">
-
+        <toolWindow factoryClass="cn.jarryleo.insert_strings.InsertStringsUI"
+                    id="InsertStrings"
+                    canCloseContents="false"
+                    anchor="right"
+                    icon="AllIcons.Actions.EnableNewUi"/>
     </extensions>
     <actions>
         <action id="InsertStringsAction" class="cn.jarryleo.insert_strings.InsertStringsAction" text="Insert Strings"

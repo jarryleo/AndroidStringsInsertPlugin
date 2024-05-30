@@ -1,11 +1,11 @@
 plugins {
     id("java")
-    id("org.jetbrains.kotlin.jvm") version "1.9.21"
-    id("org.jetbrains.intellij") version "1.16.1"
+    id("org.jetbrains.kotlin.jvm") version "1.9.23"
+    id("org.jetbrains.intellij") version "1.17.3"
 }
 
 group = "cn.jarryleo"
-version = "1.1"
+version = "1.2"
 
 repositories {
     mavenCentral()
@@ -26,14 +26,9 @@ repositories {
 //JPS - JPS-only
 //GW - Gateway
 
-//编译器文件夹路径，根据自己的实际情况修改
-val idePath = "D:/Android/Android Studio"
-
 intellij {
-    //version.set("2023.1.5")
-    localPath.set(idePath)
-    type.set("AI") // Target IDE Platform
-
+    version.set("2023.2.6")
+    type.set("IC") // Target IDE Platform
     plugins.set(listOf("java", "Kotlin"))
 }
 
@@ -60,9 +55,5 @@ tasks {
 
     publishPlugin {
         token.set(System.getenv("PUBLISH_TOKEN"))
-    }
-
-    runIde {
-        ideDir.set(file(idePath))
     }
 }

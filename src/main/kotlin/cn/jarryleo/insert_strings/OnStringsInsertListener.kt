@@ -1,5 +1,7 @@
 package cn.jarryleo.insert_strings
 
+import com.intellij.openapi.project.Project
+
 interface OnStringsInsertListener {
-    fun onInsert(stringName: String, stringsInfoList: Map<String, String>)
+    fun onInsert(project: Project, stringName: String, stringsInfoList: Map<String, String>)
 }

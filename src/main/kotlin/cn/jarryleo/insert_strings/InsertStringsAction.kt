@@ -11,7 +11,10 @@ class InsertStringsAction : AnAction() {
         if (xml) {
             val nodeName = stringsScanner.nodeName
             val anchorNodeName = stringsScanner.anchorNodeName
-            InsertStringsDialog.showDialog(
+            val languageList = stringsScanner.getLanguageList()
+            val stringsList = stringsScanner.getStringsInfoList()
+            InsertStringsManager.updateUI(nodeName, anchorNodeName, languageList, stringsList)
+            /*InsertStringsDialog.showDialog(
                 nodeName,
                 stringsScanner.getLanguageList().toTypedArray(),
                 stringsScanner.getStringsInfoList().map { it.text }.toTypedArray(),
@@ -29,7 +32,7 @@ class InsertStringsAction : AnAction() {
                         ).write()
                     }
                 }
-            )
+            )*/
         } else {
             showTips("Please select a string in the xml file.")
         }
