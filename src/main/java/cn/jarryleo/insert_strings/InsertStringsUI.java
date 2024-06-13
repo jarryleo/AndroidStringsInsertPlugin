@@ -5,6 +5,7 @@ import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.openapi.wm.ToolWindow;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -18,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 
 public class InsertStringsUI implements UiCallback {
+    private final ToolWindow toolWindow;
     private JTable table;
     private JPanel rootPanel;
     private JLabel stringsName;
@@ -38,7 +40,8 @@ public class InsertStringsUI implements UiCallback {
         return rootPanel;
     }
 
-    public InsertStringsUI() {
+    public InsertStringsUI(ToolWindow toolWindow) {
+        this.toolWindow = toolWindow;
         insertButton.addActionListener(e -> {
             String nameText = stringNameText.getText();
             if (nameText.isEmpty()) {
@@ -97,6 +100,7 @@ public class InsertStringsUI implements UiCallback {
         List<String> languages = stringsList.stream().map(StringsInfo::getLanguage).toList();
         List<String> strings = stringsList.stream().map(StringsInfo::getText).toList();
         initUI(nodeName, languages, strings);
+        toolWindow.show();
     }
 
     private void initUI(String name, List<String> languages, List<String> texts) {
