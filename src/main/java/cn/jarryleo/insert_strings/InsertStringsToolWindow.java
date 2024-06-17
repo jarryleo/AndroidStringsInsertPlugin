@@ -8,8 +8,10 @@ import org.jetbrains.annotations.NotNull;
 public class InsertStringsToolWindow implements ToolWindowFactory {
     @Override
     public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
-        InsertStringsUI insertStringsUI = new InsertStringsUI();
+        InsertStringsUI insertStringsUI = new InsertStringsUI(toolWindow);
         insertStringsUI.createToolWindowContent(project);
         toolWindow.getComponent().add(insertStringsUI.getRootPanel());
     }
+
+
 }
