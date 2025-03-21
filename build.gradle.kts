@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "cn.jarryleo"
-version = "1.2"
+version = "1.3"
 
 repositories {
     mavenCentral()
@@ -44,7 +44,7 @@ tasks {
 
     patchPluginXml {
         sinceBuild.set("231")
-        untilBuild.set("241.*")
+        untilBuild.set("243.*")
     }
 
     signPlugin {
