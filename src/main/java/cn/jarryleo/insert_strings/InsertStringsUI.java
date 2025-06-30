@@ -10,9 +10,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.*;
-import javax.swing.table.DefaultTableModel;
-import javax.swing.table.TableColumn;
-import javax.swing.table.TableColumnModel;
+import javax.swing.table.*;
 import java.awt.*;
 import java.util.HashMap;
 import java.util.List;
@@ -106,12 +104,13 @@ public class InsertStringsUI implements UiCallback {
     private void initUI(String name, List<String> languages, List<String> texts) {
         stringsName.setText("<string name=");
         stringNameText.setText(name);
-        String[] columnNames = {"language", "text"};
+        String[] columnNames = {"language", "text", "Clear"};
         int size = languages.size();
-        Object[][] data = new Object[size][2];
+        Object[][] data = new Object[size][3];
         for (int i = 0; i < size; i++) {
             data[i][0] = languages.get(i);
             data[i][1] = texts.get(i);
+            data[i][2] = "Clear";
         }
         table.setModel(new DefaultTableModel(data, columnNames) {
             @Override
@@ -126,6 +125,15 @@ public class InsertStringsUI implements UiCallback {
         column.setMinWidth(100);
         column.setPreferredWidth(150);
         setTabSingleCLickEdit();
+
+        // 获取第三列并应用自定义渲染/编辑器
+        TableColumn clearColumn = table.getColumnModel().getColumn(2);
+        clearColumn.setCellRenderer(new ButtonRenderer());
+        clearColumn.setCellEditor(new ButtonEditor());
+
+        // 调整列宽
+        clearColumn.setMaxWidth(80);
+        clearColumn.setMinWidth(60);
     }
 
     private void setTabSingleCLickEdit() {
@@ -137,5 +145,45 @@ public class InsertStringsUI implements UiCallback {
             column.setCellEditor(defaultEditor);
         }
         defaultEditor.setClickCountToStart(1);
+    }
+
+    // 按钮渲染器（显示按钮样式）
+    private static class ButtonRenderer extends JButton implements TableCellRenderer {
+        public ButtonRenderer() {
+            setOpaque(true);
+        }
+        @Override
+        public Component getTableCellRendererComponent(JTable table, Object value,
+                                                       boolean isSelected, boolean hasFocus, int row, int column) {
+            setText("Clear");
+            return this;
+        }
+    }
+
+    // 按钮编辑器（处理点击事件）
+    private class ButtonEditor extends AbstractCellEditor implements TableCellEditor {
+        private final JButton button;
+        private int currentRow;
+
+        public ButtonEditor() {
+            button = new JButton("Clear");
+            button.addActionListener(e -> {
+                // 清除第二列文本
+                table.setValueAt("", currentRow, 1);
+                fireEditingStopped(); // 结束编辑状态
+            });
+        }
+
+        @Override
+        public Object getCellEditorValue() {
+            return "Clear";
+        }
+
+        @Override
+        public Component getTableCellEditorComponent(JTable table, Object value,
+                                                     boolean isSelected, int row, int column) {
+            currentRow = row; // 记录当前行
+            return button;
+        }
     }
 }

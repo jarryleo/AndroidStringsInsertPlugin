@@ -1,11 +1,11 @@
 plugins {
     id("java")
-    id("org.jetbrains.kotlin.jvm") version "1.9.23"
+    id("org.jetbrains.kotlin.jvm") version "2.1.0"
     id("org.jetbrains.intellij") version "1.17.3"
 }
 
 group = "cn.jarryleo"
-version = "1.3"
+version = "1.5"
 
 repositories {
     mavenCentral()
@@ -27,9 +27,9 @@ repositories {
 //GW - Gateway
 
 intellij {
-    version.set("2023.2.6")
-    type.set("IC") // Target IDE Platform
-    plugins.set(listOf("java", "Kotlin"))
+    version = "2025.1.3"
+    type = "IC"
+    plugins = listOf("java", "Kotlin")
 }
 
 tasks {
@@ -44,7 +44,7 @@ tasks {
 
     patchPluginXml {
         sinceBuild.set("231")
-        untilBuild.set("243.*")
+        //untilBuild.set("251.*")
     }
 
     signPlugin {
