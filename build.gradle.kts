@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     id("java")
     id("org.jetbrains.kotlin.jvm") version "2.1.0"
@@ -5,7 +7,7 @@ plugins {
 }
 
 group = "cn.jarryleo"
-version = "1.5"
+version = "1.7"
 
 repositories {
     mavenCentral()
@@ -27,7 +29,7 @@ repositories {
 //GW - Gateway
 
 intellij {
-    version = "2025.1.3"
+    version = "2025.3.1"
     type = "IC"
     plugins = listOf("java", "Kotlin")
 }
@@ -39,12 +41,12 @@ tasks {
         targetCompatibility = "17"
     }
     withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
-        kotlinOptions.jvmTarget = "17"
+        compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
     }
 
     patchPluginXml {
         sinceBuild.set("231")
-        //untilBuild.set("251.*")
+        untilBuild.set("253.*")
     }
 
     signPlugin {

@@ -11,10 +11,10 @@
       </option>
       <option name="taskNames">
         <list>
-          <option value="runIde" />
+          <option value="build" />
         </list>
       </option>
-      <option name="vmOptions" value="-ea -Xmx4096m" />
+      <option name="vmOptions" value="" />
     </ExternalSystemSettings>
     <ExternalSystemDebugServerProcess>true</ExternalSystemDebugServerProcess>
     <ExternalSystemReattachDebugProcess>true</ExternalSystemReattachDebugProcess>
