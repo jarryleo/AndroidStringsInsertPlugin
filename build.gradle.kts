@@ -29,7 +29,7 @@ repositories {
 //GW - Gateway
 
 intellij {
-    version = "2025.3.1"
+    version = "2025.1.3"
     type = "IC"
     plugins = listOf("java", "Kotlin")
 }
@@ -40,6 +40,11 @@ tasks {
         sourceCompatibility = "17"
         targetCompatibility = "17"
     }
+
+    buildSearchableOptions {
+        enabled = false
+    }
+
     withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
         compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
     }
