@@ -50,7 +50,7 @@ tasks {
     }
 
     patchPluginXml {
-        sinceBuild.set("231")
+        sinceBuild.set("251")
         untilBuild.set("253.*")
     }
 
@@ -62,5 +62,10 @@ tasks {
 
     publishPlugin {
         token.set(System.getenv("PUBLISH_TOKEN"))
+    }
+
+    dependencies {
+        //依赖 阿里云 百炼 大模型
+        implementation("com.alibaba:dashscope-sdk-java:2.22.9")
     }
 }
