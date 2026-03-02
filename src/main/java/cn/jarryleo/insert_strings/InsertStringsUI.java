@@ -239,6 +239,9 @@ public class InsertStringsUI implements UiCallback {
                     }
                 }
                 String targetLanguage = (String) table.getValueAt(currentRow, 0);
+                if (targetLanguage.equalsIgnoreCase("values")) {
+                    targetLanguage = "values-en";
+                }
                 String result = AITranslator.translate(targetLanguage, sourceText);
                 table.setValueAt(result, currentRow, 1);
                 fireEditingStopped(); // 结束编辑状态
