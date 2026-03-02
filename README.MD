@@ -19,3 +19,8 @@ C:\Users\pc\.gradle\caches\modules-2\files-2.1\com.jetbrains.intellij.idea\ideaI
     </dependencies>
   </plugin>
 ```
+
+编译插件指令
+```
+./gradlew buildPlugin
+```

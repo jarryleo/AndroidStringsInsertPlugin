@@ -4,8 +4,6 @@ import com.alibaba.dashscope.aigc.generation.Generation
 import com.alibaba.dashscope.aigc.generation.GenerationParam
 import com.alibaba.dashscope.common.Message
 import com.alibaba.dashscope.common.Role
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.launch
 
 object AITranslator {
     const val API_KEY = "sk-007cac5b259149738c5b8f238fc54d2b"
@@ -13,7 +11,8 @@ object AITranslator {
     /**
      * https://bailian.console.aliyun.com/cn-beijing/?tab=model#/api-key
      */
-    suspend fun translate(code: String, text: String): String {
+    @JvmStatic
+    fun translate(code: String, text: String): String {
         val systemMsg = Message.builder()
             .role(Role.SYSTEM.value)
             .content("你是一个专业的翻译，为开发安卓APP提供国际化翻译服务，我传给你需要翻译的文本，和目标语言的缩写代码，帮我翻译成目标语言，请返回对应的翻译结果文本，不需要额外的解释，请返回纯文本结果")
@@ -35,13 +34,6 @@ object AITranslator {
             result.getOrNull()?.output?.choices?.firstOrNull()?.message?.content ?: ""
         } else {
             result.exceptionOrNull()?.message ?: ""
-        }
-    }
-
-    fun translate(code: String, text: String, callback: (String) -> Unit) {
-        GlobalScope.launch {
-            val result = translate(code, text)
-            callback(result)
         }
     }
 }

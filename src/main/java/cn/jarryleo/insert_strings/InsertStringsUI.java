@@ -104,13 +104,14 @@ public class InsertStringsUI implements UiCallback {
     private void initUI(String name, List<String> languages, List<String> texts) {
         stringsName.setText("<string name=");
         stringNameText.setText(name);
-        String[] columnNames = {"language", "text", "Clear"};
+        String[] columnNames = {"language", "text", "Clear", "AI"};
         int size = languages.size();
-        Object[][] data = new Object[size][3];
+        Object[][] data = new Object[size][4];
         for (int i = 0; i < size; i++) {
             data[i][0] = languages.get(i);
             data[i][1] = texts.get(i);
             data[i][2] = "Clear";
+            data[i][3] = "AI";
         }
         table.setModel(new DefaultTableModel(data, columnNames) {
             @Override
@@ -128,12 +129,19 @@ public class InsertStringsUI implements UiCallback {
 
         // 获取第三列并应用自定义渲染/编辑器
         TableColumn clearColumn = table.getColumnModel().getColumn(2);
-        clearColumn.setCellRenderer(new ButtonRenderer());
-        clearColumn.setCellEditor(new ButtonEditor());
-
+        clearColumn.setCellRenderer(new ClearButtonRenderer());
+        clearColumn.setCellEditor(new ClearButtonEditor());
         // 调整列宽
         clearColumn.setMaxWidth(80);
         clearColumn.setMinWidth(60);
+
+        // 获取第四列并应用自定义渲染/编辑器
+        TableColumn aiColumn = table.getColumnModel().getColumn(3);
+        aiColumn.setCellRenderer(new AIButtonRenderer());
+        aiColumn.setCellEditor(new AIButtonEditor());
+        // 调整列宽
+        aiColumn.setMaxWidth(80);
+        aiColumn.setMinWidth(60);
     }
 
     private void setTabSingleCLickEdit() {
@@ -148,24 +156,31 @@ public class InsertStringsUI implements UiCallback {
     }
 
     // 按钮渲染器（显示按钮样式）
-    private static class ButtonRenderer extends JButton implements TableCellRenderer {
-        public ButtonRenderer() {
+    private static class ClearButtonRenderer extends JButton implements TableCellRenderer {
+        public ClearButtonRenderer() {
             setOpaque(true);
         }
+
         @Override
-        public Component getTableCellRendererComponent(JTable table, Object value,
-                                                       boolean isSelected, boolean hasFocus, int row, int column) {
+        public Component getTableCellRendererComponent(
+                JTable table,
+                Object value,
+                boolean isSelected,
+                boolean hasFocus,
+                int row,
+                int column
+        ) {
             setText("Clear");
             return this;
         }
     }
 
     // 按钮编辑器（处理点击事件）
-    private class ButtonEditor extends AbstractCellEditor implements TableCellEditor {
+    private class ClearButtonEditor extends AbstractCellEditor implements TableCellEditor {
         private final JButton button;
         private int currentRow;
 
-        public ButtonEditor() {
+        public ClearButtonEditor() {
             button = new JButton("Clear");
             button.addActionListener(e -> {
                 // 清除第二列文本
@@ -177,6 +192,62 @@ public class InsertStringsUI implements UiCallback {
         @Override
         public Object getCellEditorValue() {
             return "Clear";
+        }
+
+        @Override
+        public Component getTableCellEditorComponent(JTable table, Object value,
+                                                     boolean isSelected, int row, int column) {
+            currentRow = row; // 记录当前行
+            return button;
+        }
+    }
+
+    // 按钮渲染器（显示按钮样式）
+    private static class AIButtonRenderer extends JButton implements TableCellRenderer {
+        public AIButtonRenderer() {
+            setOpaque(true);
+        }
+
+        @Override
+        public Component getTableCellRendererComponent(
+                JTable table,
+                Object value,
+                boolean isSelected,
+                boolean hasFocus,
+                int row,
+                int column
+        ) {
+            setText("AI");
+            return this;
+        }
+    }
+
+    // 按钮编辑器（处理点击事件）
+    private class AIButtonEditor extends AbstractCellEditor implements TableCellEditor {
+        private final JButton button;
+        private int currentRow;
+
+        public AIButtonEditor() {
+            button = new JButton("AI");
+            button.addActionListener(e -> {
+                String sourceText = "";
+                for (int i = 0; i < table.getRowCount(); i++) {
+                    String text = (String) table.getValueAt(i, 1);
+                    if (text != null && !text.isEmpty()) {
+                        sourceText = text;
+                        break;
+                    }
+                }
+                String targetLanguage = (String) table.getValueAt(currentRow, 0);
+                String result = AITranslator.translate(targetLanguage, sourceText);
+                table.setValueAt(result, currentRow, 1);
+                fireEditingStopped(); // 结束编辑状态
+            });
+        }
+
+        @Override
+        public Object getCellEditorValue() {
+            return "AI";
         }
 
         @Override
