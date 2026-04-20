@@ -1,39 +1,45 @@
 package cn.jarryleo.insert_strings
 
-import com.alibaba.dashscope.aigc.generation.Generation
-import com.alibaba.dashscope.aigc.generation.GenerationParam
-import com.alibaba.dashscope.common.Message
-import com.alibaba.dashscope.common.Role
+import ai.z.openapi.ZhipuAiClient
+import ai.z.openapi.service.model.ChatCompletionCreateParams
+import ai.z.openapi.service.model.ChatMessage
+import ai.z.openapi.service.model.ChatMessageRole
+import ai.z.openapi.service.model.MessageContent
 
-object AITranslator {
-    const val API_KEY = "sk-007cac5b259149738c5b8f238fc54d2b"
 
-    /**
-     * https://bailian.console.aliyun.com/cn-beijing/?tab=model#/api-key
-     */
-    @JvmStatic
-    fun translate(code: String, text: String): String {
-        val systemMsg = Message.builder()
-            .role(Role.SYSTEM.value)
-            .content("你是一个专业的翻译，为开发安卓APP提供国际化翻译服务，我传给你需要翻译的文本，和目标语言的缩写代码，帮我翻译成目标语言，请返回对应的翻译结果文本，不需要额外的解释，请返回纯文本结果")
-            .build()
-        val userMsg = Message.builder()
-            .role(Role.USER.value)
-            .content("目标语言代码：$code，需要翻译文本：$text")
-            .build()
-        val param = GenerationParam.builder()
+object AITranslator : AITranslatorInterface {
+    const val API_KEY = "d88655ea4b14430d8e91bbade358c768.Did1MROvve4K3Hhg"
+
+    private val client by lazy {
+        ZhipuAiClient.builder().ofZHIPU()
             .apiKey(API_KEY)
-            // 模型列表：https://help.aliyun.com/model-studio/getting-started/models
-            .model("qwen-plus")
-            .messages(listOf(systemMsg, userMsg))
-            .resultFormat(GenerationParam.ResultFormat.MESSAGE)
             .build()
-        val gen = Generation()
-        val result = runCatching { gen.call(param) }
-        return if (result.isSuccess) {
-            result.getOrNull()?.output?.choices?.firstOrNull()?.message?.content ?: ""
-        } else {
-            result.exceptionOrNull()?.message ?: ""
-        }
+    }
+
+    override fun translate(code: String, text: String): String {
+        return runCatching {
+            val systemMsg = ChatMessage.builder()
+                .role(ChatMessageRole.SYSTEM.value())
+                .content("你是一个专业的翻译，为开发安卓APP提供国际化翻译服务，我传给你需要翻译的文本，和目标语言的缩写代码，帮我翻译成目标语言，翻译风格要符合APP使用环境；请返回对应的翻译结果文本，不需要额外的解释，请返回纯文本结果")
+                .build()
+            val userMsg = ChatMessage.builder()
+                .role(ChatMessageRole.USER.value())
+                .content("目标语言代码：$code，需要翻译文本：$text")
+                .build()
+            val request = ChatCompletionCreateParams.builder()
+                .model("GLM-4.7-Flash")
+                .messages(listOf(systemMsg, userMsg))
+                .stream(false)
+                .temperature(0.3f)
+                .maxTokens(4096)
+                .build()
+            val response = client.chat().createChatCompletion(request)
+            val content = response.data.choices.firstOrNull()?.message?.content ?: ""
+            when (content) {
+                is String -> content
+                is MessageContent -> content.text
+                else -> ""
+            }
+        }.getOrNull() ?: ""
     }
 }

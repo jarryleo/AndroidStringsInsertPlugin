@@ -38,7 +38,9 @@ intellij {
 
 dependencies {
     //依赖 阿里云 百炼 大模型
-    implementation("com.alibaba:dashscope-sdk-java:2.22.9")
+    //implementation("com.alibaba:dashscope-sdk-java:2.22.9")
+    //智谱AI
+    implementation("ai.z.openapi:zai-sdk:0.3.3")
 }
 
 tasks {

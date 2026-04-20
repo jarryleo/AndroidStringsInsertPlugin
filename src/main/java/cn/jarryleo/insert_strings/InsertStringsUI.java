@@ -6,8 +6,6 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.ToolWindow;
-import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
 
 import javax.swing.*;
 import javax.swing.table.*;
@@ -91,8 +89,8 @@ public class InsertStringsUI implements UiCallback {
     }
 
     @Override
-    public void updateUI(@NotNull String nodeName,
-                         @Nullable List<StringsInfo> stringsList) {
+    public void updateUI(String nodeName,
+                         List<StringsInfo> stringsList) {
         if (stringsList == null) return;
         stringsList.removeIf(stringsInfo -> stringsInfo.getLanguage().isEmpty());
         List<String> languages = stringsList.stream().map(StringsInfo::getLanguage).toList();
@@ -242,7 +240,7 @@ public class InsertStringsUI implements UiCallback {
                 if (targetLanguage.equalsIgnoreCase("values")) {
                     targetLanguage = "values-en";
                 }
-                String result = AITranslator.translate(targetLanguage, sourceText);
+                String result = AITranslator.INSTANCE.translate(targetLanguage, sourceText);
                 table.setValueAt(result, currentRow, 1);
                 fireEditingStopped(); // 结束编辑状态
             });
