@@ -4,11 +4,10 @@ plugins {
     id("java")
     id("org.jetbrains.kotlin.jvm") version "2.1.0"
     id("org.jetbrains.intellij") version "1.17.3"
-    id("com.github.johnrengelman.shadow") version "8.1.1" // 引入 shadow 插件
 }
 
 group = "cn.jarryleo"
-version = "2.0"
+version = "2.1"
 
 repositories {
     mavenCentral()
@@ -37,8 +36,6 @@ intellij {
 
 
 dependencies {
-    //依赖 阿里云 百炼 大模型
-    //implementation("com.alibaba:dashscope-sdk-java:2.22.9")
     //智谱AI
     implementation("ai.z.openapi:zai-sdk:0.3.3")
 }
@@ -71,26 +68,5 @@ tasks {
 
     publishPlugin {
         token.set(System.getenv("PUBLISH_TOKEN"))
-    }
-
-}
-
-tasks {
-    shadowJar {
-        archiveClassifier.set("") // 覆盖原始 jar
-        mergeServiceFiles() // 合并服务文件
-
-        // 排除 IntelliJ 平台已提供的依赖
-        exclude("META-INF/*.SF")
-        exclude("META-INF/*.DSA")
-        exclude("META-INF/*.RSA")
-
-        // 重定位包名避免冲突（可选）
-        relocate("com.alibaba", "shadow.com.alibaba")
-    }
-
-    // 让 build 任务依赖 shadowJar
-    build {
-        dependsOn(shadowJar)
     }
 }
