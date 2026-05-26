@@ -24,3 +24,4 @@ C:\Users\pc\.gradle\caches\modules-2\files-2.1\com.jetbrains.intellij.idea\ideaI
 ```
 ./gradlew buildPlugin
 ```
+编译好的插件在目录：build/distributions
