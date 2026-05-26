@@ -3,6 +3,7 @@ package cn.jarryleo.insert_strings
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.wm.ToolWindowManager
 
 class InsertStringsAction : AnAction() {
     override fun actionPerformed(e: AnActionEvent) {
@@ -14,6 +15,9 @@ class InsertStringsAction : AnAction() {
             val anchorNodeName = stringsScanner.anchorNodeName
             val stringsList = stringsScanner.getStringsInfoList()
             InsertStringsManager.updateUI(project, nodeName, anchorNodeName, stringsList)
+            ToolWindowManager.getInstance(project)
+                .getToolWindow("InsertStrings")
+                ?.show()
         } else {
             showTips("Please select a string in the xml file.")
         }

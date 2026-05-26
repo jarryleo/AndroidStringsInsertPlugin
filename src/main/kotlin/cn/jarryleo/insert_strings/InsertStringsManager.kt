@@ -34,6 +34,9 @@ class InsertStringsManager {
 
     fun setUiCallBack(uiCallBack: UiCallback) {
         this.uiCallBack = uiCallBack
+        if (nodeName.isNotEmpty() || stringsList?.isNotEmpty() == true) {
+            uiCallBack.updateUI(nodeName, stringsList)
+        }
     }
 
     fun updateUI(nodeName: String, anchorNodeName: String, stringsList: List<StringsInfo>?) {
