@@ -30,12 +30,13 @@
                     id="InsertStrings"
                     canCloseContents="false"
                     anchor="right"
-                    icon="AllIcons.Actions.EnableNewUi"/>
+                    icon="/META-INF/pluginIcon.svg"/>
     </extensions>
     <actions>
         <action id="InsertStringsAction"
                 class="cn.jarryleo.insert_strings.InsertStringsAction"
                 text="Insert Strings"
+                icon="/META-INF/pluginIcon.svg"
                 popup="true"
                 description="Insert strings to xml">
             <add-to-group group-id="EditMenu" anchor="last"/>
