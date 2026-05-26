@@ -168,7 +168,7 @@ class StringsScanner(
     private fun checkXmlFileContainsKey(xmlFile: VirtualFile, key: String): Boolean {
         val document = FileDocumentManager.getInstance().getDocument(xmlFile) ?: return false
         val xml = document.text
-        return xml.contains("<string name=\"$key\">")
+        return findStringNode(xml, key) != null
     }
 
     fun isXml(): Boolean {
@@ -202,15 +202,20 @@ class StringsScanner(
     }
 
     private fun getNodeName(text: String): String {
-        val regex = "<string name=\"(.*?)\">".toRegex()
+        val regex = """<string\b[^>]*\bname\s*=\s*(['"])(.*?)\1""".toRegex()
         val matchResult = regex.find(text)
-        return matchResult?.groupValues?.get(1) ?: ""
+        return matchResult?.groupValues?.get(2) ?: ""
     }
 
     private fun getNodeText(text: String, key: String): String {
-        val regex = "<string name=\"$key\">(.*?)</string>".toRegex()
-        val matchResult = regex.find(text)
-        return matchResult?.groupValues?.get(1) ?: ""
+        return findStringNode(text, key)?.groupValues?.get(2) ?: ""
+    }
+
+    private fun findStringNode(text: String, key: String): MatchResult? {
+        if (key.isEmpty()) return null
+        val escapedKey = Regex.escape(key)
+        val regex = """<string\b(?=[^>]*\bname\s*=\s*(['"])$escapedKey\1)[^>]*>([\s\S]*?)</string>""".toRegex()
+        return regex.find(text)
     }
 
     fun getLanguageList(): List<String> {
