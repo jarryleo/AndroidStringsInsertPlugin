@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import cn.jarryleo.insert_strings.ai.AgentCommandParser
 import cn.jarryleo.insert_strings.ai.ChatMessage
 
 @Composable
@@ -27,6 +28,7 @@ fun AiChatContent(
     onNewChat: () -> Unit,
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
+    onInsertCommand: (String) -> Unit,
     modifier: Modifier = Modifier,
     colors: IdeColors,
 ) {
@@ -96,6 +98,7 @@ fun AiChatContent(
                         ChatBubble(
                             message = msg,
                             colors = colors,
+                            onInsertCommand = onInsertCommand,
                         )
                     }
                     if (chatSending) {
@@ -151,28 +154,49 @@ fun AiChatContent(
 private fun ChatBubble(
     message: ChatMessage,
     colors: IdeColors,
+    onInsertCommand: (String) -> Unit,
 ) {
     val isUser = message.role == "user"
     val bubbleColor = if (isUser) colors.accent else colors.fieldBackground
     val textColor = if (isUser) colors.accentText else colors.text
     val alignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
+    val hasCommand = !isUser && AgentCommandParser.hasCommand(message.content)
+    val displayText = if (hasCommand) AgentCommandParser.extractDisplayText(message.content) else message.content
 
-    Box(
-        modifier = Modifier.fillMaxWidth(),
-        contentAlignment = alignment,
+    Column(
+        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
     ) {
         Box(
-            modifier = Modifier
-                .widthIn(max = 500.dp)
-                .background(bubbleColor, RoundedCornerShape(12.dp))
-                .border(width = 1.dp, color = colors.border, RoundedCornerShape(12.dp))
-                .padding(horizontal = 10.dp, vertical = 6.dp),
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = alignment,
         ) {
-            SelectionContainer {
-                Text(
-                    text = message.content,
-                    color = textColor,
-                    style = compactTextStyle(textColor),
+            Box(
+                modifier = Modifier
+                    .widthIn(max = 500.dp)
+                    .background(bubbleColor, RoundedCornerShape(12.dp))
+                    .border(width = 1.dp, color = colors.border, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+            ) {
+                SelectionContainer {
+                    Text(
+                        text = displayText,
+                        color = textColor,
+                        style = compactTextStyle(textColor),
+                    )
+                }
+            }
+        }
+        if (hasCommand) {
+            val commands = AgentCommandParser.parse(message.content)
+            commands.forEach { cmd ->
+                CompactButton(
+                    text = "Insert \"${cmd.name}\"",
+                    onClick = { onInsertCommand(message.content) },
+                    modifier = Modifier
+                        .padding(top = 4.dp)
+                        .widthIn(min = 120.dp),
+                    colors = colors,
+                    primary = true,
                 )
             }
         }

@@ -13,6 +13,7 @@ import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.InsertStringsManager
 import cn.jarryleo.insert_strings.xml.StringsInfo
 import cn.jarryleo.insert_strings.UiCallback
+import cn.jarryleo.insert_strings.ai.AgentCommandParser
 import cn.jarryleo.insert_strings.ai.AITranslator
 import cn.jarryleo.insert_strings.ai.AiProtocol
 import cn.jarryleo.insert_strings.ai.AiSettingsService
@@ -88,6 +89,7 @@ class InsertStringsUI(
                     onChatInputChange = { chatInput = it },
                     onSendChat = ::sendChat,
                     onNewChat = ::newChat,
+                    onInsertAgentCommand = ::insertFromAgent,
                 )
             }
         }
@@ -231,8 +233,9 @@ class InsertStringsUI(
         chatMessages.add(ChatMessage(role = "user", content = text))
         chatInput = ""
         chatSending = true
+        val context = buildChatContext()
         ApplicationManager.getApplication().executeOnPooledThread {
-            val reply = AITranslator.chat(chatMessages.toList())
+            val reply = AITranslator.chat(chatMessages.toList(), context)
             SwingUtilities.invokeLater {
                 chatMessages.add(ChatMessage(role = "assistant", content = reply))
                 chatSending = false
@@ -244,6 +247,52 @@ class InsertStringsUI(
         chatMessages.clear()
         chatInput = ""
         chatSending = false
+    }
+
+    private fun buildChatContext(): String {
+        val sb = StringBuilder()
+        val languages = insertStringsManager.languages
+        if (!languages.isNullOrEmpty()) {
+            sb.append("当前项目可用语言目录: ${languages.joinToString(", ")}\n")
+        }
+        if (stringName.isNotEmpty()) {
+            sb.append("当前正在编辑的字符串key: $stringName\n")
+        }
+        val currentTexts = rows.filter { it.text.isNotEmpty() }
+        if (currentTexts.isNotEmpty()) {
+            sb.append("当前已有的翻译内容:\n")
+            currentTexts.forEach { row ->
+                sb.append("  ${row.language}: ${row.text}\n")
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun insertFromAgent(response: String) {
+        val commands = AgentCommandParser.parse(response)
+        if (commands.isEmpty()) {
+            showToast("No insert command found")
+            return
+        }
+        val languages = insertStringsManager.languages
+        if (languages == null) {
+            Messages.showMessageDialog(
+                "Please open a strings.xml first!",
+                "Error",
+                Messages.getInformationIcon()
+            )
+            return
+        }
+        commands.forEach { cmd ->
+            insertStringsManager.insert(
+                project = project,
+                stringName = cmd.name,
+                stringsInfoList = cmd.translations
+            )
+        }
+        val names = commands.joinToString(", ") { it.name }
+        showToast("Inserted: $names")
+        showChat = false
     }
 
     override fun updateUI(
@@ -301,6 +350,7 @@ private fun InsertStringsContent(
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
     onNewChat: () -> Unit,
+    onInsertAgentCommand: (String) -> Unit,
 ) {
     val colors = rememberIdeColors()
 
@@ -342,6 +392,7 @@ private fun InsertStringsContent(
                         onNewChat = onNewChat,
                         onChatInputChange = onChatInputChange,
                         onSendChat = onSendChat,
+                        onInsertCommand = onInsertAgentCommand,
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )

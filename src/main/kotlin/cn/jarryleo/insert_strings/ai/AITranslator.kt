@@ -20,6 +20,25 @@ object AITranslator {
         "你是一个专业的翻译，为开发安卓APP提供国际化翻译服务，我传给你需要翻译的文本，和目标语言的缩写代码，帮我翻译成目标语言，请返回对应的翻译结果文本，不需要额外的解释，请返回纯文本结果"
     private const val CHAT_SYSTEM_PROMPT =
         "你是一个智能助手，请用简洁清晰的语言回答用户的问题。"
+    private const val AGENT_INSTRUCTION = """
+
+## 插入翻译指令
+你具备向Android项目strings.xml插入翻译文本的能力。当用户要求你插入、添加、写入翻译文本时，你必须使用以下XML格式输出（不要使用代码块包裹，直接输出）：
+<insert-strings name="字符串key">
+<item lang="values">默认文本（通常是英文或原始文本）</item>
+<item lang="values-zh">中文翻译</item>
+<item lang="values-ja">日语翻译</item>
+</insert-strings>
+
+规则：
+1. name属性是Android strings.xml中的string name，使用snake_case命名（如app_name、btn_submit）
+2. lang属性对应Android资源目录名：values（默认）、values-zh（中文）、values-ja（日语）、values-ko（韩语）、values-fr（法语）、values-de（德语）、values-es（西班牙语）、values-pt（葡萄牙语）、values-ru（俄语）、values-ar（阿拉伯语）等
+3. 如果用户指定了当前编辑的字符串key，优先使用该key
+4. 如果用户提供了可用语言列表，只输出这些语言的翻译
+5. 可以在回复中穿插文字说明，但<insert-strings>块必须完整独立
+6. 可以同时输出多个<insert-strings>块来插入多个字符串
+7. 翻译内容中如需使用XML特殊字符，请转义：&amp; &lt; &gt; &quot; &apos;
+"""
     private const val ANTHROPIC_VERSION = "2023-06-01"
     private val httpClient: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(20))
@@ -63,7 +82,7 @@ object AITranslator {
     }
 
     @JvmStatic
-    fun chat(messages: List<ChatMessage>): String {
+    fun chat(messages: List<ChatMessage>, context: String = ""): String {
         val settings = AiSettingsService.getInstance().state
         val protocol = AiProtocol.fromName(settings.protocol)
         val endpoint = AiEndpoint.completeChatEndpoint(settings.url, protocol)
@@ -76,8 +95,8 @@ object AITranslator {
 
         return runCatching {
             val body = when (protocol) {
-                AiProtocol.OPENAI -> openAiChatBody(model, messages)
-                AiProtocol.ANTHROPIC -> anthropicChatBody(model, messages)
+                AiProtocol.OPENAI -> openAiChatBody(model, messages, context)
+                AiProtocol.ANTHROPIC -> anthropicChatBody(model, messages, context)
             }
             val request = HttpRequest.newBuilder(URI.create(endpoint))
                 .timeout(Duration.ofSeconds(60))
@@ -99,7 +118,12 @@ object AITranslator {
         }
     }
 
-    private fun openAiChatBody(model: String, messages: List<ChatMessage>): String {
+    private fun buildSystemPrompt(context: String): String {
+        val base = CHAT_SYSTEM_PROMPT + AGENT_INSTRUCTION
+        return if (context.isNotBlank()) "$base\n## 当前上下文\n$context" else base
+    }
+
+    private fun openAiChatBody(model: String, messages: List<ChatMessage>, context: String): String {
         val root = JsonObject().apply {
             addProperty("model", model)
             add(
@@ -107,7 +131,7 @@ object AITranslator {
                 JsonArray().apply {
                     add(JsonObject().apply {
                         addProperty("role", "system")
-                        addProperty("content", CHAT_SYSTEM_PROMPT)
+                        addProperty("content", buildSystemPrompt(context))
                     })
                     messages.forEach { msg ->
                         add(JsonObject().apply {
@@ -121,10 +145,10 @@ object AITranslator {
         return root.toString()
     }
 
-    private fun anthropicChatBody(model: String, messages: List<ChatMessage>): String {
+    private fun anthropicChatBody(model: String, messages: List<ChatMessage>, context: String): String {
         val root = JsonObject().apply {
             addProperty("model", model)
-            addProperty("system", CHAT_SYSTEM_PROMPT)
+            addProperty("system", buildSystemPrompt(context))
             addProperty("max_tokens", 4096)
             add(
                 "messages",
