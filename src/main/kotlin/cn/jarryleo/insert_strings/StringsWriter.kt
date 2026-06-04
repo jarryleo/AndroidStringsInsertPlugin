@@ -29,7 +29,8 @@ class StringsWriter(
             if (text.isEmpty()) {
                 text = defaultText
             }
-            val node = "<string name=\"$stringName\">$text</string>"
+            val escapedText = AndroidStringEscaper.escape(text)
+            val node = "<string name=\"$stringName\">$escapedText</string>"
             writeToXml(xmlFile, stringName, node)
         }
     }
