@@ -1,14 +1,20 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     id("java")
-    id("org.jetbrains.kotlin.jvm") version "1.9.23"
+    id("org.jetbrains.kotlin.jvm") version "2.1.0"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.1.0"
+    id("org.jetbrains.compose") version "1.8.2"
     id("org.jetbrains.intellij") version "1.17.3"
+    id("com.github.johnrengelman.shadow") version "8.1.1" // 引入 shadow 插件
 }
 
 group = "cn.jarryleo"
-version = "1.3"
+version = "3.6"
 
 repositories {
     mavenCentral()
+    google()
 }
 
 // Configure Gradle IntelliJ Plugin
@@ -27,9 +33,14 @@ repositories {
 //GW - Gateway
 
 intellij {
-    version.set("2023.2.6")
-    type.set("IC") // Target IDE Platform
-    plugins.set(listOf("java", "Kotlin"))
+    version = "2025.1.3"
+    type = "IC"
+    plugins = listOf("java")
+}
+
+
+dependencies {
+    implementation(compose.desktop.currentOs)
 }
 
 tasks {
@@ -38,13 +49,18 @@ tasks {
         sourceCompatibility = "17"
         targetCompatibility = "17"
     }
+
+    buildSearchableOptions {
+        enabled = false
+    }
+
     withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
-        kotlinOptions.jvmTarget = "17"
+        compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
     }
 
     patchPluginXml {
-        sinceBuild.set("231")
-        untilBuild.set("243.*")
+        sinceBuild.set("251")
+        untilBuild.set(provider { null })
     }
 
     signPlugin {
@@ -55,5 +71,24 @@ tasks {
 
     publishPlugin {
         token.set(System.getenv("PUBLISH_TOKEN"))
+    }
+
+}
+
+tasks {
+    shadowJar {
+        archiveClassifier.set("") // 覆盖原始 jar
+        mergeServiceFiles() // 合并服务文件
+
+        // 排除 IntelliJ 平台已提供的依赖
+        exclude("META-INF/*.SF")
+        exclude("META-INF/*.DSA")
+        exclude("META-INF/*.RSA")
+
+    }
+
+    // 让 build 任务依赖 shadowJar
+    build {
+        dependsOn(shadowJar)
     }
 }

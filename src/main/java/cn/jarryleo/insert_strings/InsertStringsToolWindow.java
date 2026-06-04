@@ -1,5 +1,6 @@
 package cn.jarryleo.insert_strings;
 
+import cn.jarryleo.insert_strings.ui.InsertStringsUI;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowFactory;

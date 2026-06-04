@@ -1,5 +1,8 @@
 package cn.jarryleo.insert_strings
 
+import cn.jarryleo.insert_strings.xml.StringsInfo
+import cn.jarryleo.insert_strings.xml.StringsScanner
+import cn.jarryleo.insert_strings.xml.StringsWriter
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 
@@ -34,6 +37,9 @@ class InsertStringsManager {
 
     fun setUiCallBack(uiCallBack: UiCallback) {
         this.uiCallBack = uiCallBack
+        if (nodeName.isNotEmpty() || stringsList?.isNotEmpty() == true) {
+            uiCallBack.updateUI(nodeName, stringsList)
+        }
     }
 
     fun updateUI(nodeName: String, anchorNodeName: String, stringsList: List<StringsInfo>?) {
@@ -64,9 +70,9 @@ class InsertStringsManager {
         ClipboardManager.setSysClipboardText(clipInfo.toXml())
     }
 
-    fun paste(file: VirtualFile) {
+    fun paste(file: VirtualFile): Boolean {
         val text = ClipboardManager.getSysClipboardText()
-        val clipInfo = ClipInfo.fromXml(text) ?: return
+        val clipInfo = ClipInfo.fromXml(text) ?: return false
         val nodeName = clipInfo.node
         val anchor = clipInfo.anchor
         val languages = clipInfo.value.keys.toList()
@@ -81,5 +87,6 @@ class InsertStringsManager {
             anchor,
             scanner.getStringsInfoList()
         )
+        return true
     }
 }
