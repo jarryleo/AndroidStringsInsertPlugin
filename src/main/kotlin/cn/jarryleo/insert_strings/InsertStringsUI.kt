@@ -16,8 +16,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.Divider
@@ -26,6 +28,7 @@ import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -72,6 +75,10 @@ class InsertStringsUI(
     private var modelFetchStatus by mutableStateOf("")
     private var toastMessage by mutableStateOf("")
     private var toastTimer: Timer? = null
+    private var showChat by mutableStateOf(false)
+    private val chatMessages = mutableStateListOf<ChatMessage>()
+    private var chatInput by mutableStateOf("")
+    private var chatSending by mutableStateOf(false)
 
     private val rootPanel = ComposePanel().apply {
         setContent {
@@ -88,20 +95,29 @@ class InsertStringsUI(
                     onInsert = ::insert,
                     toastMessage = toastMessage,
                     showSettings = showSettings,
+                    showChat = showChat,
                     aiUrl = aiUrl,
                     aiApiKey = aiApiKey,
                     aiProtocol = aiProtocol,
                     aiModel = aiModel,
                     modelOptions = modelOptions,
                     modelFetchStatus = modelFetchStatus,
+                    chatMessages = chatMessages,
+                    chatInput = chatInput,
+                    chatSending = chatSending,
                     onOpenSettings = { showSettings = true },
                     onCloseSettings = { showSettings = false },
+                    onOpenChat = { showChat = true },
+                    onCloseChat = { showChat = false },
                     onAiUrlChange = { aiUrl = it },
                     onAiApiKeyChange = { aiApiKey = it },
                     onAiProtocolChange = { aiProtocol = it },
                     onAiModelChange = { aiModel = it },
                     onFetchModels = ::fetchModels,
                     onSaveSettings = ::saveSettings,
+                    onChatInputChange = { chatInput = it },
+                    onSendChat = ::sendChat,
+                    onNewChat = ::newChat,
                 )
             }
         }
@@ -239,6 +255,27 @@ class InsertStringsUI(
         }
     }
 
+    private fun sendChat() {
+        val text = chatInput.trim()
+        if (text.isEmpty() || chatSending) return
+        chatMessages.add(ChatMessage(role = "user", content = text))
+        chatInput = ""
+        chatSending = true
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val reply = AITranslator.chat(chatMessages.toList())
+            SwingUtilities.invokeLater {
+                chatMessages.add(ChatMessage(role = "assistant", content = reply))
+                chatSending = false
+            }
+        }
+    }
+
+    private fun newChat() {
+        chatMessages.clear()
+        chatInput = ""
+        chatSending = false
+    }
+
     override fun updateUI(
         @NotNull nodeName: String,
         @Nullable stringsList: List<StringsInfo>?
@@ -276,20 +313,29 @@ private fun InsertStringsContent(
     onInsert: () -> Unit,
     toastMessage: String,
     showSettings: Boolean,
+    showChat: Boolean,
     aiUrl: String,
     aiApiKey: String,
     aiProtocol: AiProtocol,
     aiModel: String,
     modelOptions: List<String>,
     modelFetchStatus: String,
+    chatMessages: List<ChatMessage>,
+    chatInput: String,
+    chatSending: Boolean,
     onOpenSettings: () -> Unit,
     onCloseSettings: () -> Unit,
+    onOpenChat: () -> Unit,
+    onCloseChat: () -> Unit,
     onAiUrlChange: (String) -> Unit,
     onAiApiKeyChange: (String) -> Unit,
     onAiProtocolChange: (AiProtocol) -> Unit,
     onAiModelChange: (String) -> Unit,
     onFetchModels: () -> Unit,
     onSaveSettings: () -> Unit,
+    onChatInputChange: (String) -> Unit,
+    onSendChat: () -> Unit,
+    onNewChat: () -> Unit,
 ) {
     val colors = rememberIdeColors()
 
@@ -322,6 +368,18 @@ private fun InsertStringsContent(
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )
+                } else if (showChat) {
+                    AiChatContent(
+                        chatMessages = chatMessages,
+                        chatInput = chatInput,
+                        chatSending = chatSending,
+                        onClose = onCloseChat,
+                        onNewChat = onNewChat,
+                        onChatInputChange = onChatInputChange,
+                        onSendChat = onSendChat,
+                        modifier = Modifier.fillMaxSize(),
+                        colors = colors,
+                    )
                 } else {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -338,6 +396,12 @@ private fun InsertStringsContent(
                             onValueChange = onStringNameChange,
                             modifier = Modifier.weight(1f),
                             singleLine = true,
+                            colors = colors,
+                        )
+                        CompactButton(
+                            text = "Chat",
+                            onClick = onOpenChat,
+                            modifier = Modifier.width(52.dp),
                             colors = colors,
                         )
                         CompactButton(
@@ -515,6 +579,164 @@ private fun AiSettingsContent(
             colors = colors,
             primary = true,
         )
+    }
+}
+
+@Composable
+private fun AiChatContent(
+    chatMessages: List<ChatMessage>,
+    chatInput: String,
+    chatSending: Boolean,
+    onClose: () -> Unit,
+    onNewChat: () -> Unit,
+    onChatInputChange: (String) -> Unit,
+    onSendChat: () -> Unit,
+    modifier: Modifier = Modifier,
+    colors: IdeColors,
+) {
+    val listState = rememberLazyListState()
+    LaunchedEffect(chatMessages.size) {
+        if (chatMessages.isNotEmpty()) {
+            listState.animateScrollToItem(chatMessages.size - 1)
+        }
+    }
+
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            CompactButton(
+                text = "New Topic",
+                onClick = onNewChat,
+                modifier = Modifier.width(82.dp),
+                colors = colors,
+            )
+            Text(
+                text = "AI Chat",
+                modifier = Modifier.weight(1f),
+                color = colors.text,
+                style = compactTextStyle(colors.text),
+                fontWeight = FontWeight.Bold,
+            )
+            CompactButton(
+                text = "Back",
+                onClick = onClose,
+                modifier = Modifier.width(56.dp),
+                colors = colors,
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .border(BorderStroke(1.dp, colors.border), RoundedCornerShape(4.dp))
+                .background(colors.tableBackground, RoundedCornerShape(4.dp))
+        ) {
+            if (chatMessages.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "Start a conversation...",
+                        color = colors.secondaryText,
+                        style = compactTextStyle(colors.secondaryText),
+                    )
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    itemsIndexed(chatMessages) { _, msg ->
+                        ChatBubble(
+                            message = msg,
+                            colors = colors,
+                        )
+                    }
+                    if (chatSending) {
+                        item {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .background(colors.fieldBackground, RoundedCornerShape(8.dp))
+                                        .border(BorderStroke(1.dp, colors.fieldBorder), RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                ) {
+                                    Text(
+                                        text = "Thinking...",
+                                        color = colors.secondaryText,
+                                        style = compactTextStyle(colors.secondaryText),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            CompactTextField(
+                value = chatInput,
+                onValueChange = onChatInputChange,
+                modifier = Modifier.weight(1f),
+                singleLine = true,
+                colors = colors,
+            )
+            CompactButton(
+                text = if (chatSending) "..." else "Send",
+                onClick = onSendChat,
+                modifier = Modifier.width(56.dp),
+                colors = colors,
+                primary = true,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ChatBubble(
+    message: ChatMessage,
+    colors: IdeColors,
+) {
+    val isUser = message.role == "user"
+    val bubbleColor = if (isUser) colors.accent else colors.fieldBackground
+    val textColor = if (isUser) colors.accentText else colors.text
+    val alignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
+
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = alignment,
+    ) {
+        Box(
+            modifier = Modifier
+                .widthIn(max = 500.dp)
+                .background(bubbleColor, RoundedCornerShape(8.dp))
+                .border(width = 1.dp, color = colors.border)
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+        ) {
+            Text(
+                text = message.content,
+                color = textColor,
+                style = compactTextStyle(textColor),
+            )
+        }
     }
 }
 

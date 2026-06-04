@@ -10,9 +10,16 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
 
+data class ChatMessage(
+    val role: String,
+    val content: String,
+)
+
 object AITranslator {
     private const val SYSTEM_PROMPT =
         "你是一个专业的翻译，为开发安卓APP提供国际化翻译服务，我传给你需要翻译的文本，和目标语言的缩写代码，帮我翻译成目标语言，请返回对应的翻译结果文本，不需要额外的解释，请返回纯文本结果"
+    private const val CHAT_SYSTEM_PROMPT =
+        "你是一个智能助手，请用简洁清晰的语言回答用户的问题。"
     private const val ANTHROPIC_VERSION = "2023-06-01"
     private val httpClient: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(20))
@@ -53,6 +60,85 @@ object AITranslator {
         }.getOrElse {
             it.message ?: "AI translate failed."
         }
+    }
+
+    @JvmStatic
+    fun chat(messages: List<ChatMessage>): String {
+        val settings = AiSettingsService.getInstance().state
+        val protocol = AiProtocol.fromName(settings.protocol)
+        val endpoint = AiEndpoint.completeChatEndpoint(settings.url, protocol)
+        val model = settings.model.trim()
+        val apiKey = settings.apiKey.trim()
+
+        if (settings.url.isBlank()) return "Please configure the AI URL first."
+        if (apiKey.isBlank()) return "Please configure the AI API key first."
+        if (model.isBlank()) return "Please configure the AI model first."
+
+        return runCatching {
+            val body = when (protocol) {
+                AiProtocol.OPENAI -> openAiChatBody(model, messages)
+                AiProtocol.ANTHROPIC -> anthropicChatBody(model, messages)
+            }
+            val request = HttpRequest.newBuilder(URI.create(endpoint))
+                .timeout(Duration.ofSeconds(60))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .applyAuthHeaders(protocol, apiKey)
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build()
+            val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+            if (response.statusCode() !in 200..299) {
+                throw IllegalStateException("HTTP ${response.statusCode()}: ${response.body().limitForMessage()}")
+            }
+            when (protocol) {
+                AiProtocol.OPENAI -> parseOpenAiText(response.body())
+                AiProtocol.ANTHROPIC -> parseAnthropicText(response.body())
+            }
+        }.getOrElse {
+            it.message ?: "AI chat failed."
+        }
+    }
+
+    private fun openAiChatBody(model: String, messages: List<ChatMessage>): String {
+        val root = JsonObject().apply {
+            addProperty("model", model)
+            add(
+                "messages",
+                JsonArray().apply {
+                    add(JsonObject().apply {
+                        addProperty("role", "system")
+                        addProperty("content", CHAT_SYSTEM_PROMPT)
+                    })
+                    messages.forEach { msg ->
+                        add(JsonObject().apply {
+                            addProperty("role", msg.role)
+                            addProperty("content", msg.content)
+                        })
+                    }
+                }
+            )
+        }
+        return root.toString()
+    }
+
+    private fun anthropicChatBody(model: String, messages: List<ChatMessage>): String {
+        val root = JsonObject().apply {
+            addProperty("model", model)
+            addProperty("system", CHAT_SYSTEM_PROMPT)
+            addProperty("max_tokens", 4096)
+            add(
+                "messages",
+                JsonArray().apply {
+                    messages.forEach { msg ->
+                        add(JsonObject().apply {
+                            addProperty("role", msg.role)
+                            addProperty("content", msg.content)
+                        })
+                    }
+                }
+            )
+        }
+        return root.toString()
     }
 
     fun fetchModels(rawUrl: String, protocol: AiProtocol, apiKey: String): Result<List<String>> {
