@@ -10,7 +10,7 @@ plugins {
 }
 
 group = "cn.jarryleo"
-version = "3.1"
+version = "3.2"
 
 repositories {
     mavenCentral()
@@ -40,8 +40,6 @@ intellij {
 
 
 dependencies {
-    //依赖 阿里云 百炼 大模型
-    implementation("com.alibaba:dashscope-sdk-java:2.22.9")
     implementation(compose.desktop.currentOs)
 }
 
@@ -87,8 +85,6 @@ tasks {
         exclude("META-INF/*.DSA")
         exclude("META-INF/*.RSA")
 
-        // 重定位包名避免冲突（可选）
-        relocate("com.alibaba", "shadow.com.alibaba")
     }
 
     // 让 build 任务依赖 shadowJar

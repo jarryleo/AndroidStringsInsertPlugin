@@ -26,6 +26,7 @@
     <!-- Extension points defined by the plugin.
          Read more: https://plugins.jetbrains.com/docs/intellij/plugin-extension-points.html -->
     <extensions defaultExtensionNs="com.intellij">
+        <applicationService serviceImplementation="cn.jarryleo.insert_strings.AiSettingsService"/>
         <toolWindow factoryClass="cn.jarryleo.insert_strings.InsertStringsToolWindow"
                     id="InsertStrings"
                     canCloseContents="false"

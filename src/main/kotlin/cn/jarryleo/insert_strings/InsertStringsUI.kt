@@ -21,6 +21,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.Divider
+import androidx.compose.material.DropdownMenu
+import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
@@ -37,8 +39,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
@@ -58,6 +63,13 @@ class InsertStringsUI(
 
     private var stringName by mutableStateOf("")
     private val rows = mutableStateListOf<StringRow>()
+    private var showSettings by mutableStateOf(false)
+    private var aiUrl by mutableStateOf("")
+    private var aiApiKey by mutableStateOf("")
+    private var aiProtocol by mutableStateOf(AiProtocol.OPENAI)
+    private var aiModel by mutableStateOf("qwen-plus")
+    private val modelOptions = mutableStateListOf<String>()
+    private var modelFetchStatus by mutableStateOf("")
 
     private val rootPanel = ComposePanel().apply {
         setContent {
@@ -72,6 +84,21 @@ class InsertStringsUI(
                     onCopy = { insertStringsManager.copy() },
                     onPaste = ::paste,
                     onInsert = ::insert,
+                    showSettings = showSettings,
+                    aiUrl = aiUrl,
+                    aiApiKey = aiApiKey,
+                    aiProtocol = aiProtocol,
+                    aiModel = aiModel,
+                    modelOptions = modelOptions,
+                    modelFetchStatus = modelFetchStatus,
+                    onOpenSettings = { showSettings = true },
+                    onCloseSettings = { showSettings = false },
+                    onAiUrlChange = { aiUrl = it },
+                    onAiApiKeyChange = { aiApiKey = it },
+                    onAiProtocolChange = { aiProtocol = it },
+                    onAiModelChange = { aiModel = it },
+                    onFetchModels = ::fetchModels,
+                    onSaveSettings = ::saveSettings,
                 )
             }
         }
@@ -80,6 +107,7 @@ class InsertStringsUI(
     fun createToolWindowContent(project: Project) {
         this.project = project
         insertStringsManager = InsertStringsManager.getInstance(project)
+        loadSettings()
         insertStringsManager.setUiCallBack(this)
     }
 
@@ -137,8 +165,54 @@ class InsertStringsUI(
         val targetLanguage = rows[rowIndex].language.let {
             if (it.equals("values", ignoreCase = true)) "values-en" else it
         }
-        val result = AITranslator.translate(targetLanguage, sourceText)
-        updateRowText(rowIndex, result)
+        updateRowText(rowIndex, "Translating...")
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val result = AITranslator.translate(targetLanguage, sourceText)
+            SwingUtilities.invokeLater {
+                updateRowText(rowIndex, result)
+            }
+        }
+    }
+
+    private fun loadSettings() {
+        val settings = AiSettingsService.getInstance().state
+        aiUrl = settings.url
+        aiApiKey = settings.apiKey
+        aiProtocol = AiProtocol.fromName(settings.protocol)
+        aiModel = settings.model
+    }
+
+    private fun saveSettings() {
+        AiSettingsService.getInstance().update(
+            url = aiUrl,
+            apiKey = aiApiKey,
+            protocol = aiProtocol,
+            model = aiModel,
+        )
+        modelFetchStatus = "Saved."
+        showSettings = false
+    }
+
+    private fun fetchModels() {
+        modelFetchStatus = "Loading models..."
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val result = AITranslator.fetchModels(aiUrl, aiProtocol, aiApiKey)
+            SwingUtilities.invokeLater {
+                result.fold(
+                    onSuccess = { models ->
+                        modelOptions.clear()
+                        modelOptions.addAll(models)
+                        if (aiModel.isBlank()) {
+                            aiModel = models.firstOrNull().orEmpty()
+                        }
+                        modelFetchStatus = "Loaded ${models.size} models."
+                    },
+                    onFailure = {
+                        modelFetchStatus = it.message ?: "Failed to load models."
+                    }
+                )
+            }
+        }
     }
 
     override fun updateUI(
@@ -176,6 +250,21 @@ private fun InsertStringsContent(
     onCopy: () -> Unit,
     onPaste: () -> Unit,
     onInsert: () -> Unit,
+    showSettings: Boolean,
+    aiUrl: String,
+    aiApiKey: String,
+    aiProtocol: AiProtocol,
+    aiModel: String,
+    modelOptions: List<String>,
+    modelFetchStatus: String,
+    onOpenSettings: () -> Unit,
+    onCloseSettings: () -> Unit,
+    onAiUrlChange: (String) -> Unit,
+    onAiApiKeyChange: (String) -> Unit,
+    onAiProtocolChange: (AiProtocol) -> Unit,
+    onAiModelChange: (String) -> Unit,
+    onFetchModels: () -> Unit,
+    onSaveSettings: () -> Unit,
 ) {
     val colors = rememberIdeColors()
 
@@ -189,57 +278,302 @@ private fun InsertStringsContent(
                 .padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Text(
-                    text = "<string name=",
-                    color = colors.text,
-                    style = compactTextStyle(colors.text),
-                )
-                CompactTextField(
-                    value = stringName,
-                    onValueChange = onStringNameChange,
-                    modifier = Modifier.weight(1f),
-                    singleLine = true,
+            if (showSettings) {
+                AiSettingsContent(
+                    aiUrl = aiUrl,
+                    aiApiKey = aiApiKey,
+                    aiProtocol = aiProtocol,
+                    aiModel = aiModel,
+                    modelOptions = modelOptions,
+                    modelFetchStatus = modelFetchStatus,
+                    onClose = onCloseSettings,
+                    onAiUrlChange = onAiUrlChange,
+                    onAiApiKeyChange = onAiApiKeyChange,
+                    onAiProtocolChange = onAiProtocolChange,
+                    onAiModelChange = onAiModelChange,
+                    onFetchModels = onFetchModels,
+                    onSave = onSaveSettings,
+                    modifier = Modifier.fillMaxSize(),
                     colors = colors,
                 )
-            }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "<string name=",
+                        color = colors.text,
+                        style = compactTextStyle(colors.text),
+                    )
+                    CompactTextField(
+                        value = stringName,
+                        onValueChange = onStringNameChange,
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        colors = colors,
+                    )
+                    CompactButton(
+                        text = "Settings",
+                        onClick = onOpenSettings,
+                        modifier = Modifier.width(72.dp),
+                        colors = colors,
+                    )
+                }
 
-            StringsTable(
-                rows = rows,
-                onTextChange = onTextChange,
-                onClear = onClear,
-                onAi = onAi,
+                StringsTable(
+                    rows = rows,
+                    onTextChange = onTextChange,
+                    onClear = onClear,
+                    onAi = onAi,
+                    modifier = Modifier.weight(1f),
+                    colors = colors,
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    CompactButton(
+                        text = "Copy",
+                        onClick = onCopy,
+                        modifier = Modifier.weight(1f),
+                        colors = colors,
+                    )
+                    CompactButton(
+                        text = "Paste",
+                        onClick = onPaste,
+                        modifier = Modifier.weight(1f),
+                        colors = colors,
+                    )
+                    CompactButton(
+                        text = "Insert",
+                        onClick = onInsert,
+                        modifier = Modifier.weight(1f),
+                        colors = colors,
+                        primary = true,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AiSettingsContent(
+    aiUrl: String,
+    aiApiKey: String,
+    aiProtocol: AiProtocol,
+    aiModel: String,
+    modelOptions: List<String>,
+    modelFetchStatus: String,
+    onClose: () -> Unit,
+    onAiUrlChange: (String) -> Unit,
+    onAiApiKeyChange: (String) -> Unit,
+    onAiProtocolChange: (AiProtocol) -> Unit,
+    onAiModelChange: (String) -> Unit,
+    onFetchModels: () -> Unit,
+    onSave: () -> Unit,
+    modifier: Modifier = Modifier,
+    colors: IdeColors,
+) {
+    val endpointPreview = AiEndpoint.completeChatEndpoint(aiUrl, aiProtocol)
+
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = "AI Settings",
+                modifier = Modifier.weight(1f),
+                color = colors.text,
+                style = compactTextStyle(colors.text),
+                fontWeight = FontWeight.Bold,
+            )
+            CompactButton(
+                text = "Back",
+                onClick = onClose,
+                modifier = Modifier.width(56.dp),
+                colors = colors,
+            )
+        }
+
+        SettingsLabel("URL", colors)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            CompactTextField(
+                value = aiUrl,
+                onValueChange = onAiUrlChange,
+                modifier = Modifier.weight(1f),
+                singleLine = true,
+                colors = colors,
+            )
+            ProtocolDropdown(
+                protocol = aiProtocol,
+                onProtocolChange = onAiProtocolChange,
+                modifier = Modifier.width(112.dp),
+                colors = colors,
+            )
+        }
+        Text(
+            text = "Preview: $endpointPreview",
+            color = colors.secondaryText,
+            style = compactTextStyle(colors.secondaryText),
+        )
+
+        SettingsLabel("API Key", colors)
+        CompactTextField(
+            value = aiApiKey,
+            onValueChange = onAiApiKeyChange,
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            colors = colors,
+            visualTransformation = PasswordVisualTransformation(),
+        )
+
+        SettingsLabel("Model", colors)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            ModelField(
+                value = aiModel,
+                options = modelOptions,
+                onValueChange = onAiModelChange,
                 modifier = Modifier.weight(1f),
                 colors = colors,
             )
+            CompactButton(
+                text = "Get Models",
+                onClick = onFetchModels,
+                modifier = Modifier.width(88.dp),
+                colors = colors,
+            )
+        }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+        if (modelFetchStatus.isNotEmpty()) {
+            Text(
+                text = modelFetchStatus,
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText),
+            )
+        }
+
+        Spacer(Modifier.weight(1f))
+
+        CompactButton(
+            text = "Save",
+            onClick = onSave,
+            modifier = Modifier.fillMaxWidth(),
+            colors = colors,
+            primary = true,
+        )
+    }
+}
+
+@Composable
+private fun SettingsLabel(text: String, colors: IdeColors) {
+    Text(
+        text = text,
+        color = colors.secondaryText,
+        style = compactTextStyle(colors.secondaryText),
+        fontWeight = FontWeight.Bold,
+    )
+}
+
+@Composable
+private fun ProtocolDropdown(
+    protocol: AiProtocol,
+    onProtocolChange: (AiProtocol) -> Unit,
+    modifier: Modifier = Modifier,
+    colors: IdeColors,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        CompactButton(
+            text = "${protocol.displayName} v",
+            onClick = { expanded = true },
+            modifier = modifier,
+            colors = colors,
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            AiProtocol.entries.forEach { item ->
+                DropdownMenuItem(
+                    onClick = {
+                        expanded = false
+                        onProtocolChange(item)
+                    }
+                ) {
+                    Text(
+                        text = item.displayName,
+                        color = colors.text,
+                        style = compactTextStyle(colors.text),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModelField(
+    value: String,
+    options: List<String>,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    colors: IdeColors,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        CompactTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+            colors = colors,
+        )
+        Box {
+            CompactButton(
+                text = "v",
+                onClick = { expanded = options.isNotEmpty() },
+                modifier = Modifier.width(28.dp),
+                colors = colors,
+            )
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
             ) {
-                CompactButton(
-                    text = "Copy",
-                    onClick = onCopy,
-                    modifier = Modifier.weight(1f),
-                    colors = colors,
-                )
-                CompactButton(
-                    text = "Paste",
-                    onClick = onPaste,
-                    modifier = Modifier.weight(1f),
-                    colors = colors,
-                )
-                CompactButton(
-                    text = "Insert",
-                    onClick = onInsert,
-                    modifier = Modifier.weight(1f),
-                    colors = colors,
-                    primary = true,
-                )
+                options.forEach { model ->
+                    DropdownMenuItem(
+                        onClick = {
+                            expanded = false
+                            onValueChange(model)
+                        }
+                    ) {
+                        Text(
+                            text = model,
+                            color = colors.text,
+                            style = compactTextStyle(colors.text),
+                        )
+                    }
+                }
             }
         }
     }
@@ -371,6 +705,7 @@ private fun CompactTextField(
     singleLine: Boolean,
     maxLines: Int = 1,
     colors: IdeColors,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
 ) {
     BasicTextField(
         value = value,
@@ -384,6 +719,7 @@ private fun CompactTextField(
         maxLines = maxLines,
         textStyle = compactTextStyle(colors.text),
         cursorBrush = SolidColor(colors.accent),
+        visualTransformation = visualTransformation,
     )
 }
 
