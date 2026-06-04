@@ -1,5 +1,6 @@
 package cn.jarryleo.insert_strings
 
+import cn.jarryleo.insert_strings.xml.StringsScanner
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.ui.Messages

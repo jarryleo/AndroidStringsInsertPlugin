@@ -1,5 +1,8 @@
 package cn.jarryleo.insert_strings
 
+import cn.jarryleo.insert_strings.xml.StringsInfo
+import cn.jarryleo.insert_strings.xml.StringsScanner
+import cn.jarryleo.insert_strings.xml.StringsWriter
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 
