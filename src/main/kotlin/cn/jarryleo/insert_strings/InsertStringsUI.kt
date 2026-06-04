@@ -8,6 +8,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,7 +23,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.Divider
 import androidx.compose.material.DropdownMenu
-import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
@@ -499,30 +499,29 @@ private fun ProtocolDropdown(
     colors: IdeColors,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    Box {
-        CompactButton(
-            text = "${protocol.displayName} v",
+    Box(modifier = modifier) {
+        DropdownFieldShell(
+            text = protocol.displayName,
+            expanded = expanded,
             onClick = { expanded = true },
-            modifier = modifier,
+            modifier = Modifier.fillMaxWidth(),
             colors = colors,
         )
-        DropdownMenu(
+        StyledDropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
+            colors = colors,
+            modifier = modifier,
         ) {
             AiProtocol.entries.forEach { item ->
-                DropdownMenuItem(
+                DropdownOption(
+                    text = item.displayName,
                     onClick = {
                         expanded = false
                         onProtocolChange(item)
-                    }
-                ) {
-                    Text(
-                        text = item.displayName,
-                        color = colors.text,
-                        style = compactTextStyle(colors.text),
-                    )
-                }
+                    },
+                    colors = colors,
+                )
             }
         }
     }
@@ -540,42 +539,161 @@ private fun ModelField(
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        CompactTextField(
-            value = value,
-            onValueChange = onValueChange,
-            modifier = Modifier.weight(1f),
-            singleLine = true,
-            colors = colors,
-        )
-        Box {
-            CompactButton(
-                text = "v",
-                onClick = { expanded = options.isNotEmpty() },
-                modifier = Modifier.width(28.dp),
-                colors = colors,
-            )
-            DropdownMenu(
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .heightIn(min = 26.dp)
+                .background(colors.fieldBackground, RoundedCornerShape(3.dp))
+                .border(BorderStroke(1.dp, colors.fieldBorder), RoundedCornerShape(3.dp))
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                BasicTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                    singleLine = true,
+                    maxLines = 1,
+                    textStyle = compactTextStyle(colors.text),
+                    cursorBrush = SolidColor(colors.accent),
+                )
+                Box(
+                    modifier = Modifier
+                        .width(28.dp)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = { expanded = options.isNotEmpty() }
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "▾",
+                        color = colors.secondaryText,
+                        style = compactTextStyle(colors.secondaryText),
+                        maxLines = 1,
+                    )
+                }
+            }
+            StyledDropdownMenu(
                 expanded = expanded,
                 onDismissRequest = { expanded = false },
+                colors = colors,
+                modifier = Modifier.fillMaxWidth(),
+                maxHeight = 220,
             ) {
                 options.forEach { model ->
-                    DropdownMenuItem(
+                    DropdownOption(
+                        text = model,
                         onClick = {
                             expanded = false
                             onValueChange(model)
-                        }
-                    ) {
-                        Text(
-                            text = model,
-                            color = colors.text,
-                            style = compactTextStyle(colors.text),
-                        )
-                    }
+                        },
+                        colors = colors,
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun DropdownFieldShell(
+    text: String,
+    expanded: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    colors: IdeColors,
+) {
+    Row(
+        modifier = modifier
+            .height(26.dp)
+            .background(colors.fieldBackground, RoundedCornerShape(3.dp))
+            .border(BorderStroke(1.dp, colors.fieldBorder), RoundedCornerShape(3.dp))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(start = 6.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.weight(1f),
+            color = colors.text,
+            style = compactTextStyle(colors.text),
+            maxLines = 1,
+        )
+        Text(
+            text = if (expanded) "▴" else "▾",
+            color = colors.secondaryText,
+            style = compactTextStyle(colors.secondaryText),
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun StyledDropdownMenu(
+    expanded: Boolean,
+    onDismissRequest: () -> Unit,
+    colors: IdeColors,
+    modifier: Modifier = Modifier,
+    maxHeight: Int = 180,
+    content: @Composable () -> Unit,
+) {
+    MaterialTheme(
+        colors = MaterialTheme.colors.copy(
+            surface = colors.tableBackground,
+            onSurface = colors.text,
+            background = colors.tableBackground,
+        )
+    ) {
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = onDismissRequest,
+            modifier = modifier
+                .heightIn(max = maxHeight.dp)
+                .background(colors.tableBackground)
+                .border(BorderStroke(1.dp, colors.border), RoundedCornerShape(3.dp)),
+        ) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun DropdownOption(
+    text: String,
+    onClick: () -> Unit,
+    colors: IdeColors,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 28.dp)
+            .background(colors.tableBackground)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = text,
+            color = colors.text,
+            style = compactTextStyle(colors.text),
+            maxLines = 1,
+        )
     }
 }
 
