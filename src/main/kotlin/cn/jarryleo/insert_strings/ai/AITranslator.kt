@@ -26,13 +26,13 @@ object AITranslator {
 你具备向Android项目strings.xml插入翻译文本的能力。当用户要求你插入、添加、写入翻译文本时，你必须使用以下XML格式输出（不要使用代码块包裹，直接输出）：
 <insert-strings name="字符串key">
 <item lang="values">默认文本（通常是英文或原始文本）</item>
-<item lang="values-zh">中文翻译</item>
-<item lang="values-ja">日语翻译</item>
+<item lang="values-zh-rCN">简体中文翻译</item>
+<item lang="values-ar">阿拉伯语翻译</item>
 </insert-strings>
 
 规则：
 1. name属性是Android strings.xml中的string name，使用snake_case命名（如app_name、btn_submit）
-2. lang属性对应Android资源目录名：values（默认）、values-zh（中文）、values-ja（日语）、values-ko（韩语）、values-fr（法语）、values-de（德语）、values-es（西班牙语）、values-pt（葡萄牙语）、values-ru（俄语）、values-ar（阿拉伯语）等
+2. lang属性对应Android资源目录名：values（默认英语）、values-zh-rCN（简体中文）、values-fr（法语）、values-es（西班牙语）、values-pt（葡萄牙语）、values-ar（阿拉伯语）等
 3. 如果用户指定了当前编辑的字符串key，优先使用该key
 4. 如果用户提供了可用语言列表，只输出这些语言的翻译
 5. 可以在回复中穿插文字说明，但<insert-strings>块必须完整独立

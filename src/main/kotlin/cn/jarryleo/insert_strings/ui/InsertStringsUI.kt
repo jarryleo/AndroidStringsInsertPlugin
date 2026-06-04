@@ -283,11 +283,14 @@ class InsertStringsUI(
             )
             return
         }
+        val existingTranslations = rows.associate { it.language to it.text }
         commands.forEach { cmd ->
+            val merged = existingTranslations.toMutableMap()
+            merged.putAll(cmd.translations)
             insertStringsManager.insert(
                 project = project,
                 stringName = cmd.name,
-                stringsInfoList = cmd.translations
+                stringsInfoList = merged
             )
         }
         val names = commands.joinToString(", ") { it.name }
