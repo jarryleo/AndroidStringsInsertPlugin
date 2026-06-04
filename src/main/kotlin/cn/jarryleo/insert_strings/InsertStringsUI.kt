@@ -1,39 +1,19 @@
 package cn.jarryleo.insert_strings
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material.Divider
-import androidx.compose.material.DropdownMenu
-import androidx.compose.material.MaterialTheme
-import androidx.compose.material.Surface
-import androidx.compose.material.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.ComposePanel
@@ -52,11 +32,11 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.wm.ToolWindow
 import org.jetbrains.annotations.NotNull
 import org.jetbrains.annotations.Nullable
-import java.awt.Color as AwtColor
 import javax.swing.JComponent
 import javax.swing.SwingUtilities
 import javax.swing.Timer
 import javax.swing.UIManager
+import java.awt.Color as AwtColor
 
 class InsertStringsUI(
     private val toolWindow: ToolWindow
@@ -727,15 +707,17 @@ private fun ChatBubble(
         Box(
             modifier = Modifier
                 .widthIn(max = 500.dp)
-                .background(bubbleColor, RoundedCornerShape(8.dp))
-                .border(width = 1.dp, color = colors.border)
+                .background(bubbleColor, RoundedCornerShape(12.dp))
+                .border(width = 1.dp, color = colors.border, RoundedCornerShape(12.dp))
                 .padding(horizontal = 10.dp, vertical = 6.dp),
         ) {
-            Text(
-                text = message.content,
-                color = textColor,
-                style = compactTextStyle(textColor),
-            )
+            SelectionContainer {
+                Text(
+                    text = message.content,
+                    color = textColor,
+                    style = compactTextStyle(textColor),
+                )
+            }
         }
     }
 }
@@ -1176,16 +1158,29 @@ private fun rememberIdeColors(): IdeColors {
             tableBackground = uiColor("Table.background", "Panel.background", fallback = AwtColor.WHITE),
             headerBackground = uiColor("TableHeader.background", "Panel.background", fallback = AwtColor(0xF2F2F2)),
             text = uiColor("Label.foreground", fallback = AwtColor(0x1F1F1F)),
-            secondaryText = uiColor("Label.disabledForeground", "ContextHelp.foreground", fallback = AwtColor(0x6E6E6E)),
+            secondaryText = uiColor(
+                "Label.disabledForeground",
+                "ContextHelp.foreground",
+                fallback = AwtColor(0x6E6E6E)
+            ),
             fieldBackground = uiColor("TextField.background", "EditorPane.background", fallback = AwtColor.WHITE),
             fieldBorder = uiColor("TextField.borderColor", "Component.borderColor", fallback = AwtColor(0xBDBDBD)),
             buttonBackground = uiColor("Button.background", fallback = AwtColor(0xF5F5F5)),
             buttonBorder = uiColor("Button.borderColor", "Component.borderColor", fallback = AwtColor(0xBDBDBD)),
             border = uiColor("Component.borderColor", "Table.gridColor", fallback = AwtColor(0xC8C8C8)),
             grid = uiColor("Table.gridColor", "Component.borderColor", fallback = AwtColor(0xE0E0E0)),
-            accent = uiColor("Component.focusColor", "Button.default.focusColor", "Actions.Blue", fallback = AwtColor(0x3574F0)),
+            accent = uiColor(
+                "Component.focusColor",
+                "Button.default.focusColor",
+                "Actions.Blue",
+                fallback = AwtColor(0x3574F0)
+            ),
             accentText = uiColor("Button.default.foreground", fallback = AwtColor.WHITE),
-            toastBackground = uiColor("Notification.background", "GotItTooltip.background", fallback = AwtColor(0x323232)),
+            toastBackground = uiColor(
+                "Notification.background",
+                "GotItTooltip.background",
+                fallback = AwtColor(0x323232)
+            ),
             toastText = uiColor("Notification.foreground", "GotItTooltip.foreground", fallback = AwtColor.WHITE),
         )
     }
