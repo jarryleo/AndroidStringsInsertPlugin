@@ -293,6 +293,14 @@ class InsertStringsUI(
                 stringsInfoList = merged
             )
         }
+        val lastCmd = commands.last()
+        val lastMerged = existingTranslations.toMutableMap()
+        lastMerged.putAll(lastCmd.translations)
+        stringName = lastCmd.name
+        rows.clear()
+        rows.addAll(languages.map { lang ->
+            StringRow(language = lang, text = lastMerged[lang] ?: "")
+        })
         val names = commands.joinToString(", ") { it.name }
         showToast("Inserted: $names")
         showChat = false
