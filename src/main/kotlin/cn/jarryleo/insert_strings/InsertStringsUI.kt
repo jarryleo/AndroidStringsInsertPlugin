@@ -8,7 +8,6 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -53,6 +52,7 @@ import org.jetbrains.annotations.Nullable
 import java.awt.Color as AwtColor
 import javax.swing.JComponent
 import javax.swing.SwingUtilities
+import javax.swing.Timer
 import javax.swing.UIManager
 
 class InsertStringsUI(
@@ -70,6 +70,8 @@ class InsertStringsUI(
     private var aiModel by mutableStateOf("qwen-plus")
     private val modelOptions = mutableStateListOf<String>()
     private var modelFetchStatus by mutableStateOf("")
+    private var toastMessage by mutableStateOf("")
+    private var toastTimer: Timer? = null
 
     private val rootPanel = ComposePanel().apply {
         setContent {
@@ -81,9 +83,10 @@ class InsertStringsUI(
                     onTextChange = ::updateRowText,
                     onClear = { row -> updateRowText(row, "") },
                     onAi = ::translateRow,
-                    onCopy = { insertStringsManager.copy() },
+                    onCopy = ::copy,
                     onPaste = ::paste,
                     onInsert = ::insert,
+                    toastMessage = toastMessage,
                     showSettings = showSettings,
                     aiUrl = aiUrl,
                     aiApiKey = aiApiKey,
@@ -113,6 +116,11 @@ class InsertStringsUI(
 
     fun getRootPanel(): JComponent = rootPanel
 
+    private fun copy() {
+        insertStringsManager.copy()
+        showToast("Copied")
+    }
+
     private fun paste() {
         val selectedEditor = FileEditorManager.getInstance(project).selectedEditor
         if (selectedEditor == null) {
@@ -124,7 +132,11 @@ class InsertStringsUI(
             return
         }
 
-        insertStringsManager.paste(selectedEditor.file)
+        if (insertStringsManager.paste(selectedEditor.file)) {
+            showToast("Pasted")
+        } else {
+            showToast("Nothing to paste")
+        }
     }
 
     private fun insert() {
@@ -152,6 +164,7 @@ class InsertStringsUI(
             stringName = stringName,
             stringsInfoList = rows.associate { it.language to it.text }
         )
+        showToast("Inserted")
     }
 
     private fun updateRowText(rowIndex: Int, text: String) {
@@ -215,6 +228,17 @@ class InsertStringsUI(
         }
     }
 
+    private fun showToast(message: String) {
+        toastTimer?.stop()
+        toastMessage = message
+        toastTimer = Timer(1800) {
+            toastMessage = ""
+        }.apply {
+            isRepeats = false
+            start()
+        }
+    }
+
     override fun updateUI(
         @NotNull nodeName: String,
         @Nullable stringsList: List<StringsInfo>?
@@ -250,6 +274,7 @@ private fun InsertStringsContent(
     onCopy: () -> Unit,
     onPaste: () -> Unit,
     onInsert: () -> Unit,
+    toastMessage: String,
     showSettings: Boolean,
     aiUrl: String,
     aiApiKey: String,
@@ -272,89 +297,101 @@ private fun InsertStringsContent(
         modifier = Modifier.fillMaxSize(),
         color = colors.panel,
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            if (showSettings) {
-                AiSettingsContent(
-                    aiUrl = aiUrl,
-                    aiApiKey = aiApiKey,
-                    aiProtocol = aiProtocol,
-                    aiModel = aiModel,
-                    modelOptions = modelOptions,
-                    modelFetchStatus = modelFetchStatus,
-                    onClose = onCloseSettings,
-                    onAiUrlChange = onAiUrlChange,
-                    onAiApiKeyChange = onAiApiKeyChange,
-                    onAiProtocolChange = onAiProtocolChange,
-                    onAiModelChange = onAiModelChange,
-                    onFetchModels = onFetchModels,
-                    onSave = onSaveSettings,
-                    modifier = Modifier.fillMaxSize(),
+        Box(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                if (showSettings) {
+                    AiSettingsContent(
+                        aiUrl = aiUrl,
+                        aiApiKey = aiApiKey,
+                        aiProtocol = aiProtocol,
+                        aiModel = aiModel,
+                        modelOptions = modelOptions,
+                        modelFetchStatus = modelFetchStatus,
+                        onClose = onCloseSettings,
+                        onAiUrlChange = onAiUrlChange,
+                        onAiApiKeyChange = onAiApiKeyChange,
+                        onAiProtocolChange = onAiProtocolChange,
+                        onAiModelChange = onAiModelChange,
+                        onFetchModels = onFetchModels,
+                        onSave = onSaveSettings,
+                        modifier = Modifier.fillMaxSize(),
+                        colors = colors,
+                    )
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "<string name=",
+                            color = colors.text,
+                            style = compactTextStyle(colors.text),
+                        )
+                        CompactTextField(
+                            value = stringName,
+                            onValueChange = onStringNameChange,
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                            colors = colors,
+                        )
+                        CompactButton(
+                            text = "Settings",
+                            onClick = onOpenSettings,
+                            modifier = Modifier.width(72.dp),
+                            colors = colors,
+                        )
+                    }
+
+                    StringsTable(
+                        rows = rows,
+                        onTextChange = onTextChange,
+                        onClear = onClear,
+                        onAi = onAi,
+                        modifier = Modifier.weight(1f),
+                        colors = colors,
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        CompactButton(
+                            text = "Copy",
+                            onClick = onCopy,
+                            modifier = Modifier.weight(1f),
+                            colors = colors,
+                        )
+                        CompactButton(
+                            text = "Paste",
+                            onClick = onPaste,
+                            modifier = Modifier.weight(1f),
+                            colors = colors,
+                        )
+                        CompactButton(
+                            text = "Insert",
+                            onClick = onInsert,
+                            modifier = Modifier.weight(1f),
+                            colors = colors,
+                            primary = true,
+                        )
+                    }
+                }
+            }
+
+            if (toastMessage.isNotEmpty()) {
+                ToastMessage(
+                    text = toastMessage,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 42.dp),
                     colors = colors,
                 )
-            } else {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = "<string name=",
-                        color = colors.text,
-                        style = compactTextStyle(colors.text),
-                    )
-                    CompactTextField(
-                        value = stringName,
-                        onValueChange = onStringNameChange,
-                        modifier = Modifier.weight(1f),
-                        singleLine = true,
-                        colors = colors,
-                    )
-                    CompactButton(
-                        text = "Settings",
-                        onClick = onOpenSettings,
-                        modifier = Modifier.width(72.dp),
-                        colors = colors,
-                    )
-                }
-
-                StringsTable(
-                    rows = rows,
-                    onTextChange = onTextChange,
-                    onClear = onClear,
-                    onAi = onAi,
-                    modifier = Modifier.weight(1f),
-                    colors = colors,
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    CompactButton(
-                        text = "Copy",
-                        onClick = onCopy,
-                        modifier = Modifier.weight(1f),
-                        colors = colors,
-                    )
-                    CompactButton(
-                        text = "Paste",
-                        onClick = onPaste,
-                        modifier = Modifier.weight(1f),
-                        colors = colors,
-                    )
-                    CompactButton(
-                        text = "Insert",
-                        onClick = onInsert,
-                        modifier = Modifier.weight(1f),
-                        colors = colors,
-                        primary = true,
-                    )
-                }
             }
         }
     }
@@ -489,6 +526,28 @@ private fun SettingsLabel(text: String, colors: IdeColors) {
         style = compactTextStyle(colors.secondaryText),
         fontWeight = FontWeight.Bold,
     )
+}
+
+@Composable
+private fun ToastMessage(
+    text: String,
+    modifier: Modifier = Modifier,
+    colors: IdeColors,
+) {
+    Box(
+        modifier = modifier
+            .background(colors.toastBackground, RoundedCornerShape(4.dp))
+            .border(BorderStroke(1.dp, colors.border), RoundedCornerShape(4.dp))
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = text,
+            color = colors.toastText,
+            style = compactTextStyle(colors.toastText),
+            maxLines = 1,
+        )
+    }
 }
 
 @Composable
@@ -904,6 +963,8 @@ private fun rememberIdeColors(): IdeColors {
             grid = uiColor("Table.gridColor", "Component.borderColor", fallback = AwtColor(0xE0E0E0)),
             accent = uiColor("Component.focusColor", "Button.default.focusColor", "Actions.Blue", fallback = AwtColor(0x3574F0)),
             accentText = uiColor("Button.default.foreground", fallback = AwtColor.WHITE),
+            toastBackground = uiColor("Notification.background", "GotItTooltip.background", fallback = AwtColor(0x323232)),
+            toastText = uiColor("Notification.foreground", "GotItTooltip.foreground", fallback = AwtColor.WHITE),
         )
     }
 }
@@ -922,6 +983,8 @@ private data class IdeColors(
     val grid: Color,
     val accent: Color,
     val accentText: Color,
+    val toastBackground: Color,
+    val toastText: Color,
 )
 
 private fun uiColor(vararg keys: String, fallback: AwtColor): Color {

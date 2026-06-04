@@ -67,9 +67,9 @@ class InsertStringsManager {
         ClipboardManager.setSysClipboardText(clipInfo.toXml())
     }
 
-    fun paste(file: VirtualFile) {
+    fun paste(file: VirtualFile): Boolean {
         val text = ClipboardManager.getSysClipboardText()
-        val clipInfo = ClipInfo.fromXml(text) ?: return
+        val clipInfo = ClipInfo.fromXml(text) ?: return false
         val nodeName = clipInfo.node
         val anchor = clipInfo.anchor
         val languages = clipInfo.value.keys.toList()
@@ -84,5 +84,6 @@ class InsertStringsManager {
             anchor,
             scanner.getStringsInfoList()
         )
+        return true
     }
 }
