@@ -39,19 +39,21 @@
                 text="Ask AI"
                 description="Ask AI about the selected text">
             <add-to-group group-id="EditorPopupMenu" anchor="first"/>
+            <keyboard-shortcut
+                    keymap="$default"
+                    first-keystroke="shift F3"/>
         </action>
         <action id="InsertStringsAction"
                 class="cn.jarryleo.insert_strings.InsertStringsAction"
                 text="Insert Strings"
                 icon="/META-INF/menuIcon.svg"
-                popup="true"
                 description="Insert strings to xml">
-            <add-to-group group-id="EditMenu" anchor="last"/>
-            <add-to-group group-id="EditorPopupMenu"/>
+            <add-to-group group-id="EditMenu" anchor="first"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="first"/>
             <keyboard-shortcut
                     keymap="$default"
-                    first-keystroke="control INSERT"
-                    second-keystroke="control shift INSERT"/>
+                    first-keystroke="shift F1"
+                    second-keystroke="control shift F1"/>
         </action>
     </actions>
 </idea-plugin>

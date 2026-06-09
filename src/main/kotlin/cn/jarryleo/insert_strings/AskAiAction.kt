@@ -44,7 +44,7 @@ class AskAiAction : AnAction() {
 
     override fun actionPerformed(e: AnActionEvent) {
         val editor = e.getData(CommonDataKeys.EDITOR) ?: return
-        val selectedText = editor.selectionModel.selectedText ?: return
+        val selectedText = editor.selectionModel.selectedText ?: ""
 
         val settings = AiSettingsService.getInstance().state
         if (settings.url.isBlank() || settings.apiKey.isBlank()) {
@@ -166,18 +166,20 @@ private fun AskAiChatContent(
     var chatSending by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
-    LaunchedEffect(Unit) {
-        val firstMessage = ChatMessage(
-            "user",
-            "请分析并解释以下从编辑器中选中的代码或文本内容。请用简洁清晰的中文回答，重点说明其含义、用途和关键逻辑。\n\n```\n$selectedText\n```"
-        )
-        chatMessages.add(firstMessage)
-        chatSending = true
-        ApplicationManager.getApplication().executeOnPooledThread {
-            val result = AITranslator.chat(chatMessages.toList(), "")
-            SwingUtilities.invokeLater {
-                chatMessages.add(ChatMessage("assistant", result))
-                chatSending = false
+    if (selectedText.isNotBlank()) {
+        LaunchedEffect(Unit) {
+            val firstMessage = ChatMessage(
+                "user",
+                "请分析并解释以下从编辑器中选中的代码或文本内容。请用简洁清晰的中文回答，重点说明其含义、用途和关键逻辑。\n\n```\n$selectedText\n```"
+            )
+            chatMessages.add(firstMessage)
+            chatSending = true
+            ApplicationManager.getApplication().executeOnPooledThread {
+                val result = AITranslator.chat(chatMessages.toList(), "")
+                SwingUtilities.invokeLater {
+                    chatMessages.add(ChatMessage("assistant", result))
+                    chatSending = false
+                }
             }
         }
     }
