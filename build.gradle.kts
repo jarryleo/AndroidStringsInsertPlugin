@@ -10,7 +10,7 @@ plugins {
 }
 
 group = "cn.jarryleo"
-version = "3.7"
+version = "3.8"
 
 repositories {
     mavenCentral()
@@ -41,6 +41,8 @@ intellij {
 
 dependencies {
     implementation(compose.desktop.currentOs)
+    implementation("org.commonmark:commonmark:0.22.0")
+    implementation("org.commonmark:commonmark-ext-gfm-tables:0.22.0")
 }
 
 tasks {

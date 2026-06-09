@@ -158,7 +158,6 @@ private fun ChatBubble(
 ) {
     val isUser = message.role == "user"
     val bubbleColor = if (isUser) colors.accent else colors.fieldBackground
-    val textColor = if (isUser) colors.accentText else colors.text
     val alignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
     val hasCommand = !isUser && AgentCommandParser.hasCommand(message.content)
     val displayText = if (hasCommand) AgentCommandParser.extractDisplayText(message.content) else message.content
@@ -183,11 +182,18 @@ private fun ChatBubble(
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             ) {
                 SelectionContainer {
-                    Text(
-                        text = displayText,
-                        color = textColor,
-                        style = compactTextStyle(textColor),
-                    )
+                    if (isUser) {
+                        Text(
+                            text = message.content,
+                            color = colors.accentText,
+                            style = compactTextStyle(colors.accentText),
+                        )
+                    } else {
+                        MarkdownContent(
+                            markdown = displayText,
+                            colors = colors,
+                        )
+                    }
                 }
             }
         }

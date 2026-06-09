@@ -118,13 +118,13 @@ class AskAiAction : AnAction() {
         }
         titleBar.add(label, BorderLayout.WEST)
 
-        val closeBtn = JButton("close").apply {
+        val closeBtn = JButton("Close").apply {
             isFocusPainted = false
             isContentAreaFilled = false
             isBorderPainted = false
             font = font.deriveFont(Font.BOLD, 14f)
-            preferredSize = Dimension(120, 24)
-            margin = Insets(0, 0, 0, 0)
+            preferredSize = Dimension(60, 24)
+            margin = Insets(8, 0, 0, 0)
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
             addActionListener { dialog.dispose() }
         }
@@ -281,7 +281,6 @@ private fun AskAiChatBubble(
 ) {
     val isUser = message.role == "user"
     val bubbleColor = if (isUser) colors.accent else colors.fieldBackground
-    val textColor = if (isUser) colors.accentText else colors.text
     val alignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
     val border = if (isUser) {
         Modifier
@@ -304,11 +303,18 @@ private fun AskAiChatBubble(
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             ) {
                 SelectionContainer {
-                    Text(
-                        text = message.content,
-                        color = textColor,
-                        style = compactTextStyle(textColor),
-                    )
+                    if (isUser) {
+                        Text(
+                            text = message.content,
+                            color = colors.accentText,
+                            style = compactTextStyle(colors.accentText),
+                        )
+                    } else {
+                        MarkdownContent(
+                            markdown = message.content,
+                            colors = colors,
+                        )
+                    }
                 }
             }
         }
