@@ -36,12 +36,6 @@ class AskAiAction : AnAction() {
 
     override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
 
-    override fun update(e: AnActionEvent) {
-        val editor = e.getData(CommonDataKeys.EDITOR)
-        val selectedText = editor?.selectionModel?.selectedText
-        e.presentation.isEnabledAndVisible = editor != null && !selectedText.isNullOrBlank()
-    }
-
     override fun actionPerformed(e: AnActionEvent) {
         val editor = e.getData(CommonDataKeys.EDITOR) ?: return
         val selectedText = editor.selectionModel.selectedText ?: ""
