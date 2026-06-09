@@ -182,18 +182,10 @@ private fun ChatBubble(
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             ) {
                 SelectionContainer {
-                    if (isUser) {
-                        Text(
-                            text = message.content,
-                            color = colors.accentText,
-                            style = compactTextStyle(colors.accentText),
-                        )
-                    } else {
-                        MarkdownContent(
-                            markdown = displayText,
-                            colors = colors,
-                        )
-                    }
+                    MarkdownContent(
+                        markdown = displayText,
+                        colors = colors,
+                    )
                 }
             }
         }

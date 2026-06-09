@@ -38,6 +38,7 @@
                 class="cn.jarryleo.insert_strings.AskAiAction"
                 text="Ask AI"
                 description="Ask AI about the selected text">
+            <add-to-group group-id="EditMenu" anchor="first"/>
             <add-to-group group-id="EditorPopupMenu" anchor="first"/>
             <keyboard-shortcut
                     keymap="$default"

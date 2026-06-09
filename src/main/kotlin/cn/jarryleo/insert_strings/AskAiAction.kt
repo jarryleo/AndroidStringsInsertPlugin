@@ -305,18 +305,10 @@ private fun AskAiChatBubble(
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             ) {
                 SelectionContainer {
-                    if (isUser) {
-                        Text(
-                            text = message.content,
-                            color = colors.accentText,
-                            style = compactTextStyle(colors.accentText),
-                        )
-                    } else {
-                        MarkdownContent(
-                            markdown = message.content,
-                            colors = colors,
-                        )
-                    }
+                    MarkdownContent(
+                        markdown = message.content,
+                        colors = colors,
+                    )
                 }
             }
         }
