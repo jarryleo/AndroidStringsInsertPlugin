@@ -162,7 +162,11 @@ private fun ChatBubble(
     val alignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
     val hasCommand = !isUser && AgentCommandParser.hasCommand(message.content)
     val displayText = if (hasCommand) AgentCommandParser.extractDisplayText(message.content) else message.content
-
+    val border = if (isUser) {
+        Modifier
+    } else {
+        Modifier.border(width = 1.dp, color = colors.border, RoundedCornerShape(12.dp))
+    }
     Column(
         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
     ) {
@@ -173,8 +177,9 @@ private fun ChatBubble(
             Box(
                 modifier = Modifier
                     .widthIn(max = 500.dp)
+                    .padding(start = if (isUser) 32.dp else 0.dp, end = if (isUser) 0.dp else 32.dp)
                     .background(bubbleColor, RoundedCornerShape(12.dp))
-                    .border(width = 1.dp, color = colors.border, RoundedCornerShape(12.dp))
+                    .then(border)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             ) {
                 SelectionContainer {

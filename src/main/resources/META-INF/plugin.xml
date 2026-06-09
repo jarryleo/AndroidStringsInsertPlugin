@@ -34,10 +34,16 @@
                     icon="/META-INF/pluginIcon.svg"/>
     </extensions>
     <actions>
+        <action id="AskAiAction"
+                class="cn.jarryleo.insert_strings.AskAiAction"
+                text="Ask AI"
+                description="Ask AI about the selected text">
+            <add-to-group group-id="EditorPopupMenu" anchor="first"/>
+        </action>
         <action id="InsertStringsAction"
                 class="cn.jarryleo.insert_strings.InsertStringsAction"
                 text="Insert Strings"
-                icon="/META-INF/pluginIcon.svg"
+                icon="/META-INF/menuIcon.svg"
                 popup="true"
                 description="Insert strings to xml">
             <add-to-group group-id="EditMenu" anchor="last"/>
