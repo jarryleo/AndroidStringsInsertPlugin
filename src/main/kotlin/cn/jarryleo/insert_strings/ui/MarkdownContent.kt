@@ -326,7 +326,7 @@ private fun collectInlineText(node: Node): String {
         when (child) {
             is Text -> sb.append(child.literal)
             is Code -> sb.append(child.literal)
-            is SoftLineBreak -> sb.append(' ')
+            is SoftLineBreak -> sb.append('\n')
             is HardLineBreak -> sb.append('\n')
             is StrongEmphasis -> sb.append(collectInlineText(child))
             is Emphasis -> sb.append(collectInlineText(child))
@@ -370,7 +370,7 @@ private fun AnnotatedString.Builder.renderInlineNode(
             }
         }
 
-        is SoftLineBreak -> append(' ')
+        is SoftLineBreak -> append('\n')
         is HardLineBreak -> append('\n')
 
         is StrongEmphasis -> {
