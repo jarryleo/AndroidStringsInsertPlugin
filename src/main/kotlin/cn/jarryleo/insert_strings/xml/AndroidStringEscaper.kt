@@ -4,26 +4,52 @@ object AndroidStringEscaper {
     private val entityPattern = Regex("""&(amp|lt|gt|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);""")
 
     fun escape(text: String): String {
-        // CDATA 段（<![CDATA[...]]>）内部的文字保持原样，不经过 Android/XML 转义
+        // <![CDATA[...]]> 与 <Data>...</Data> 块保持原样，不经过 Android/XML 转义
         val builder = StringBuilder(text.length)
         var index = 0
         while (index < text.length) {
-            val cdataStart = text.indexOf("<![CDATA[", index)
-            if (cdataStart == -1) {
+            val cdataStart = text.indexOf("<![CDATA[", index, ignoreCase = true)
+            val dataStart = text.indexOf("<Data>", index, ignoreCase = true)
+
+            val nextSpecialStart = when {
+                cdataStart == -1 && dataStart == -1 -> -1
+                cdataStart == -1 -> dataStart
+                dataStart == -1 -> cdataStart
+                else -> minOf(cdataStart, dataStart)
+            }
+
+            if (nextSpecialStart == -1) {
                 builder.append(escapeXmlText(escapeAndroidText(text.substring(index))))
                 break
             }
-            if (cdataStart > index) {
-                builder.append(escapeXmlText(escapeAndroidText(text.substring(index, cdataStart))))
+
+            if (nextSpecialStart > index) {
+                builder.append(escapeXmlText(escapeAndroidText(text.substring(index, nextSpecialStart))))
             }
-            val cdataEnd = text.indexOf("]]>", cdataStart + 9)
-            if (cdataEnd == -1) {
-                // 没有闭合的 CDATA，按普通文本处理
-                builder.append(escapeXmlText(escapeAndroidText(text.substring(cdataStart))))
-                break
+
+            when (nextSpecialStart) {
+                cdataStart -> {
+                    val cdataEnd = text.indexOf("]]>", cdataStart + 9)
+                    if (cdataEnd == -1) {
+                        // 没有闭合的 CDATA，按普通文本处理
+                        builder.append(escapeXmlText(escapeAndroidText(text.substring(cdataStart))))
+                        break
+                    }
+                    builder.append(text.substring(cdataStart, cdataEnd + 3))
+                    index = cdataEnd + 3
+                }
+
+                dataStart -> {
+                    val dataEnd = text.indexOf("</Data>", dataStart + 6, ignoreCase = true)
+                    if (dataEnd == -1) {
+                        // 没有闭合的 <Data>，按普通文本处理
+                        builder.append(escapeXmlText(escapeAndroidText(text.substring(dataStart))))
+                        break
+                    }
+                    builder.append(text.substring(dataStart, dataEnd + 7))
+                    index = dataEnd + 7
+                }
             }
-            builder.append(text.substring(cdataStart, cdataEnd + 3))
-            index = cdataEnd + 3
         }
         return builder.toString()
     }
@@ -41,12 +67,14 @@ object AndroidStringEscaper {
                     }
                     builder.append(char)
                 }
+
                 '@', '?' -> {
                     if (index == 0) {
                         builder.append('\\')
                     }
                     builder.append(char)
                 }
+
                 else -> builder.append(char)
             }
         }
@@ -69,14 +97,17 @@ object AndroidStringEscaper {
                         index++
                     }
                 }
+
                 '<' -> {
                     builder.append("&lt;")
                     index++
                 }
+
                 '>' -> {
                     builder.append("&gt;")
                     index++
                 }
+
                 else -> {
                     builder.append(char)
                     index++
