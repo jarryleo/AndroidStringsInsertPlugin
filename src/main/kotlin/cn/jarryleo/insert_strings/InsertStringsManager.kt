@@ -1,12 +1,13 @@
 package cn.jarryleo.insert_strings
 
+import cn.jarryleo.insert_strings.xml.ContextManager
 import cn.jarryleo.insert_strings.xml.StringsInfo
 import cn.jarryleo.insert_strings.xml.StringsScanner
 import cn.jarryleo.insert_strings.xml.StringsWriter
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 
-class InsertStringsManager {
+class InsertStringsManager(private val project: Project) {
 
     companion object {
         private val instance = mutableMapOf<Project, InsertStringsManager>()
@@ -14,7 +15,7 @@ class InsertStringsManager {
         @JvmStatic
         fun getInstance(project: Project): InsertStringsManager {
             return instance.getOrPut(project) {
-                InsertStringsManager()
+                InsertStringsManager(project)
             }
         }
 
@@ -34,6 +35,10 @@ class InsertStringsManager {
     private var stringsList: List<StringsInfo>? = emptyList()
     val languages get() = stringsList?.map { it.language }
     private var uiCallBack: UiCallback? = null
+
+    init {
+        ContextManager.initContextInfo(project)
+    }
 
     fun setUiCallBack(uiCallBack: UiCallback) {
         this.uiCallBack = uiCallBack
