@@ -65,6 +65,23 @@ class InsertStringsManager(private val project: Project) {
         ).write()
     }
 
+    fun insertIntoModule(
+        project: Project,
+        moduleName: String,
+        stringName: String,
+        stringsInfoList: Map<String, String>
+    ) {
+        val moduleStringsInfo = ContextManager.getModuleStringsInfo(project, moduleName)
+        StringsWriter(
+            project,
+            nodeName = "",
+            anchorName = "",
+            stringName = stringName,
+            stringsInfoList = stringsInfoList,
+            languagesInfoList = moduleStringsInfo
+        ).write()
+    }
+
     fun copy() {
         val clipInfo = ClipInfo(
             nodeName,

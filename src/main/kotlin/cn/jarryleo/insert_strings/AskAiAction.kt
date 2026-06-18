@@ -20,6 +20,7 @@ import cn.jarryleo.insert_strings.ai.AITranslator
 import cn.jarryleo.insert_strings.ai.AiSettingsService
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.ui.*
+import cn.jarryleo.insert_strings.xml.ContextManager
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
@@ -38,6 +39,7 @@ class AskAiAction : AnAction() {
 
     override fun actionPerformed(e: AnActionEvent) {
         val editor = e.getData(CommonDataKeys.EDITOR) ?: return
+        val project = e.project ?: return
         val selectedText = editor.selectionModel.selectedText ?: ""
 
         val settings = AiSettingsService.getInstance().state
@@ -49,6 +51,10 @@ class AskAiAction : AnAction() {
             )
             return
         }
+
+        val currentFile = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: editor.virtualFile
+        ContextManager.ensureInitialized(project)
+        ContextManager.updateCurrentModule(project, currentFile)
 
         showChatDialog(editor, selectedText)
     }
@@ -171,7 +177,7 @@ private fun AskAiChatContent(
             ApplicationManager.getApplication().executeOnPooledThread {
                 val result = AITranslator.chat(chatMessages.toList(), "")
                 SwingUtilities.invokeLater {
-                    chatMessages.add(ChatMessage("assistant", result))
+                    chatMessages.add(ChatMessage("assistant", result.reply))
                     chatSending = false
                 }
             }
@@ -193,7 +199,7 @@ private fun AskAiChatContent(
         ApplicationManager.getApplication().executeOnPooledThread {
             val result = AITranslator.chat(chatMessages.toList(), "")
             SwingUtilities.invokeLater {
-                chatMessages.add(ChatMessage("assistant", result))
+                chatMessages.add(ChatMessage("assistant", result.reply))
                 chatSending = false
             }
         }

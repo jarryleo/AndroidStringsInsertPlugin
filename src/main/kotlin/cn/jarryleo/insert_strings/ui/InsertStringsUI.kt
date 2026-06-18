@@ -11,13 +11,17 @@ import androidx.compose.ui.awt.ComposePanel
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.InsertStringsManager
-import cn.jarryleo.insert_strings.xml.StringsInfo
 import cn.jarryleo.insert_strings.UiCallback
-import cn.jarryleo.insert_strings.ai.AgentCommandParser
 import cn.jarryleo.insert_strings.ai.AITranslator
+import cn.jarryleo.insert_strings.ai.AiAction
 import cn.jarryleo.insert_strings.ai.AiProtocol
 import cn.jarryleo.insert_strings.ai.AiSettingsService
 import cn.jarryleo.insert_strings.ai.ChatMessage
+import cn.jarryleo.insert_strings.xml.ContextManager
+import cn.jarryleo.insert_strings.xml.ModuleInfo
+import cn.jarryleo.insert_strings.xml.StringsInfo
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
@@ -89,7 +93,6 @@ class InsertStringsUI(
                     onChatInputChange = { chatInput = it },
                     onSendChat = ::sendChat,
                     onNewChat = ::newChat,
-                    onInsertAgentCommand = ::insertFromAgent,
                 )
             }
         }
@@ -98,6 +101,8 @@ class InsertStringsUI(
     fun createToolWindowContent(project: Project) {
         this.project = project
         insertStringsManager = InsertStringsManager.getInstance(project)
+        val currentFile = FileEditorManager.getInstance(project).selectedEditor?.file
+        ContextManager.updateCurrentModule(project, currentFile)
         loadSettings()
         insertStringsManager.setUiCallBack(this)
     }
@@ -237,8 +242,9 @@ class InsertStringsUI(
         ApplicationManager.getApplication().executeOnPooledThread {
             val reply = AITranslator.chat(chatMessages.toList(), context)
             SwingUtilities.invokeLater {
-                chatMessages.add(ChatMessage(role = "assistant", content = reply))
+                chatMessages.add(ChatMessage(role = "assistant", content = reply.reply))
                 chatSending = false
+                handleAiActions(reply.actions)
             }
         }
     }
@@ -250,60 +256,120 @@ class InsertStringsUI(
     }
 
     private fun buildChatContext(): String {
-        val sb = StringBuilder()
-        val languages = insertStringsManager.languages
-        if (!languages.isNullOrEmpty()) {
-            sb.append("当前项目可用语言目录: ${languages.joinToString(", ")}\n")
+        val contextInfo = ContextManager.contextInfo ?: return ""
+        val availableLanguages = insertStringsManager.languages ?: emptyList()
+        val currentTranslations = rows.filter { it.text.isNotEmpty() }.associate { it.language to it.text }
+
+        val root = JsonObject().apply {
+            addProperty("projectName", contextInfo.projectName)
+            add("currentModule", contextInfo.currentModule?.let { moduleToJson(it) })
+            add("modules", JsonArray().apply {
+                contextInfo.modules.forEach { add(moduleToJson(it)) }
+            })
+            add("moduleWithMostLines", contextInfo.moduleWithMostLines?.let { moduleToJson(it) })
+            add("availableLanguages", JsonArray().apply {
+                availableLanguages.forEach { add(it) }
+            })
+            addProperty("currentKey", stringName)
+            add("currentTranslations", JsonObject().apply {
+                currentTranslations.forEach { (k, v) -> addProperty(k, v) }
+            })
         }
-        if (stringName.isNotEmpty()) {
-            sb.append("当前正在编辑的字符串key: $stringName\n")
-        }
-        val currentTexts = rows.filter { it.text.isNotEmpty() }
-        if (currentTexts.isNotEmpty()) {
-            sb.append("当前已有的翻译内容:\n")
-            currentTexts.forEach { row ->
-                sb.append("  ${row.language}: ${row.text}\n")
-            }
-        }
-        return sb.toString()
+        return root.toString()
     }
 
-    private fun insertFromAgent(response: String) {
-        val commands = AgentCommandParser.parse(response)
-        if (commands.isEmpty()) {
-            showToast("No insert command found")
+    private fun moduleToJson(module: ModuleInfo): JsonObject {
+        return JsonObject().apply {
+            addProperty("moduleName", module.moduleName)
+            addProperty("modulePath", module.modulePath)
+            addProperty("totalLines", module.totalLines)
+            add("xmlFiles", JsonArray().apply {
+                module.xmlFiles.forEach { file ->
+                    add(JsonObject().apply {
+                        addProperty("filePath", file.filePath)
+                        addProperty("language", file.language)
+                        addProperty("fileLines", file.fileLines)
+                    })
+                }
+            })
+        }
+    }
+
+    private fun handleAiActions(actions: List<AiAction>) {
+        val insertActions = actions.filterIsInstance<AiAction.InsertStrings>()
+        if (insertActions.isNotEmpty()) {
+            executeInsertActions(insertActions)
             return
         }
-        val languages = insertStringsManager.languages
-        if (languages == null) {
-            Messages.showMessageDialog(
-                "Please open a strings.xml first!",
-                "Error",
-                Messages.getInformationIcon()
-            )
-            return
+        val askActions = actions.filterIsInstance<AiAction.AskUser>()
+        if (askActions.isNotEmpty()) {
+            // 问题内容已经包含在 reply 中，用户继续对话即可
+            showToast(askActions.first().question)
         }
-        val existingTranslations = rows.associate { it.language to it.text }
-        commands.forEach { cmd ->
-            val merged = existingTranslations.toMutableMap()
-            merged.putAll(cmd.translations)
-            insertStringsManager.insert(
-                project = project,
-                stringName = cmd.name,
-                stringsInfoList = merged
+    }
+
+    private fun executeInsertActions(actions: List<AiAction.InsertStrings>) {
+        if (actions.isEmpty()) return
+        val contextInfo = ContextManager.contextInfo ?: return
+        val currentModuleName = contextInfo.currentModule?.moduleName
+        val moduleWithMostLines = contextInfo.moduleWithMostLines
+
+        actions.forEach { action ->
+            val targetModule = resolveTargetModule(
+                action.module,
+                currentModuleName,
+                moduleWithMostLines?.moduleName
             )
+            if (targetModule == null) {
+                showToast("No target module for ${action.name}")
+                return@forEach
+            }
+            val stringsInfoList = if (targetModule == currentModuleName) {
+                val existingTranslations = rows.associate { it.language to it.text }
+                val merged = existingTranslations.toMutableMap()
+                merged.putAll(action.translations)
+                merged
+            } else {
+                val moduleStringsInfo = ContextManager.getModuleStringsInfo(project, targetModule)
+                if (moduleStringsInfo.isEmpty()) {
+                    showToast("Module $targetModule has no strings.xml")
+                    return@forEach
+                }
+                val merged = moduleStringsInfo.associate { it.language to "" }.toMutableMap()
+                merged.putAll(action.translations)
+                merged
+            }
+
+            if (targetModule == currentModuleName) {
+                insertStringsManager.insert(project, action.name, stringsInfoList)
+            } else {
+                insertStringsManager.insertIntoModule(project, targetModule, action.name, stringsInfoList)
+            }
         }
-        val lastCmd = commands.last()
-        val lastMerged = existingTranslations.toMutableMap()
-        lastMerged.putAll(lastCmd.translations)
-        stringName = lastCmd.name
-        rows.clear()
-        rows.addAll(languages.map { lang ->
-            StringRow(language = lang, text = lastMerged[lang] ?: "")
-        })
-        val names = commands.joinToString(", ") { it.name }
+
+        val lastAction = actions.last()
+        val targetModule = resolveTargetModule(
+            lastAction.module,
+            currentModuleName,
+            moduleWithMostLines?.moduleName
+        )
+        if (targetModule != null) {
+            val updatedStringsList = ContextManager.scanModuleForKey(project, targetModule, lastAction.name)
+            insertStringsManager.updateUI(lastAction.name, "", updatedStringsList)
+        }
+        val names = actions.joinToString(", ") { it.name }
         showToast("Inserted: $names")
         showChat = false
+    }
+
+    private fun resolveTargetModule(
+        actionModule: String?,
+        currentModuleName: String?,
+        moduleWithMostLinesName: String?
+    ): String? {
+        return actionModule?.takeIf { it.isNotBlank() }
+            ?: currentModuleName?.takeIf { it.isNotBlank() }
+            ?: moduleWithMostLinesName?.takeIf { it.isNotBlank() }
     }
 
     override fun updateUI(
@@ -312,8 +378,9 @@ class InsertStringsUI(
     ) {
         if (stringsList == null) return
 
+        val seen = mutableSetOf<String>()
         val newRows = stringsList
-            .filter { it.language.isNotEmpty() }
+            .filter { it.language.isNotEmpty() && seen.add(it.language) }
             .map { StringRow(language = it.language, text = it.text) }
 
         SwingUtilities.invokeLater {
@@ -361,7 +428,6 @@ private fun InsertStringsContent(
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
     onNewChat: () -> Unit,
-    onInsertAgentCommand: (String) -> Unit,
 ) {
     val colors = rememberIdeColors()
 
@@ -403,7 +469,6 @@ private fun InsertStringsContent(
                         onNewChat = onNewChat,
                         onChatInputChange = onChatInputChange,
                         onSendChat = onSendChat,
-                        onInsertCommand = onInsertAgentCommand,
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )

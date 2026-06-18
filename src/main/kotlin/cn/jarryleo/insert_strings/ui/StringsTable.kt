@@ -61,7 +61,7 @@ fun StringsTable(
             }
         } else {
             LazyColumn(modifier = Modifier.fillMaxSize()) {
-                itemsIndexed(rows, key = { _, row -> row.language }) { index, row ->
+                itemsIndexed(rows, key = { index, _ -> index }) { index, row ->
                     StringTableRow(
                         row = row,
                         onTextChange = { onTextChange(index, it) },

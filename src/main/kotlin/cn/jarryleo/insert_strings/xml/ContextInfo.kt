@@ -1,34 +1,37 @@
 package cn.jarryleo.insert_strings.xml
 
 import com.alibaba.fastjson2.JSON
-import com.intellij.openapi.fileEditor.FileDocumentManager
-import com.intellij.openapi.vfs.VirtualFile
 
 /**
- * strings 相关上下文
+ * 项目国际化上下文信息，用于以 JSON 格式传递给 AI
  */
 data class ContextInfo(
-    val moduleList: List<ModuleInfo>, //模块列表
+    val projectName: String,
+    val currentModule: ModuleInfo?,
+    val modules: List<ModuleInfo>,
 ) {
-    fun getJson(): String {
-        return JSON.toJSONString(this)
-    }
+    val moduleWithMostLines: ModuleInfo? = modules.maxByOrNull { it.totalLines }
+
+    fun getJson(): String = JSON.toJSONString(this)
+
+    fun findModule(name: String): ModuleInfo? = modules.find { it.moduleName == name }
 }
 
+/**
+ * 模块信息
+ */
 data class ModuleInfo(
-    val moduleName: String,  //模块名称
-    val xmlFileList: List<XmlFileInfo> //模块内所有 strings.xml 文件信息
+    val moduleName: String,
+    val modulePath: String,
+    val xmlFiles: List<XmlFileInfo>,
+    val totalLines: Int = xmlFiles.sumOf { it.fileLines },
 )
 
+/**
+ * strings.xml 文件信息
+ */
 data class XmlFileInfo(
-    val stringsFile: VirtualFile?, //对应的 strings.xml文件
-    val language: String, //对应的国际化语言缩写
-    var fileLines: Int = 0, //strings.xml 的文件行数
-) {
-    init {
-        stringsFile?.let {
-            val document = FileDocumentManager.getInstance().getDocument(it)
-            fileLines = document?.lineCount ?: 0
-        }
-    }
-}
+    val filePath: String,
+    val language: String,
+    val fileLines: Int = 0,
+)

@@ -1,5 +1,6 @@
 package cn.jarryleo.insert_strings
 
+import cn.jarryleo.insert_strings.xml.ContextManager
 import cn.jarryleo.insert_strings.xml.StringsScanner
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
@@ -26,6 +27,9 @@ class InsertStringsAction : AnAction() {
             val nodeName = stringsScanner.nodeName
             val anchorNodeName = stringsScanner.anchorNodeName
             val stringsList = stringsScanner.getStringsInfoList()
+            val currentFile = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: e.getData(CommonDataKeys.EDITOR)?.virtualFile
+            ContextManager.ensureInitialized(project)
+            ContextManager.updateCurrentModule(project, currentFile)
             InsertStringsManager.updateUI(project, nodeName, anchorNodeName, stringsList)
             ToolWindowManager.getInstance(project)
                 .getToolWindow("InsertStrings")
