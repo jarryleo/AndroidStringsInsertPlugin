@@ -24,6 +24,7 @@ There is no `runIde` task configured; the `.run/Run Plugin.run.xml` runs `build`
 - **Business logic**: `InsertStringsManager` — coordinates scan, insert, copy, paste operations.
 - **XML I/O**: `StringsScanner` (reads), `StringsWriter` (writes).
 - **AI translation**: `AITranslator` + `AiSettingsService` (persisted via IntelliJ `applicationService`). Supports OpenAI-compatible and other protocols via `AiProtocol` enum.
+- **Google Sheets MCP**: `McpSettingsService` persists MCP server configuration. `McpClient` implements a stdio-based MCP client (JSON-RPC) to call Google Sheets tools. The AI chat system prompt includes Google Sheets tool descriptions, and `InsertStringsUI` runs a tool-call loop so the AI can read/write translations through the configured MCP server.
 
 ## Key Conventions
 

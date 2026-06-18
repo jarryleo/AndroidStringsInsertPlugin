@@ -10,6 +10,11 @@ sealed class AiAction {
     data class AskUser(
         val question: String
     ) : AiAction()
+
+    data class McpToolCall(
+        val tool: String,
+        val arguments: Map<String, String>
+    ) : AiAction()
 }
 
 data class AiReply(

@@ -15,8 +15,11 @@ import cn.jarryleo.insert_strings.UiCallback
 import cn.jarryleo.insert_strings.ai.AITranslator
 import cn.jarryleo.insert_strings.ai.AiAction
 import cn.jarryleo.insert_strings.ai.AiProtocol
+import cn.jarryleo.insert_strings.ai.AiReply
 import cn.jarryleo.insert_strings.ai.AiSettingsService
 import cn.jarryleo.insert_strings.ai.ChatMessage
+import cn.jarryleo.insert_strings.ai.mcp.McpClient
+import cn.jarryleo.insert_strings.ai.mcp.McpSettingsService
 import cn.jarryleo.insert_strings.xml.ContextManager
 import cn.jarryleo.insert_strings.xml.ModuleInfo
 import cn.jarryleo.insert_strings.xml.StringsInfo
@@ -33,6 +36,11 @@ import javax.swing.JComponent
 import javax.swing.SwingUtilities
 import javax.swing.Timer
 
+private enum class SettingsTab {
+    AI,
+    MCP
+}
+
 class InsertStringsUI(
     private val toolWindow: ToolWindow
 ) : UiCallback {
@@ -42,12 +50,21 @@ class InsertStringsUI(
     private var stringName by mutableStateOf("")
     private val rows = mutableStateListOf<StringRow>()
     private var showSettings by mutableStateOf(false)
+    private var settingsTab by mutableStateOf(SettingsTab.AI)
     private var aiUrl by mutableStateOf("")
     private var aiApiKey by mutableStateOf("")
     private var aiProtocol by mutableStateOf(AiProtocol.OPENAI)
     private var aiModel by mutableStateOf("qwen-plus")
     private val modelOptions = mutableStateListOf<String>()
     private var modelFetchStatus by mutableStateOf("")
+    private var mcpEnabled by mutableStateOf(false)
+    private var mcpCommand by mutableStateOf("")
+    private var mcpArguments by mutableStateOf("")
+    private var mcpWorkingDir by mutableStateOf("")
+    private var mcpSpreadsheetId by mutableStateOf("")
+    private var mcpSheetName by mutableStateOf("Sheet1")
+    private var mcpTimeoutSeconds by mutableStateOf("30")
+    private var mcpConnectionStatus by mutableStateOf("")
     private var toastMessage by mutableStateOf("")
     private var toastTimer: Timer? = null
     private var showChat by mutableStateOf(false)
@@ -80,6 +97,8 @@ class InsertStringsUI(
                     chatMessages = chatMessages,
                     chatInput = chatInput,
                     chatSending = chatSending,
+                    settingsTab = settingsTab,
+                    onSettingsTabChange = { settingsTab = it },
                     onOpenSettings = { showSettings = true },
                     onCloseSettings = { showSettings = false },
                     onOpenChat = { showChat = true },
@@ -90,6 +109,22 @@ class InsertStringsUI(
                     onAiModelChange = { aiModel = it },
                     onFetchModels = ::fetchModels,
                     onSaveSettings = ::saveSettings,
+                    mcpEnabled = mcpEnabled,
+                    mcpCommand = mcpCommand,
+                    mcpArguments = mcpArguments,
+                    mcpWorkingDir = mcpWorkingDir,
+                    mcpSpreadsheetId = mcpSpreadsheetId,
+                    mcpSheetName = mcpSheetName,
+                    mcpTimeoutSeconds = mcpTimeoutSeconds,
+                    mcpConnectionStatus = mcpConnectionStatus,
+                    onMcpEnabledChange = { mcpEnabled = it },
+                    onMcpCommandChange = { mcpCommand = it },
+                    onMcpArgumentsChange = { mcpArguments = it },
+                    onMcpWorkingDirChange = { mcpWorkingDir = it },
+                    onMcpSpreadsheetIdChange = { mcpSpreadsheetId = it },
+                    onMcpSheetNameChange = { mcpSheetName = it },
+                    onMcpTimeoutSecondsChange = { mcpTimeoutSeconds = it },
+                    onMcpTestConnection = ::testMcpConnection,
                     onChatInputChange = { chatInput = it },
                     onSendChat = ::sendChat,
                     onNewChat = ::newChat,
@@ -186,6 +221,15 @@ class InsertStringsUI(
         aiApiKey = settings.apiKey
         aiProtocol = AiProtocol.fromName(settings.protocol)
         aiModel = settings.model
+
+        val mcpSettings = McpSettingsService.getInstance().state
+        mcpEnabled = mcpSettings.enabled
+        mcpCommand = mcpSettings.command
+        mcpArguments = mcpSettings.arguments
+        mcpWorkingDir = mcpSettings.workingDir
+        mcpSpreadsheetId = mcpSettings.spreadsheetId
+        mcpSheetName = mcpSettings.sheetName
+        mcpTimeoutSeconds = mcpSettings.timeoutSeconds.toString()
     }
 
     private fun saveSettings() {
@@ -195,8 +239,47 @@ class InsertStringsUI(
             protocol = aiProtocol,
             model = aiModel,
         )
+        McpSettingsService.getInstance().update(
+            enabled = mcpEnabled,
+            command = mcpCommand,
+            arguments = mcpArguments,
+            workingDir = mcpWorkingDir,
+            spreadsheetId = mcpSpreadsheetId,
+            sheetName = mcpSheetName,
+            timeoutSeconds = mcpTimeoutSeconds.toIntOrNull() ?: 30,
+        )
         modelFetchStatus = "Saved."
+        mcpConnectionStatus = "Saved."
         showSettings = false
+    }
+
+    private fun testMcpConnection() {
+        if (mcpCommand.isBlank()) {
+            mcpConnectionStatus = "Please configure the MCP server command first."
+            return
+        }
+        mcpConnectionStatus = "Connecting to MCP server..."
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val client = createMcpClient()
+            val result = client.use {
+                it.connect().map { _ ->
+                    val tools = it.listTools().getOrElse { emptyList() }
+                    "Connected. Found ${tools.size} tool(s)."
+                }
+            }
+            SwingUtilities.invokeLater {
+                mcpConnectionStatus = result.getOrElse { it.message ?: "Connection failed." }
+            }
+        }
+    }
+
+    private fun createMcpClient(): McpClient {
+        return McpClient(
+            command = mcpCommand,
+            arguments = mcpArguments.split(Regex("\\s+")).filter { it.isNotBlank() },
+            workingDir = mcpWorkingDir.takeIf { it.isNotBlank() },
+            timeoutSeconds = mcpTimeoutSeconds.toLongOrNull()?.coerceAtLeast(5) ?: 30
+        )
     }
 
     private fun fetchModels() {
@@ -239,13 +322,67 @@ class InsertStringsUI(
         chatInput = ""
         chatSending = true
         val context = buildChatContext()
+        val internalMessages = chatMessages.toList().toMutableList()
         ApplicationManager.getApplication().executeOnPooledThread {
-            val reply = AITranslator.chat(chatMessages.toList(), context)
-            SwingUtilities.invokeLater {
-                chatMessages.add(ChatMessage(role = "assistant", content = reply.reply))
-                chatSending = false
-                handleAiActions(reply.actions)
+            try {
+                val reply = runChatWithToolLoop(internalMessages, context)
+                SwingUtilities.invokeLater {
+                    chatMessages.add(ChatMessage(role = "assistant", content = reply.reply))
+                    chatSending = false
+                    handleAiActions(reply.actions)
+                }
+            } catch (e: Exception) {
+                SwingUtilities.invokeLater {
+                    chatMessages.add(ChatMessage(role = "assistant", content = "Error: ${e.message}"))
+                    chatSending = false
+                }
             }
+        }
+    }
+
+    private fun runChatWithToolLoop(messages: MutableList<ChatMessage>, context: String): AiReply {
+        if (!mcpEnabled || mcpCommand.isBlank()) {
+            return AITranslator.chat(messages.toList(), context)
+        }
+        var client: McpClient? = null
+        try {
+            val maxIterations = 10
+            repeat(maxIterations) {
+                val reply = AITranslator.chat(messages.toList(), context)
+                val toolCalls = reply.actions.filterIsInstance<AiAction.McpToolCall>()
+                if (toolCalls.isEmpty()) {
+                    return reply
+                }
+                if (client == null) {
+                    client = createMcpClient()
+                    client.connect().getOrThrow()
+                }
+                messages.add(ChatMessage(role = "assistant", content = reply.reply))
+                toolCalls.forEach { toolCall ->
+                    val resultText = try {
+                        val currentClient = client ?: throw IllegalStateException("MCP client not initialized")
+                        val arguments = buildMcpToolArguments(toolCall)
+                        currentClient.callTool(toolCall.tool, arguments).fold(
+                            onSuccess = { if (it.success) it.content else "Tool error: ${it.content}" },
+                            onFailure = { "Tool call failed: ${it.message}" }
+                        )
+                    } catch (e: Exception) {
+                        "Tool call failed: ${e.message}"
+                    }
+                    messages.add(ChatMessage(role = "user", content = "MCP tool `${toolCall.tool}` result:\n$resultText"))
+                }
+            }
+            return AiReply("Reached maximum tool call iterations.", emptyList())
+        } finally {
+            client?.close()
+        }
+    }
+
+    private fun buildMcpToolArguments(toolCall: AiAction.McpToolCall): JsonObject {
+        return JsonObject().apply {
+            addProperty("spreadsheetId", mcpSpreadsheetId)
+            addProperty("sheet", mcpSheetName)
+            toolCall.arguments.forEach { (k, v) -> addProperty(k, v) }
         }
     }
 
@@ -276,6 +413,9 @@ class InsertStringsUI(
             add("currentTranslations", JsonObject().apply {
                 currentTranslations.forEach { (k, v) -> addProperty(k, v) }
             })
+            addProperty("mcpEnabled", mcpEnabled)
+            addProperty("mcpSpreadsheetId", mcpSpreadsheetId)
+            addProperty("mcpSheetName", mcpSheetName)
         }
         return root.toString()
     }
@@ -420,6 +560,8 @@ private fun InsertStringsContent(
     chatMessages: List<ChatMessage>,
     chatInput: String,
     chatSending: Boolean,
+    settingsTab: SettingsTab,
+    onSettingsTabChange: (SettingsTab) -> Unit,
     onOpenSettings: () -> Unit,
     onCloseSettings: () -> Unit,
     onOpenChat: () -> Unit,
@@ -430,6 +572,22 @@ private fun InsertStringsContent(
     onAiModelChange: (String) -> Unit,
     onFetchModels: () -> Unit,
     onSaveSettings: () -> Unit,
+    mcpEnabled: Boolean,
+    mcpCommand: String,
+    mcpArguments: String,
+    mcpWorkingDir: String,
+    mcpSpreadsheetId: String,
+    mcpSheetName: String,
+    mcpTimeoutSeconds: String,
+    mcpConnectionStatus: String,
+    onMcpEnabledChange: (Boolean) -> Unit,
+    onMcpCommandChange: (String) -> Unit,
+    onMcpArgumentsChange: (String) -> Unit,
+    onMcpWorkingDirChange: (String) -> Unit,
+    onMcpSpreadsheetIdChange: (String) -> Unit,
+    onMcpSheetNameChange: (String) -> Unit,
+    onMcpTimeoutSecondsChange: (String) -> Unit,
+    onMcpTestConnection: () -> Unit,
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
     onNewChat: () -> Unit,
@@ -448,23 +606,71 @@ private fun InsertStringsContent(
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 if (showSettings) {
-                    AiSettingsContent(
-                        aiUrl = aiUrl,
-                        aiApiKey = aiApiKey,
-                        aiProtocol = aiProtocol,
-                        aiModel = aiModel,
-                        modelOptions = modelOptions,
-                        modelFetchStatus = modelFetchStatus,
-                        onClose = onCloseSettings,
-                        onAiUrlChange = onAiUrlChange,
-                        onAiApiKeyChange = onAiApiKeyChange,
-                        onAiProtocolChange = onAiProtocolChange,
-                        onAiModelChange = onAiModelChange,
-                        onFetchModels = onFetchModels,
-                        onSave = onSaveSettings,
+                    Column(
                         modifier = Modifier.fillMaxSize(),
-                        colors = colors,
-                    )
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            CompactButton(
+                                text = "AI",
+                                onClick = { onSettingsTabChange(SettingsTab.AI) },
+                                modifier = Modifier.weight(1f),
+                                colors = colors,
+                                primary = settingsTab == SettingsTab.AI,
+                            )
+                            CompactButton(
+                                text = "Sheets MCP",
+                                onClick = { onSettingsTabChange(SettingsTab.MCP) },
+                                modifier = Modifier.weight(1f),
+                                colors = colors,
+                                primary = settingsTab == SettingsTab.MCP,
+                            )
+                        }
+                        when (settingsTab) {
+                            SettingsTab.AI -> AiSettingsContent(
+                                aiUrl = aiUrl,
+                                aiApiKey = aiApiKey,
+                                aiProtocol = aiProtocol,
+                                aiModel = aiModel,
+                                modelOptions = modelOptions,
+                                modelFetchStatus = modelFetchStatus,
+                                onClose = onCloseSettings,
+                                onAiUrlChange = onAiUrlChange,
+                                onAiApiKeyChange = onAiApiKeyChange,
+                                onAiProtocolChange = onAiProtocolChange,
+                                onAiModelChange = onAiModelChange,
+                                onFetchModels = onFetchModels,
+                                onSave = onSaveSettings,
+                                modifier = Modifier.fillMaxSize(),
+                                colors = colors,
+                            )
+                            SettingsTab.MCP -> McpSettingsContent(
+                                enabled = mcpEnabled,
+                                command = mcpCommand,
+                                arguments = mcpArguments,
+                                workingDir = mcpWorkingDir,
+                                spreadsheetId = mcpSpreadsheetId,
+                                sheetName = mcpSheetName,
+                                timeoutSeconds = mcpTimeoutSeconds,
+                                connectionStatus = mcpConnectionStatus,
+                                onClose = onCloseSettings,
+                                onEnabledChange = onMcpEnabledChange,
+                                onCommandChange = onMcpCommandChange,
+                                onArgumentsChange = onMcpArgumentsChange,
+                                onWorkingDirChange = onMcpWorkingDirChange,
+                                onSpreadsheetIdChange = onMcpSpreadsheetIdChange,
+                                onSheetNameChange = onMcpSheetNameChange,
+                                onTimeoutSecondsChange = onMcpTimeoutSecondsChange,
+                                onTestConnection = onMcpTestConnection,
+                                onSave = onSaveSettings,
+                                modifier = Modifier.fillMaxSize(),
+                                colors = colors,
+                            )
+                        }
+                    }
                 } else if (showChat) {
                     AiChatContent(
                         chatMessages = chatMessages,

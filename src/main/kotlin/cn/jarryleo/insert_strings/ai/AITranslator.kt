@@ -1,9 +1,11 @@
 package cn.jarryleo.insert_strings.ai
 
+import cn.jarryleo.insert_strings.ai.mcp.GoogleSheetsMcpTools
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.google.gson.JsonPrimitive
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -18,7 +20,7 @@ data class ChatMessage(
 object AITranslator {
     private const val SYSTEM_PROMPT =
         "你是一个专业的翻译，为开发安卓APP提供国际化翻译服务，我传给你需要翻译的文本，和目标语言的缩写代码，帮我翻译成目标语言，请返回对应的翻译结果文本，不需要额外的解释，请返回纯文本结果"
-    private const val CHAT_SYSTEM_PROMPT =
+    private val CHAT_SYSTEM_PROMPT =
         """你是一个 Android 应用国际化字符串管理助手。你必须始终以纯 JSON 格式回复，不要添加 markdown 代码块标记，不要包含 JSON 之外的说明文字。
 
 回复 JSON 结构如下：
@@ -48,7 +50,19 @@ object AITranslator {
 7. 如果上下文没有 currentModule，且用户没有明确指定模块，请询问用户是否插入到翻译行数最多的模块（moduleWithMostLines.moduleName），不要直接返回 insert_strings 动作。
 8. 可以同时返回多个 insert_strings 动作来插入多个字符串。
 9. 翻译内容中如需使用 XML 特殊字符，请转义：&amp; &lt; &gt; &quot; &apos;。
-10. 如果用户只是普通聊天或询问，不需要返回 actions。"""
+10. 如果上下文 `mcpEnabled` 为 true，你可以使用 Google Sheets MCP 工具读取或写入翻译文案。具体可用工具说明见下文。
+11. 如果用户只是普通聊天或询问，不需要返回 actions。
+
+${GoogleSheetsMcpTools.toolDescriptions}
+
+当需要调用 MCP 工具时，在 `actions` 中返回如下动作：
+{
+  "type": "mcp_tool_call",
+  "tool": "工具名称",
+  "arguments": {"参数名": "参数值", ...}
+}
+
+工具执行结果会以用户消息的形式再次发送给你，你可以继续调用工具或返回最终结果。"""
 
     private const val ANTHROPIC_VERSION = "2023-06-01"
     private val httpClient: HttpClient = HttpClient.newBuilder()
@@ -264,6 +278,14 @@ object AITranslator {
             "ask_user" -> {
                 val question = obj.get("question")?.asString ?: return null
                 AiAction.AskUser(question)
+            }
+            "mcp_tool_call" -> {
+                val tool = obj.get("tool")?.asString?.trim() ?: return null
+                val argumentsObj = obj.getAsJsonObject("arguments") ?: return null
+                val arguments = argumentsObj.entrySet().associate { it.key to it.value.extractText() }
+                if (tool.isNotEmpty()) {
+                    AiAction.McpToolCall(tool, arguments)
+                } else null
             }
             else -> null
         }
