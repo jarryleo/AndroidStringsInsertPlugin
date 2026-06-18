@@ -27,7 +27,7 @@ object AITranslator {
   "actions": [
     {
       "type": "insert_strings",
-      "module": "目标模块名称（可选）",
+      "module": "目标模块名称（可选，如 app）",
       "name": "字符串key，使用snake_case",
       "translations": {
         "values": "默认语言文本",
@@ -41,11 +41,11 @@ object AITranslator {
 规则：
 1. 当用户要求插入、添加、写入、修改翻译时，必须在 `actions` 中返回一个或多个 `insert_strings` 动作。
 2. `name` 是 Android strings.xml 中的 string name，使用 snake_case。
-3. `translations` 的键对应 Android 资源目录名，如 values、values-zh-rCN、values-fr、values-es、values-pt、values-ar、values-ja、values-ko 等。
-4. 如果上下文提供了 availableLanguages，只输出这些语言的翻译。
+3. `translations` 的键必须对应上下文 `availableLanguages` 中列出的所有语言目录名，如 values、values-zh-rCN、values-fr 等，不能遗漏任何一种语言。
+4. `module` 必须是上下文中 `modules` 列表里的 `moduleName`（例如 app），不要使用 projectName 或 originalModuleName。
 5. 如果上下文提供了 currentKey，优先使用该 key 作为 `name`。
-6. 如果上下文提供了 currentModule，默认将翻译插入/修改到该模块，不需要再询问用户。
-7. 如果上下文没有 currentModule，且用户没有明确指定模块，请询问用户是否插入到翻译行数最多的模块（moduleWithMostLines），不要直接返回 insert_strings 动作。
+6. 如果上下文提供了 currentModule，默认将翻译插入/修改到 currentModule.moduleName，不需要再询问用户。
+7. 如果上下文没有 currentModule，且用户没有明确指定模块，请询问用户是否插入到翻译行数最多的模块（moduleWithMostLines.moduleName），不要直接返回 insert_strings 动作。
 8. 可以同时返回多个 insert_strings 动作来插入多个字符串。
 9. 翻译内容中如需使用 XML 特殊字符，请转义：&amp; &lt; &gt; &quot; &apos;。
 10. 如果用户只是普通聊天或询问，不需要返回 actions。"""

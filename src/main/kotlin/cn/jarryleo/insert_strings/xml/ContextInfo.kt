@@ -14,7 +14,9 @@ data class ContextInfo(
 
     fun getJson(): String = JSON.toJSONString(this)
 
-    fun findModule(name: String): ModuleInfo? = modules.find { it.moduleName == name }
+    fun findModule(name: String): ModuleInfo? = modules.find {
+        it.moduleName == name || it.originalModuleName == name
+    }
 }
 
 /**
@@ -22,6 +24,7 @@ data class ContextInfo(
  */
 data class ModuleInfo(
     val moduleName: String,
+    val originalModuleName: String,
     val modulePath: String,
     val xmlFiles: List<XmlFileInfo>,
     val totalLines: Int = xmlFiles.sumOf { it.fileLines },

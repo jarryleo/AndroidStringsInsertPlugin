@@ -5,6 +5,7 @@ import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.ModuleRootManager
+import com.intellij.openapi.roots.ProjectRootManager
 import com.intellij.openapi.vfs.VirtualFile
 import java.io.File
 import java.util.ArrayDeque
@@ -14,22 +15,62 @@ object ContextManager {
     var contextInfo: ContextInfo? = null
         private set
 
+    // displayModuleName -> (originalModuleName, list of valuesDir to stringsFile)
+    private var moduleFilesMap: Map<String, List<Pair<VirtualFile, VirtualFile>>> = emptyMap()
+
     /**
      * 初始化项目所有模块的 strings.xml 上下文信息
      */
     @JvmStatic
     fun initContextInfo(project: Project) {
         val moduleManager = ModuleManager.getInstance(project)
-        val moduleInfos = moduleManager.modules.mapNotNull { module ->
-            val xmlFiles = collectStringsXmlFiles(module)
-            if (xmlFiles.isEmpty()) return@mapNotNull null
+        val fileIndex = ProjectRootManager.getInstance(project).fileIndex
+        val rawModuleFiles = mutableMapOf<Module, MutableList<Pair<VirtualFile, VirtualFile>>>()
+
+        moduleManager.modules.forEach { module ->
+            ModuleRootManager.getInstance(module).contentRoots.forEach { root ->
+                findResDirectories(root).forEach { resDir ->
+                    // 通过文件索引把 res 目录归属到真正的模块，避免根模块吞掉子模块
+                    val ownerModule = fileIndex.getModuleForFile(resDir) ?: module
+                    resDir.children
+                        .filter { it.isDirectory && it.name.startsWith("values") }
+                        .forEach { valuesDir ->
+                            val stringsFile = valuesDir.children
+                                .find { it.name.contains("strings", ignoreCase = true) && it.extension == "xml" }
+                            if (stringsFile != null) {
+                                rawModuleFiles.getOrPut(ownerModule) { mutableListOf() }.add(valuesDir to stringsFile)
+                            }
+                        }
+                }
+            }
+        }
+
+        val tempMap = mutableMapOf<String, List<Pair<VirtualFile, VirtualFile>>>()
+        val moduleInfos = rawModuleFiles.mapNotNull { (module, files) ->
+            if (files.isEmpty()) return@mapNotNull null
+            // 同一模块下同语言只保留一份（多个 sourceSet 时会出现重复）
+            val seenLanguages = mutableSetOf<String>()
+            val uniqueFiles = files.filter { seenLanguages.add(it.first.name) }
+            if (uniqueFiles.isEmpty()) return@mapNotNull null
+
+            val displayName = getDisplayModuleName(module, project)
+            tempMap[displayName] = uniqueFiles
+
             ModuleInfo(
-                moduleName = module.name,
+                moduleName = displayName,
+                originalModuleName = module.name,
                 modulePath = getModuleRootPath(module),
-                xmlFiles = xmlFiles,
-                totalLines = xmlFiles.sumOf { it.fileLines }
+                xmlFiles = uniqueFiles.map { (valuesDir, stringsFile) ->
+                    XmlFileInfo(
+                        filePath = stringsFile.path,
+                        language = valuesDir.name,
+                        fileLines = getFileLines(stringsFile)
+                    )
+                }
             )
         }
+
+        moduleFilesMap = tempMap
         contextInfo = ContextInfo(
             projectName = project.name,
             currentModule = null,
@@ -58,12 +99,21 @@ object ContextManager {
     }
 
     /**
-     * 获取指定模块的所有 strings.xml 文件信息（key/text 为空，仅用于定位文件）
+     * 获取指定显示名称模块的所有 strings.xml 文件信息（key/text 为空，仅用于定位文件）
      */
     @JvmStatic
     fun getModuleStringsInfo(project: Project, moduleName: String): List<StringsInfo> {
-        val module = ModuleManager.getInstance(project).modules.find { it.name == moduleName } ?: return emptyList()
-        return collectStringsXml(module).map { (valuesDir, stringsFile) ->
+        ensureInitialized(project)
+        val files = moduleFilesMap[moduleName]
+            ?: moduleFilesMap.values.flatten().let { all ->
+                // 尝试用原始模块名查找
+                val target = ModuleManager.getInstance(project).modules.find { it.name == moduleName }
+                    ?: return emptyList()
+                val displayName = getDisplayModuleName(target, project)
+                moduleFilesMap[displayName]
+            }
+            ?: return emptyList()
+        return files.map { (valuesDir, stringsFile) ->
             StringsInfo(stringsFile, valuesDir.name, "", "")
         }
     }
@@ -73,64 +123,65 @@ object ContextManager {
      */
     @JvmStatic
     fun scanModuleForKey(project: Project, moduleName: String, key: String): List<StringsInfo> {
-        val module = ModuleManager.getInstance(project).modules.find { it.name == moduleName } ?: return emptyList()
-        return collectStringsXml(module).map { (valuesDir, stringsFile) ->
+        ensureInitialized(project)
+        val files = moduleFilesMap[moduleName]
+            ?: moduleFilesMap.values.flatten().let {
+                val target = ModuleManager.getInstance(project).modules.find { it.name == moduleName }
+                    ?: return emptyList()
+                val displayName = getDisplayModuleName(target, project)
+                moduleFilesMap[displayName]
+            }
+            ?: return emptyList()
+        return files.map { (valuesDir, stringsFile) ->
             StringsInfo(stringsFile, valuesDir.name, key, getStringText(stringsFile, key))
         }
     }
 
     private fun buildCurrentModuleInfo(project: Project, file: VirtualFile): ModuleInfo? {
-        val module = findModuleForFile(project, file) ?: return null
-        val xmlFiles = collectStringsXmlFiles(module)
-        if (xmlFiles.isEmpty()) return null
+        val displayName = findModuleDisplayNameForFile(project, file) ?: return null
+        val files = moduleFilesMap[displayName] ?: return null
         return ModuleInfo(
-            moduleName = module.name,
-            modulePath = getModuleRootPath(module),
-            xmlFiles = xmlFiles
+            moduleName = displayName,
+            originalModuleName = findOriginalModuleName(project, displayName) ?: "",
+            modulePath = getModuleRootPathByName(project, displayName) ?: "",
+            xmlFiles = files.map { (valuesDir, stringsFile) ->
+                XmlFileInfo(
+                    filePath = stringsFile.path,
+                    language = valuesDir.name,
+                    fileLines = getFileLines(stringsFile)
+                )
+            }
         )
     }
 
-    private fun findModuleForFile(project: Project, file: VirtualFile): Module? {
-        return ModuleManager.getInstance(project).modules.find { belongsToModule(it, file) }
+    private fun findModuleDisplayNameForFile(project: Project, file: VirtualFile): String? {
+        val module = ProjectRootManager.getInstance(project).fileIndex.getModuleForFile(file) ?: return null
+        return getDisplayModuleName(module, project)
     }
 
-    private fun belongsToModule(module: Module, file: VirtualFile): Boolean {
-        val rootPath = getModuleRootPath(module)
-        return rootPath.isNotBlank() && file.path.startsWith(rootPath)
+    private fun findOriginalModuleName(project: Project, displayName: String): String? {
+        return ModuleManager.getInstance(project).modules
+            .find { getDisplayModuleName(it, project) == displayName }
+            ?.name
     }
 
-    private fun collectStringsXmlFiles(module: Module): List<XmlFileInfo> {
-        return collectStringsXml(module).map { (valuesDir, stringsFile) ->
-            XmlFileInfo(
-                filePath = stringsFile.path,
-                language = valuesDir.name,
-                fileLines = getFileLines(stringsFile)
-            )
-        }
+    private fun getModuleRootPathByName(project: Project, displayName: String): String? {
+        return ModuleManager.getInstance(project).modules
+            .find { getDisplayModuleName(it, project) == displayName }
+            ?.let { getModuleRootPath(it) }
     }
 
-    private fun collectStringsXml(module: Module): List<Pair<VirtualFile, VirtualFile>> {
-        val result = mutableListOf<Pair<VirtualFile, VirtualFile>>()
-        val seenLanguages = mutableSetOf<String>()
-        findResDirectories(module).forEach { resDir ->
-            resDir.children
-                .filter { it.isDirectory && it.name.startsWith("values") }
-                .forEach { valuesDir ->
-                    val stringsFile = valuesDir.children
-                        .find { it.name.contains("strings", ignoreCase = true) && it.extension == "xml" }
-                    if (stringsFile != null && seenLanguages.add(valuesDir.name)) {
-                        result.add(valuesDir to stringsFile)
-                    }
-                }
-        }
-        return result
+    private fun getDisplayModuleName(module: Module, project: Project): String {
+        val prefix = "${project.name}."
+        val name = module.name
+        return if (name.startsWith(prefix)) name.removePrefix(prefix) else name
     }
 
-    private fun findResDirectories(module: Module): List<VirtualFile> {
+    private fun findResDirectories(root: VirtualFile): List<VirtualFile> {
         val result = mutableListOf<VirtualFile>()
         val visited = mutableSetOf<String>()
         val queue = ArrayDeque<Pair<VirtualFile, Int>>()
-        ModuleRootManager.getInstance(module).contentRoots.forEach { queue.add(it to 0) }
+        queue.add(root to 0)
         while (queue.isNotEmpty()) {
             val (dir, depth) = queue.removeFirst()
             if (!dir.isDirectory || depth > 6) continue

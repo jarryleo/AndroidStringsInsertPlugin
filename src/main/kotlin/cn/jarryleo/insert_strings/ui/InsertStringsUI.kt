@@ -257,7 +257,9 @@ class InsertStringsUI(
 
     private fun buildChatContext(): String {
         val contextInfo = ContextManager.contextInfo ?: return ""
-        val availableLanguages = insertStringsManager.languages ?: emptyList()
+        val availableLanguages = insertStringsManager.languages?.takeIf { it.isNotEmpty() }
+            ?: contextInfo.currentModule?.xmlFiles?.map { it.language }
+            ?: emptyList()
         val currentTranslations = rows.filter { it.text.isNotEmpty() }.associate { it.language to it.text }
 
         val root = JsonObject().apply {
@@ -281,6 +283,7 @@ class InsertStringsUI(
     private fun moduleToJson(module: ModuleInfo): JsonObject {
         return JsonObject().apply {
             addProperty("moduleName", module.moduleName)
+            addProperty("originalModuleName", module.originalModuleName)
             addProperty("modulePath", module.modulePath)
             addProperty("totalLines", module.totalLines)
             add("xmlFiles", JsonArray().apply {
@@ -340,7 +343,9 @@ class InsertStringsUI(
                 merged
             }
 
-            if (targetModule == currentModuleName) {
+            val useCurrentStringsList = targetModule == currentModuleName
+                    && !insertStringsManager.languages.isNullOrEmpty()
+            if (useCurrentStringsList) {
                 insertStringsManager.insert(project, action.name, stringsInfoList)
             } else {
                 insertStringsManager.insertIntoModule(project, targetModule, action.name, stringsInfoList)
