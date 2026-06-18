@@ -43,6 +43,7 @@ dependencies {
     implementation(compose.desktop.currentOs)
     implementation("org.commonmark:commonmark:0.22.0")
     implementation("org.commonmark:commonmark-ext-gfm-tables:0.22.0")
+    implementation("com.alibaba.fastjson2:fastjson2:2.0.52")
 }
 
 tasks {

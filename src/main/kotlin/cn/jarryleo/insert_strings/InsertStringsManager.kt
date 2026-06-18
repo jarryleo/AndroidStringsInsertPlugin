@@ -72,12 +72,12 @@ class InsertStringsManager(private val project: Project) {
             stringsList?.associate { it.language to it.text } ?: emptyMap()
         )
         //CopyPasteManager.copyTextToClipboard(clipInfo.toXml())
-        ClipboardManager.setSysClipboardText(clipInfo.toXml())
+        ClipboardManager.setSysClipboardText(clipInfo.toJson())
     }
 
     fun paste(file: VirtualFile): Boolean {
         val text = ClipboardManager.getSysClipboardText()
-        val clipInfo = ClipInfo.fromXml(text) ?: return false
+        val clipInfo = ClipInfo.fromJson(text) ?: return false
         val nodeName = clipInfo.node
         val anchor = clipInfo.anchor
         val languages = clipInfo.value.keys.toList()
