@@ -1,7 +1,6 @@
 package cn.jarryleo.insert_strings.sheets
 
 import com.google.api.client.auth.oauth2.Credential
-import com.google.api.client.extensions.java6.auth.oauth2.AuthorizationCodeInstalledApp
 import com.google.api.client.extensions.jetty.auth.oauth2.LocalServerReceiver
 import com.google.api.client.googleapis.auth.oauth2.GoogleAuthorizationCodeFlow
 import com.google.api.client.googleapis.auth.oauth2.GoogleClientSecrets
@@ -13,9 +12,16 @@ import com.google.api.services.sheets.v4.Sheets
 import com.google.api.services.sheets.v4.SheetsScopes
 import com.google.api.services.sheets.v4.model.ClearValuesRequest
 import com.google.api.services.sheets.v4.model.ValueRange
+import com.intellij.ide.BrowserUtil
+import com.intellij.openapi.ui.Messages
 import java.io.File
 import java.io.FileInputStream
 import java.io.InputStreamReader
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicReference
+import javax.swing.SwingUtilities
 
 object SheetsManager {
     private const val APPLICATION_NAME = "InsertStrings Plugin"
@@ -44,6 +50,10 @@ object SheetsManager {
             throw IllegalStateException("Please configure Google Sheets credentials and tokens directory first.")
         }
 
+        if (SwingUtilities.isEventDispatchThread()) {
+            throw IllegalStateException("Authorization must not be called on the EDT.")
+        }
+
         val credentialsFile = File(settings.credentialsJsonPath)
         if (!credentialsFile.exists()) {
             throw IllegalStateException("Credentials file not found: ${settings.credentialsJsonPath}")
@@ -63,10 +73,80 @@ object SheetsManager {
             .setAccessType("offline")
             .build()
 
-        val receiver = LocalServerReceiver.Builder().setPort(0).build()
-        val credential = AuthorizationCodeInstalledApp(flow, receiver).authorize("user")
+        // 使用 127.0.0.1 避免 localhost 被解析到 IPv6 导致回调丢失
+        val receiver = LocalServerReceiver.Builder()
+            .setHost("127.0.0.1")
+            .setPort(0)
+            .build()
+
+        val redirectUri = receiver.redirectUri
+        val authorizationUrl = flow.newAuthorizationUrl()
+            .setRedirectUri(redirectUri)
+            .build()
+
+        // 使用 IntelliJ 的 BrowserUtil 打开浏览器，兼容插件环境
+        SwingUtilities.invokeLater {
+            BrowserUtil.browse(authorizationUrl)
+        }
+
+        val code = try {
+            waitForAuthorizationCode(receiver, timeoutMs = 180_000)
+        } catch (e: Exception) {
+            // 自动回环失败时，让用户手动粘贴授权码
+            requestAuthorizationCodeFromUser(authorizationUrl)
+        } finally {
+            runCatching { receiver.stop() }
+        }
+
+        val tokenResponse = flow.newTokenRequest(code)
+            .setRedirectUri(redirectUri)
+            .execute()
+
+        val credential = flow.createAndStoreCredential(tokenResponse, "user")
         cachedCredential = credential
         return credential
+    }
+
+    private fun waitForAuthorizationCode(receiver: LocalServerReceiver, timeoutMs: Long): String {
+        val future = CompletableFuture<String>()
+        val thread = Thread {
+            try {
+                future.complete(receiver.waitForCode())
+            } catch (e: Throwable) {
+                future.completeExceptionally(e)
+            }
+        }
+        thread.isDaemon = true
+        thread.start()
+        return try {
+            future.get(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+            throw IllegalStateException(
+                "Authorization timed out. The browser did not redirect back to the plugin. " +
+                        "You can paste the authorization code manually in the next dialog."
+            )
+        }
+    }
+
+    private fun requestAuthorizationCodeFromUser(authorizationUrl: String): String {
+        val codeRef = AtomicReference<String>()
+        SwingUtilities.invokeAndWait {
+            Messages.showInfoMessage(
+                "A browser window was opened for Google authorization.\n\n" +
+                        "If the plugin did not receive the authorization automatically, " +
+                        "please copy the authorization code from the browser and paste it below.\n\n" +
+                        "Authorization URL:\n$authorizationUrl",
+                "Google Sheets Authorization"
+            )
+            val code = Messages.showInputDialog(
+                "Paste authorization code:",
+                "Google Sheets Authorization",
+                Messages.getQuestionIcon()
+            )
+            codeRef.set(code)
+        }
+        return codeRef.get()?.trim()?.takeIf { it.isNotBlank() }
+            ?: throw IllegalStateException("Authorization code is empty.")
     }
 
     fun invalidateCredential() {
