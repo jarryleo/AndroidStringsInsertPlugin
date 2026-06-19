@@ -17,6 +17,8 @@ import cn.jarryleo.insert_strings.ai.AiAction
 import cn.jarryleo.insert_strings.ai.AiProtocol
 import cn.jarryleo.insert_strings.ai.AiSettingsService
 import cn.jarryleo.insert_strings.ai.ChatMessage
+import cn.jarryleo.insert_strings.sheets.SheetsManager
+import cn.jarryleo.insert_strings.sheets.SheetsSettingsService
 import cn.jarryleo.insert_strings.xml.ContextManager
 import cn.jarryleo.insert_strings.xml.ModuleInfo
 import cn.jarryleo.insert_strings.xml.StringsInfo
@@ -30,8 +32,10 @@ import com.intellij.openapi.wm.ToolWindow
 import org.jetbrains.annotations.NotNull
 import org.jetbrains.annotations.Nullable
 import javax.swing.JComponent
+import javax.swing.JFileChooser
 import javax.swing.SwingUtilities
 import javax.swing.Timer
+import javax.swing.filechooser.FileNameExtensionFilter
 
 class InsertStringsUI(
     private val toolWindow: ToolWindow
@@ -55,6 +59,20 @@ class InsertStringsUI(
     private var chatInput by mutableStateOf("")
     private var chatSending by mutableStateOf(false)
 
+    // Google Sheets state
+    private var showSheetsSettings by mutableStateOf(false)
+    private var sheetsCredentialsPath by mutableStateOf("")
+    private var sheetsTokensPath by mutableStateOf("")
+    private var sheetsDefaultSpreadsheetId by mutableStateOf("")
+    private var sheetsDefaultSheetName by mutableStateOf("Sheet1")
+    private var sheetsConnectionStatus by mutableStateOf("")
+
+    private var showSheetsOperations by mutableStateOf(false)
+    private var sheetsSpreadsheetId by mutableStateOf("")
+    private var sheetsRange by mutableStateOf("")
+    private var sheetsSearchKey by mutableStateOf("")
+    private var sheetsOperationStatus by mutableStateOf("")
+
     private val rootPanel = ComposePanel().apply {
         setContent {
             MaterialTheme {
@@ -71,6 +89,8 @@ class InsertStringsUI(
                     toastMessage = toastMessage,
                     showSettings = showSettings,
                     showChat = showChat,
+                    showSheetsSettings = showSheetsSettings,
+                    showSheetsOperations = showSheetsOperations,
                     aiUrl = aiUrl,
                     aiApiKey = aiApiKey,
                     aiProtocol = aiProtocol,
@@ -84,12 +104,40 @@ class InsertStringsUI(
                     onCloseSettings = { showSettings = false },
                     onOpenChat = { showChat = true },
                     onCloseChat = { showChat = false },
+                    onOpenSheetsSettings = { showSheetsSettings = true },
+                    onCloseSheetsSettings = { showSheetsSettings = false },
+                    onOpenSheetsOperations = { showSheetsOperations = true },
+                    onCloseSheetsOperations = { showSheetsOperations = false },
                     onAiUrlChange = { aiUrl = it },
                     onAiApiKeyChange = { aiApiKey = it },
                     onAiProtocolChange = { aiProtocol = it },
                     onAiModelChange = { aiModel = it },
                     onFetchModels = ::fetchModels,
                     onSaveSettings = ::saveSettings,
+                    sheetsCredentialsPath = sheetsCredentialsPath,
+                    sheetsTokensPath = sheetsTokensPath,
+                    sheetsDefaultSpreadsheetId = sheetsDefaultSpreadsheetId,
+                    sheetsDefaultSheetName = sheetsDefaultSheetName,
+                    sheetsConnectionStatus = sheetsConnectionStatus,
+                    onSheetsCredentialsPathChange = { sheetsCredentialsPath = it },
+                    onSheetsTokensPathChange = { sheetsTokensPath = it },
+                    onSheetsDefaultSpreadsheetIdChange = { sheetsDefaultSpreadsheetId = it },
+                    onSheetsDefaultSheetNameChange = { sheetsDefaultSheetName = it },
+                    onBrowseSheetsCredentials = ::browseSheetsCredentials,
+                    onBrowseSheetsTokensDir = ::browseSheetsTokensDir,
+                    onTestSheetsConnection = ::testSheetsConnection,
+                    onSaveSheetsSettings = ::saveSheetsSettings,
+                    sheetsSpreadsheetId = sheetsSpreadsheetId,
+                    sheetsRange = sheetsRange,
+                    sheetsSearchKey = sheetsSearchKey,
+                    sheetsOperationStatus = sheetsOperationStatus,
+                    onSheetsSpreadsheetIdChange = { sheetsSpreadsheetId = it },
+                    onSheetsRangeChange = { sheetsRange = it },
+                    onSheetsSearchKeyChange = { sheetsSearchKey = it },
+                    onReadFromSheets = ::readFromSheets,
+                    onWriteToSheets = { writeToSheets(append = false) },
+                    onAppendToSheets = { writeToSheets(append = true) },
+                    onSearchSheets = ::searchSheets,
                     onChatInputChange = { chatInput = it },
                     onSendChat = ::sendChat,
                     onNewChat = ::newChat,
@@ -104,6 +152,7 @@ class InsertStringsUI(
         val currentFile = FileEditorManager.getInstance(project).selectedEditor?.file
         ContextManager.updateCurrentModule(project, currentFile)
         loadSettings()
+        loadSheetsSettings()
         insertStringsManager.setUiCallBack(this)
     }
 
@@ -199,6 +248,246 @@ class InsertStringsUI(
         showSettings = false
     }
 
+    private fun loadSheetsSettings() {
+        val settings = SheetsSettingsService.getInstance().state
+        sheetsCredentialsPath = settings.credentialsJsonPath
+        sheetsTokensPath = settings.tokensDirectoryPath
+        sheetsDefaultSpreadsheetId = settings.defaultSpreadsheetId
+        sheetsDefaultSheetName = settings.defaultSheetName
+        sheetsSpreadsheetId = settings.defaultSpreadsheetId
+        sheetsRange = "${settings.defaultSheetName}!A1:Z1000"
+    }
+
+    private fun saveSheetsSettings() {
+        SheetsSettingsService.getInstance().update(
+            credentialsJsonPath = sheetsCredentialsPath,
+            tokensDirectoryPath = sheetsTokensPath,
+            defaultSpreadsheetId = sheetsDefaultSpreadsheetId,
+            defaultSheetName = sheetsDefaultSheetName,
+        )
+        sheetsConnectionStatus = "Saved."
+        showSheetsSettings = false
+    }
+
+    private fun testSheetsConnection() {
+        sheetsConnectionStatus = "Connecting..."
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val result = SheetsManager.testConnection(sheetsDefaultSpreadsheetId)
+            SwingUtilities.invokeLater {
+                result.fold(
+                    onSuccess = { sheetsConnectionStatus = it },
+                    onFailure = { sheetsConnectionStatus = it.message ?: "Connection failed." }
+                )
+            }
+        }
+    }
+
+    private fun browseSheetsCredentials() {
+        val chooser = JFileChooser().apply {
+            dialogTitle = "Select Google Sheets Credentials JSON"
+            fileSelectionMode = JFileChooser.FILES_ONLY
+            fileFilter = FileNameExtensionFilter("JSON files", "json")
+        }
+        if (chooser.showOpenDialog(rootPanel) == JFileChooser.APPROVE_OPTION) {
+            sheetsCredentialsPath = chooser.selectedFile.absolutePath
+        }
+    }
+
+    private fun browseSheetsTokensDir() {
+        val chooser = JFileChooser().apply {
+            dialogTitle = "Select Tokens Directory"
+            fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
+        }
+        if (chooser.showOpenDialog(rootPanel) == JFileChooser.APPROVE_OPTION) {
+            sheetsTokensPath = chooser.selectedFile.absolutePath
+        }
+    }
+
+    private fun readFromSheets() {
+        val spreadsheetId = SheetsManager.resolveSpreadsheetId(sheetsSpreadsheetId)
+        if (spreadsheetId.isBlank()) {
+            sheetsOperationStatus = "Spreadsheet ID is empty."
+            return
+        }
+        sheetsOperationStatus = "Reading..."
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val result = SheetsManager.readRange(spreadsheetId, sheetsRange)
+            SwingUtilities.invokeLater {
+                result.fold(
+                    onSuccess = { rows ->
+                        applySheetRowsToUi(rows)
+                        sheetsOperationStatus = "Read ${rows.size} rows."
+                    },
+                    onFailure = { sheetsOperationStatus = it.message ?: "Read failed." }
+                )
+            }
+        }
+    }
+
+    private fun writeToSheets(append: Boolean = false) {
+        val spreadsheetId = SheetsManager.resolveSpreadsheetId(sheetsSpreadsheetId)
+        if (spreadsheetId.isBlank()) {
+            sheetsOperationStatus = "Spreadsheet ID is empty."
+            return
+        }
+        sheetsOperationStatus = if (append) "Appending..." else "Writing..."
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val rows = buildSheetRows()
+            val result = if (append) {
+                SheetsManager.appendRange(spreadsheetId, sheetsRange, rows)
+            } else {
+                SheetsManager.writeRange(spreadsheetId, sheetsRange, rows)
+            }
+            SwingUtilities.invokeLater {
+                result.fold(
+                    onSuccess = {
+                        sheetsOperationStatus = if (append) "Appended ${rows.size} rows." else "Wrote ${rows.size} rows."
+                    },
+                    onFailure = { sheetsOperationStatus = it.message ?: "Write failed." }
+                )
+            }
+        }
+    }
+
+    private fun searchSheets() {
+        val spreadsheetId = SheetsManager.resolveSpreadsheetId(sheetsSpreadsheetId)
+        if (spreadsheetId.isBlank()) {
+            sheetsOperationStatus = "Spreadsheet ID is empty."
+            return
+        }
+        if (sheetsSearchKey.isBlank()) {
+            sheetsOperationStatus = "Search key is empty."
+            return
+        }
+        sheetsOperationStatus = "Searching..."
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val result = SheetsManager.searchRowByKey(spreadsheetId, sheetsRange, sheetsSearchKey)
+            SwingUtilities.invokeLater {
+                result.fold(
+                    onSuccess = { (_, row) ->
+                        applySheetRowToUi(row)
+                        sheetsOperationStatus = "Found key '${sheetsSearchKey}'."
+                    },
+                    onFailure = { sheetsOperationStatus = it.message ?: "Search failed." }
+                )
+            }
+        }
+    }
+
+    private fun buildSheetRows(): List<List<String>> {
+        val languages = rows.map { it.language }
+        val header = listOf("key") + languages
+        val dataRow = listOf(stringName) + rows.map { it.text }
+        return listOf(header, dataRow)
+    }
+
+    private fun applySheetRowsToUi(sheetRows: List<List<String>>) {
+        if (sheetRows.isEmpty()) return
+        val header = sheetRows.firstOrNull() ?: return
+        val keyIndex = header.indexOfFirst { it.equals("key", ignoreCase = true) }
+        val dataRows = if (keyIndex != -1) sheetRows.drop(1) else sheetRows
+        val languages = if (keyIndex != -1) {
+            header.filterIndexed { index, _ -> index != keyIndex }
+        } else {
+            header.drop(1)
+        }
+        val keyColumn = if (keyIndex != -1) keyIndex else 0
+
+        val firstRow = dataRows.firstOrNull() ?: return
+        val newKey = firstRow.getOrNull(keyColumn) ?: ""
+        if (newKey.isNotEmpty()) {
+            stringName = newKey
+        }
+
+        val newRows = languages.mapIndexed { langIndex, language ->
+            val originalIndex = if (keyIndex == -1) {
+                langIndex + 1
+            } else {
+                if (langIndex < keyIndex) langIndex else langIndex + 1
+            }
+            val value = firstRow.getOrNull(originalIndex) ?: ""
+            StringRow(language = language, text = value)
+        }
+        rows.clear()
+        rows.addAll(newRows)
+    }
+
+    private fun applySheetRowToUi(row: List<String>) {
+        applySheetRowsToUi(listOf(row))
+    }
+
+    private fun executeSheetsOperation(action: AiAction.SheetsOperation) {
+        when (action.operation) {
+            AiAction.SheetsOperation.Operation.WRITE -> {
+                val rowsToWrite = action.rows ?: buildSheetRows()
+                val spreadsheetId = SheetsManager.resolveSpreadsheetId(action.spreadsheetId)
+                val range = action.range ?: "${SheetsManager.defaultSheetName()}!A1:Z1000"
+                if (spreadsheetId.isBlank()) {
+                    showToast("Spreadsheet ID is empty.")
+                    return
+                }
+                ApplicationManager.getApplication().executeOnPooledThread {
+                    val result = SheetsManager.writeRange(spreadsheetId, range, rowsToWrite)
+                    SwingUtilities.invokeLater {
+                        result.fold(
+                            onSuccess = { showToast("Wrote to Google Sheets.") },
+                            onFailure = { showToast(it.message ?: "Sheets write failed.") }
+                        )
+                    }
+                }
+            }
+            AiAction.SheetsOperation.Operation.READ -> {
+                val spreadsheetId = SheetsManager.resolveSpreadsheetId(action.spreadsheetId)
+                val range = action.range ?: "${SheetsManager.defaultSheetName()}!A1:Z1000"
+                if (spreadsheetId.isBlank()) {
+                    showToast("Spreadsheet ID is empty.")
+                    return
+                }
+                ApplicationManager.getApplication().executeOnPooledThread {
+                    val result = if (action.key.isNullOrBlank()) {
+                        SheetsManager.readRange(spreadsheetId, range)
+                    } else {
+                        SheetsManager.searchRowByKey(spreadsheetId, range, action.key).map { listOf(it.second) }
+                    }
+                    SwingUtilities.invokeLater {
+                        result.fold(
+                            onSuccess = { sheetRows ->
+                                applySheetRowsToUi(sheetRows)
+                                showToast("Read from Google Sheets.")
+                            },
+                            onFailure = { showToast(it.message ?: "Sheets read failed.") }
+                        )
+                    }
+                }
+            }
+            AiAction.SheetsOperation.Operation.SEARCH -> {
+                val key = action.key ?: sheetsSearchKey
+                if (key.isBlank()) {
+                    showToast("Search key is empty.")
+                    return
+                }
+                val spreadsheetId = SheetsManager.resolveSpreadsheetId(action.spreadsheetId)
+                val range = action.range ?: "${SheetsManager.defaultSheetName()}!A1:Z1000"
+                if (spreadsheetId.isBlank()) {
+                    showToast("Spreadsheet ID is empty.")
+                    return
+                }
+                ApplicationManager.getApplication().executeOnPooledThread {
+                    val result = SheetsManager.searchRowByKey(spreadsheetId, range, key)
+                    SwingUtilities.invokeLater {
+                        result.fold(
+                            onSuccess = { (_, row) ->
+                                applySheetRowToUi(row)
+                                showToast("Found key '$key' in Google Sheets.")
+                            },
+                            onFailure = { showToast(it.message ?: "Sheets search failed.") }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     private fun fetchModels() {
         modelFetchStatus = "Loading models..."
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -261,6 +550,7 @@ class InsertStringsUI(
             ?: contextInfo.currentModule?.xmlFiles?.map { it.language }
             ?: emptyList()
         val currentTranslations = rows.filter { it.text.isNotEmpty() }.associate { it.language to it.text }
+        val sheetsSettings = SheetsSettingsService.getInstance().state
 
         val root = JsonObject().apply {
             addProperty("projectName", contextInfo.projectName)
@@ -275,6 +565,11 @@ class InsertStringsUI(
             addProperty("currentKey", stringName)
             add("currentTranslations", JsonObject().apply {
                 currentTranslations.forEach { (k, v) -> addProperty(k, v) }
+            })
+            add("googleSheets", JsonObject().apply {
+                addProperty("configured", sheetsSettings.credentialsJsonPath.isNotBlank() && sheetsSettings.tokensDirectoryPath.isNotBlank())
+                addProperty("defaultSpreadsheetId", sheetsSettings.defaultSpreadsheetId)
+                addProperty("defaultSheetName", sheetsSettings.defaultSheetName)
             })
         }
         return root.toString()
@@ -302,8 +597,9 @@ class InsertStringsUI(
         val insertActions = actions.filterIsInstance<AiAction.InsertStrings>()
         if (insertActions.isNotEmpty()) {
             executeInsertActions(insertActions)
-            return
         }
+        val sheetsActions = actions.filterIsInstance<AiAction.SheetsOperation>()
+        sheetsActions.forEach { executeSheetsOperation(it) }
         val askActions = actions.filterIsInstance<AiAction.AskUser>()
         if (askActions.isNotEmpty()) {
             // 问题内容已经包含在 reply 中，用户继续对话即可
@@ -411,6 +707,8 @@ private fun InsertStringsContent(
     toastMessage: String,
     showSettings: Boolean,
     showChat: Boolean,
+    showSheetsSettings: Boolean,
+    showSheetsOperations: Boolean,
     aiUrl: String,
     aiApiKey: String,
     aiProtocol: AiProtocol,
@@ -424,12 +722,40 @@ private fun InsertStringsContent(
     onCloseSettings: () -> Unit,
     onOpenChat: () -> Unit,
     onCloseChat: () -> Unit,
+    onOpenSheetsSettings: () -> Unit,
+    onCloseSheetsSettings: () -> Unit,
+    onOpenSheetsOperations: () -> Unit,
+    onCloseSheetsOperations: () -> Unit,
     onAiUrlChange: (String) -> Unit,
     onAiApiKeyChange: (String) -> Unit,
     onAiProtocolChange: (AiProtocol) -> Unit,
     onAiModelChange: (String) -> Unit,
     onFetchModels: () -> Unit,
     onSaveSettings: () -> Unit,
+    sheetsCredentialsPath: String,
+    sheetsTokensPath: String,
+    sheetsDefaultSpreadsheetId: String,
+    sheetsDefaultSheetName: String,
+    sheetsConnectionStatus: String,
+    onSheetsCredentialsPathChange: (String) -> Unit,
+    onSheetsTokensPathChange: (String) -> Unit,
+    onSheetsDefaultSpreadsheetIdChange: (String) -> Unit,
+    onSheetsDefaultSheetNameChange: (String) -> Unit,
+    onBrowseSheetsCredentials: () -> Unit,
+    onBrowseSheetsTokensDir: () -> Unit,
+    onTestSheetsConnection: () -> Unit,
+    onSaveSheetsSettings: () -> Unit,
+    sheetsSpreadsheetId: String,
+    sheetsRange: String,
+    sheetsSearchKey: String,
+    sheetsOperationStatus: String,
+    onSheetsSpreadsheetIdChange: (String) -> Unit,
+    onSheetsRangeChange: (String) -> Unit,
+    onSheetsSearchKeyChange: (String) -> Unit,
+    onReadFromSheets: () -> Unit,
+    onWriteToSheets: () -> Unit,
+    onAppendToSheets: () -> Unit,
+    onSearchSheets: () -> Unit,
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
     onNewChat: () -> Unit,
@@ -462,6 +788,42 @@ private fun InsertStringsContent(
                         onAiModelChange = onAiModelChange,
                         onFetchModels = onFetchModels,
                         onSave = onSaveSettings,
+                        modifier = Modifier.fillMaxSize(),
+                        colors = colors,
+                    )
+                } else if (showSheetsSettings) {
+                    SheetsSettingsContent(
+                        credentialsPath = sheetsCredentialsPath,
+                        tokensPath = sheetsTokensPath,
+                        defaultSpreadsheetId = sheetsDefaultSpreadsheetId,
+                        defaultSheetName = sheetsDefaultSheetName,
+                        connectionStatus = sheetsConnectionStatus,
+                        onClose = onCloseSheetsSettings,
+                        onCredentialsPathChange = onSheetsCredentialsPathChange,
+                        onTokensPathChange = onSheetsTokensPathChange,
+                        onDefaultSpreadsheetIdChange = onSheetsDefaultSpreadsheetIdChange,
+                        onDefaultSheetNameChange = onSheetsDefaultSheetNameChange,
+                        onBrowseCredentials = onBrowseSheetsCredentials,
+                        onBrowseTokensDir = onBrowseSheetsTokensDir,
+                        onTestConnection = onTestSheetsConnection,
+                        onSave = onSaveSheetsSettings,
+                        modifier = Modifier.fillMaxSize(),
+                        colors = colors,
+                    )
+                } else if (showSheetsOperations) {
+                    SheetsOperationsContent(
+                        spreadsheetId = sheetsSpreadsheetId,
+                        sheetRange = sheetsRange,
+                        searchKey = sheetsSearchKey,
+                        operationStatus = sheetsOperationStatus,
+                        onClose = onCloseSheetsOperations,
+                        onSpreadsheetIdChange = onSheetsSpreadsheetIdChange,
+                        onSheetRangeChange = onSheetsRangeChange,
+                        onSearchKeyChange = onSheetsSearchKeyChange,
+                        onRead = onReadFromSheets,
+                        onWrite = onWriteToSheets,
+                        onAppend = onAppendToSheets,
+                        onSearch = onSearchSheets,
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )
@@ -499,6 +861,18 @@ private fun InsertStringsContent(
                             text = "Chat",
                             onClick = onOpenChat,
                             modifier = Modifier.width(52.dp),
+                            colors = colors,
+                        )
+                        CompactButton(
+                            text = "Sheets",
+                            onClick = onOpenSheetsOperations,
+                            modifier = Modifier.width(56.dp),
+                            colors = colors,
+                        )
+                        CompactButton(
+                            text = "Sheets Set",
+                            onClick = onOpenSheetsSettings,
+                            modifier = Modifier.width(80.dp),
                             colors = colors,
                         )
                         CompactButton(

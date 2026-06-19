@@ -34,6 +34,20 @@ object AITranslator {
         "values-zh-rCN": "简体中文翻译",
         "values-fr": "法语翻译"
       }
+    },
+    {
+      "type": "sheets_operation",
+      "operation": "write",
+      "spreadsheetId": "Google表格ID（可选，默认使用设置中的表格ID）",
+      "range": "工作表范围，例如 Sheet1!A1:Z100",
+      "rows": [["key", "values", "values-zh-rCN"], ["hello", "Hello", "你好"]]
+    },
+    {
+      "type": "sheets_operation",
+      "operation": "read",
+      "spreadsheetId": "Google表格ID（可选）",
+      "range": "工作表范围，例如 Sheet1!A1:Z100",
+      "key": "要查找的字符串key（可选，为空则读取整个范围）"
     }
   ]
 }
@@ -48,7 +62,9 @@ object AITranslator {
 7. 如果上下文没有 currentModule，且用户没有明确指定模块，请询问用户是否插入到翻译行数最多的模块（moduleWithMostLines.moduleName），不要直接返回 insert_strings 动作。
 8. 可以同时返回多个 insert_strings 动作来插入多个字符串。
 9. 翻译内容中如需使用 XML 特殊字符，请转义：&amp; &lt; &gt; &quot; &apos;。
-10. 如果用户只是普通聊天或询问，不需要返回 actions。"""
+10. 当用户要求把翻译写入 Google Sheets、同步到表格、导出到表格时，返回 `sheets_operation` 动作，`operation` 为 `write`，`rows` 第一行为表头（key + 语言目录名），后续每行是一条翻译。
+11. 当用户要求从 Google Sheets 读取翻译、查找表格中的翻译时，返回 `sheets_operation` 动作，`operation` 为 `read`，可指定 `key` 只读取匹配行。
+12. 如果用户只是普通聊天或询问，不需要返回 actions。"""
 
     private const val ANTHROPIC_VERSION = "2023-06-01"
     private val httpClient: HttpClient = HttpClient.newBuilder()
@@ -264,6 +280,21 @@ object AITranslator {
             "ask_user" -> {
                 val question = obj.get("question")?.asString ?: return null
                 AiAction.AskUser(question)
+            }
+            "sheets_operation" -> {
+                val operationText = obj.get("operation")?.asString ?: return null
+                val operation = runCatching {
+                    AiAction.SheetsOperation.Operation.valueOf(operationText.uppercase())
+                }.getOrNull() ?: return null
+                val spreadsheetId = obj.get("spreadsheetId")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val range = obj.get("range")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val key = obj.get("key")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val rowsArray = obj.getAsJsonArray("rows")
+                val rows = rowsArray?.mapNotNull { rowElement ->
+                    if (!rowElement.isJsonArray) return@mapNotNull null
+                    rowElement.asJsonArray.map { it?.extractText().orEmpty() }
+                }
+                AiAction.SheetsOperation(operation, spreadsheetId, range, key, rows)
             }
             else -> null
         }
