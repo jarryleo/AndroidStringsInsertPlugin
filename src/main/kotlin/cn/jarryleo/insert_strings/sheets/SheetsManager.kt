@@ -15,13 +15,13 @@ import com.google.api.services.sheets.v4.model.ValueRange
 import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
-import com.intellij.util.net.HttpConfigurable
 import com.sun.net.httpserver.HttpServer
 import java.io.File
 import java.io.InputStream
 import java.io.InputStreamReader
 import java.net.InetSocketAddress
 import java.net.Proxy
+import java.net.ProxySelector
 import java.net.URI
 import java.net.URLDecoder
 import java.util.concurrent.CompletableFuture
@@ -57,9 +57,9 @@ object SheetsManager {
 
     private fun resolveIdeProxy(): Proxy? {
         return try {
-            HttpConfigurable.getInstance().onlyBySettingsSelector
+            ProxySelector.getDefault()
                 .select(URI("https://www.googleapis.com"))
-                .firstOrNull { HttpConfigurable.isRealProxy(it) }
+                .firstOrNull { it.type() != Proxy.Type.DIRECT }
         } catch (e: Exception) {
             null
         }
