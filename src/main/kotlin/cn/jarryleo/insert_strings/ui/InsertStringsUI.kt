@@ -120,6 +120,7 @@ class InsertStringsUI(
                     onSaveSheetsSettings = ::saveSheetsSettings,
                     onChatInputChange = { chatInput = it },
                     onSendChat = ::sendChat,
+                    onQuickSend = ::quickSend,
                     onNewChat = ::newChat,
                 )
             }
@@ -419,8 +420,17 @@ class InsertStringsUI(
     private fun sendChat() {
         val text = chatInput.trim()
         if (text.isEmpty() || chatSending) return
-        chatMessages.add(ChatMessage(role = "user", content = text))
         chatInput = ""
+        sendChatMessage(text)
+    }
+
+    private fun quickSend(text: String) {
+        if (text.isBlank() || chatSending) return
+        sendChatMessage(text.trim())
+    }
+
+    private fun sendChatMessage(text: String) {
+        chatMessages.add(ChatMessage(role = "user", content = text))
         chatSending = true
         val context = buildChatContext()
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -668,6 +678,7 @@ private fun InsertStringsContent(
     onSaveSheetsSettings: () -> Unit,
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
+    onQuickSend: (String) -> Unit,
     onNewChat: () -> Unit,
 ) {
     val colors = rememberIdeColors()
@@ -719,6 +730,7 @@ private fun InsertStringsContent(
                         onNewChat = onNewChat,
                         onChatInputChange = onChatInputChange,
                         onSendChat = onSendChat,
+                        onQuickSend = onQuickSend,
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )

@@ -51,6 +51,7 @@ fun CompactButton(
     modifier: Modifier = Modifier,
     colors: IdeColors,
     primary: Boolean = false,
+    enabled: Boolean = true,
 ) {
     val background = if (primary) colors.accent else colors.buttonBackground
     val foreground = if (primary) colors.accentText else colors.text
@@ -60,11 +61,18 @@ fun CompactButton(
     Box(
         modifier = modifier
             .height(26.dp)
-            .background(background, RoundedCornerShape(3.dp))
-            .border(BorderStroke(1.dp, border), RoundedCornerShape(3.dp))
+            .background(
+                if (enabled) background else colors.fieldBackground,
+                RoundedCornerShape(3.dp)
+            )
+            .border(
+                BorderStroke(1.dp, if (enabled) border else colors.fieldBorder),
+                RoundedCornerShape(3.dp)
+            )
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
+                enabled = enabled,
                 onClick = onClick
             )
             .padding(horizontal = 8.dp),
@@ -72,8 +80,8 @@ fun CompactButton(
     ) {
         Text(
             text = text,
-            color = foreground,
-            style = compactTextStyle(foreground),
+            color = if (enabled) foreground else colors.secondaryText,
+            style = compactTextStyle(if (enabled) foreground else colors.secondaryText),
             maxLines = 1,
         )
     }

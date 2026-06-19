@@ -12,6 +12,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -27,6 +28,7 @@ fun AiChatContent(
     onNewChat: () -> Unit,
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
+    onQuickSend: (String) -> Unit,
     modifier: Modifier = Modifier,
     colors: IdeColors,
 ) {
@@ -120,6 +122,30 @@ fun AiChatContent(
                         }
                     }
                 }
+            }
+        }
+
+        val quickPhrases = remember {
+            listOf(
+                "帮我检查选择的翻译是否有误",
+                "帮我补全和修正选中的翻译",
+                "帮我把选中的翻译插入表格",
+                "帮我从表格读取选中的翻译并插入文件",
+            )
+        }
+
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            quickPhrases.forEach { phrase ->
+                CompactButton(
+                    text = phrase,
+                    onClick = { onQuickSend(phrase) },
+                    enabled = !chatSending,
+                    colors = colors,
+                )
             }
         }
 
