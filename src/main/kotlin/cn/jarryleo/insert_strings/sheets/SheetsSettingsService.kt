@@ -1,10 +1,12 @@
 package cn.jarryleo.insert_strings.sheets
 
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.PersistentStateComponent
+import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
+import com.intellij.openapi.project.Project
 
+@Service(Service.Level.PROJECT)
 @State(
     name = "InsertStringsSheetsSettings",
     storages = [Storage("insertStringsSheetsSettings.xml")]
@@ -19,20 +21,16 @@ class SheetsSettingsService : PersistentStateComponent<SheetsSettingsState> {
     }
 
     fun update(
-        credentialsJsonPath: String,
-        tokensDirectoryPath: String,
         defaultSpreadsheetId: String,
         defaultSheetName: String
     ) {
-        state.credentialsJsonPath = credentialsJsonPath.trim()
-        state.tokensDirectoryPath = tokensDirectoryPath.trim()
         state.defaultSpreadsheetId = defaultSpreadsheetId.trim()
         state.defaultSheetName = defaultSheetName.trim().ifBlank { "Sheet1" }
     }
 
     companion object {
-        fun getInstance(): SheetsSettingsService {
-            return ApplicationManager.getApplication().getService(SheetsSettingsService::class.java)
+        fun getInstance(project: Project): SheetsSettingsService {
+            return project.getService(SheetsSettingsService::class.java)
         }
     }
 }

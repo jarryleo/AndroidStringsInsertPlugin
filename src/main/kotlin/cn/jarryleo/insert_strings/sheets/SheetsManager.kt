@@ -13,9 +13,10 @@ import com.google.api.services.sheets.v4.SheetsScopes
 import com.google.api.services.sheets.v4.model.ClearValuesRequest
 import com.google.api.services.sheets.v4.model.ValueRange
 import com.intellij.ide.BrowserUtil
+import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import java.io.File
-import java.io.FileInputStream
+import java.io.InputStream
 import java.io.InputStreamReader
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
@@ -25,46 +26,69 @@ import javax.swing.SwingUtilities
 
 object SheetsManager {
     private const val APPLICATION_NAME = "InsertStrings Plugin"
+    private const val CLIENT_SECRET_FILE_NAME = "client_secret.json"
+    private const val TOKENS_DIR_NAME = ".idea/insertStrings/tokens"
     private val JSON_FACTORY = GsonFactory.getDefaultInstance()
     private val SCOPES = listOf(SheetsScopes.SPREADSHEETS)
 
-    private var cachedCredential: Credential? = null
+    private val cachedCredentials = mutableMapOf<String, Credential>()
 
     private val transport: NetHttpTransport by lazy { GoogleNetHttpTransport.newTrustedTransport() }
 
-    private val settings: SheetsSettingsState
-        get() = SheetsSettingsService.getInstance().state
+    private fun settings(project: Project): SheetsSettingsState =
+        SheetsSettingsService.getInstance(project).state
 
-    private fun isConfigured(): Boolean {
-        return settings.credentialsJsonPath.isNotBlank() && settings.tokensDirectoryPath.isNotBlank()
+    private fun clientSecretInputStream(): InputStream? {
+        return SheetsManager::class.java.getResourceAsStream("/META-INF/$CLIENT_SECRET_FILE_NAME")
+    }
+
+    /**
+     * 根据 client_secret.json 里注册的 redirect_uri 选择回环地址。
+     * Google OAuth 对桌面应用允许动态端口，但授权请求里的 host 必须与控制台注册的
+     * redirect_uri 一致（如 http://localhost 或 http://127.0.0.1）。
+     */
+    private fun resolveLoopbackHost(clientSecrets: GoogleClientSecrets): String {
+        val uris = clientSecrets.details.redirectUris.orEmpty()
+        return when {
+            uris.any { it.startsWith("http://127.0.0.1", ignoreCase = true) } -> "127.0.0.1"
+            uris.any { it.startsWith("http://localhost", ignoreCase = true) } -> "localhost"
+            else -> "localhost"
+        }
+    }
+
+    private fun tokensDirectory(project: Project): File? {
+        val basePath = project.basePath ?: return null
+        return File(basePath, TOKENS_DIR_NAME)
+    }
+
+    fun isConfigured(project: Project): Boolean {
+        return clientSecretInputStream() != null
     }
 
     @Synchronized
-    private fun authorize(): Credential {
-        val cached = cachedCredential
-        if (cached != null && cached.accessToken != null && (cached.expiresInSeconds == null || cached.expiresInSeconds > 60)) {
-            return cached
-        }
-
-        if (!isConfigured()) {
-            throw IllegalStateException("Please configure Google Sheets credentials and tokens directory first.")
-        }
-
+    private fun authorize(project: Project): Credential {
         if (SwingUtilities.isEventDispatchThread()) {
             throw IllegalStateException("Authorization must not be called on the EDT.")
         }
 
-        val credentialsFile = File(settings.credentialsJsonPath)
-        if (!credentialsFile.exists()) {
-            throw IllegalStateException("Credentials file not found: ${settings.credentialsJsonPath}")
-        }
+        val inputStream = clientSecretInputStream()
+            ?: throw IllegalStateException(
+                "Google Sheets credentials file not found in plugin resources."
+            )
 
-        val tokensDir = File(settings.tokensDirectoryPath)
+        val tokensDir = tokensDirectory(project)
+            ?: throw IllegalStateException("Unable to determine project base path for storing tokens.")
         if (!tokensDir.exists()) {
             tokensDir.mkdirs()
         }
 
-        val clientSecrets = FileInputStream(credentialsFile).use { stream ->
+        val cacheKey = tokensDir.absolutePath
+        val cached = cachedCredentials[cacheKey]
+        if (cached != null && cached.accessToken != null && (cached.expiresInSeconds == null || cached.expiresInSeconds > 60)) {
+            return cached
+        }
+
+        val clientSecrets = inputStream.use { stream ->
             GoogleClientSecrets.load(JSON_FACTORY, InputStreamReader(stream))
         }
 
@@ -73,9 +97,17 @@ object SheetsManager {
             .setAccessType("offline")
             .build()
 
-        // 使用 127.0.0.1 避免 localhost 被解析到 IPv6 导致回调丢失
+        // 优先使用已保存的 token/refresh token，避免每次重新弹浏览器
+        flow.loadCredential("user")?.let { stored ->
+            if (stored.accessToken != null || stored.refreshToken != null) {
+                cachedCredentials[cacheKey] = stored
+                return stored
+            }
+        }
+
+        val loopbackHost = resolveLoopbackHost(clientSecrets)
         val receiver = LocalServerReceiver.Builder()
-            .setHost("127.0.0.1")
+            .setHost(loopbackHost)
             .setPort(0)
             .build()
 
@@ -103,7 +135,7 @@ object SheetsManager {
             .execute()
 
         val credential = flow.createAndStoreCredential(tokenResponse, "user")
-        cachedCredential = credential
+        cachedCredentials[cacheKey] = credential
         return credential
     }
 
@@ -149,22 +181,23 @@ object SheetsManager {
             ?: throw IllegalStateException("Authorization code is empty.")
     }
 
-    fun invalidateCredential() {
-        cachedCredential = null
+    fun invalidateCredential(project: Project) {
+        val tokensDir = tokensDirectory(project) ?: return
+        cachedCredentials.remove(tokensDir.absolutePath)
     }
 
-    private fun createSheetsService(): Sheets {
-        return Sheets.Builder(transport, JSON_FACTORY, authorize())
+    private fun createSheetsService(project: Project): Sheets {
+        return Sheets.Builder(transport, JSON_FACTORY, authorize(project))
             .setApplicationName(APPLICATION_NAME)
             .build()
     }
 
-    fun testConnection(spreadsheetId: String? = null): Result<String> {
+    fun testConnection(project: Project, spreadsheetId: String? = null): Result<String> {
         return runCatching {
-            authorize()
-            val targetId = resolveSpreadsheetId(spreadsheetId)
+            authorize(project)
+            val targetId = resolveSpreadsheetId(project, spreadsheetId)
             if (targetId.isNotBlank()) {
-                val service = createSheetsService()
+                val service = createSheetsService(project)
                 val spreadsheet = service.spreadsheets().get(targetId).execute()
                 "Connected to spreadsheet: ${spreadsheet.properties.title}"
             } else {
@@ -173,10 +206,10 @@ object SheetsManager {
         }
     }
 
-    fun readRange(spreadsheetId: String, range: String): Result<List<List<String>>> {
+    fun readRange(project: Project, spreadsheetId: String, range: String): Result<List<List<String>>> {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         return runCatching {
-            val service = createSheetsService()
+            val service = createSheetsService(project)
             val response = service.spreadsheets().values()
                 .get(spreadsheetId, range)
                 .execute()
@@ -191,6 +224,7 @@ object SheetsManager {
     }
 
     fun writeRange(
+        project: Project,
         spreadsheetId: String,
         range: String,
         values: List<List<String>>
@@ -198,7 +232,7 @@ object SheetsManager {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         if (values.isEmpty()) return Result.failure(IllegalArgumentException("No values to write."))
         return runCatching {
-            val service = createSheetsService()
+            val service = createSheetsService(project)
             val body = ValueRange().setValues(values)
             service.spreadsheets().values()
                 .update(spreadsheetId, range, body)
@@ -208,6 +242,7 @@ object SheetsManager {
     }
 
     fun appendRange(
+        project: Project,
         spreadsheetId: String,
         range: String,
         values: List<List<String>>
@@ -215,7 +250,7 @@ object SheetsManager {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         if (values.isEmpty()) return Result.failure(IllegalArgumentException("No values to append."))
         return runCatching {
-            val service = createSheetsService()
+            val service = createSheetsService(project)
             val body = ValueRange().setValues(values)
             service.spreadsheets().values()
                 .append(spreadsheetId, range, body)
@@ -224,10 +259,10 @@ object SheetsManager {
         }
     }
 
-    fun clearRange(spreadsheetId: String, range: String): Result<Unit> {
+    fun clearRange(project: Project, spreadsheetId: String, range: String): Result<Unit> {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         return runCatching {
-            val service = createSheetsService()
+            val service = createSheetsService(project)
             service.spreadsheets().values()
                 .clear(spreadsheetId, range, ClearValuesRequest())
                 .execute()
@@ -238,12 +273,13 @@ object SheetsManager {
      * 在指定范围内搜索第一列匹配 key 的行，返回整行数据。
      */
     fun searchRowByKey(
+        project: Project,
         spreadsheetId: String,
         range: String,
         key: String
     ): Result<Pair<Int, List<String>>> {
         if (key.isBlank()) return Result.failure(IllegalArgumentException("Search key is empty."))
-        return readRange(spreadsheetId, range).mapCatching { rows ->
+        return readRange(project, spreadsheetId, range).mapCatching { rows ->
             val index = rows.indexOfFirst { it.firstOrNull()?.trim()?.equals(key, ignoreCase = true) == true }
             if (index == -1) {
                 throw NoSuchElementException("Key '$key' not found in sheet.")
@@ -252,11 +288,11 @@ object SheetsManager {
         }
     }
 
-    fun defaultSpreadsheetId(): String = settings.defaultSpreadsheetId
+    fun defaultSpreadsheetId(project: Project): String = settings(project).defaultSpreadsheetId
 
-    fun defaultSheetName(): String = settings.defaultSheetName.ifBlank { "Sheet1" }
+    fun defaultSheetName(project: Project): String = settings(project).defaultSheetName.ifBlank { "Sheet1" }
 
-    fun resolveSpreadsheetId(spreadsheetId: String?): String {
-        return spreadsheetId?.trim()?.takeIf { it.isNotBlank() } ?: defaultSpreadsheetId()
+    fun resolveSpreadsheetId(project: Project, spreadsheetId: String?): String {
+        return spreadsheetId?.trim()?.takeIf { it.isNotBlank() } ?: defaultSpreadsheetId(project)
     }
 }

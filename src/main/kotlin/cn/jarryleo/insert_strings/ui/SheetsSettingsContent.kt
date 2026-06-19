@@ -3,23 +3,16 @@ package cn.jarryleo.insert_strings.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
 @Composable
 fun SheetsSettingsContent(
-    credentialsPath: String,
-    tokensPath: String,
     defaultSpreadsheetId: String,
     defaultSheetName: String,
     connectionStatus: String,
-    onCredentialsPathChange: (String) -> Unit,
-    onTokensPathChange: (String) -> Unit,
     onDefaultSpreadsheetIdChange: (String) -> Unit,
     onDefaultSheetNameChange: (String) -> Unit,
-    onBrowseCredentials: () -> Unit,
-    onBrowseTokensDir: () -> Unit,
     onTestConnection: () -> Unit,
     onSave: () -> Unit,
     modifier: Modifier = Modifier,
@@ -29,65 +22,24 @@ fun SheetsSettingsContent(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        SettingsLabel("Credentials JSON Path", colors)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            CompactTextField(
-                value = credentialsPath,
-                onValueChange = onCredentialsPathChange,
-                modifier = Modifier.weight(1f),
-                singleLine = true,
-                colors = colors,
-            )
-            CompactButton(
-                text = "Browse",
-                onClick = onBrowseCredentials,
-                modifier = Modifier.width(64.dp),
-                colors = colors,
-            )
-        }
         Text(
-            text = "OAuth 2.0 credentials JSON from Google Cloud Console",
+            text = "OAuth 2.0 credentials are loaded automatically from the plugin resources.",
             color = colors.secondaryText,
             style = compactTextStyle(colors.secondaryText),
         )
 
-        SettingsLabel("Tokens Directory", colors)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            CompactTextField(
-                value = tokensPath,
-                onValueChange = onTokensPathChange,
-                modifier = Modifier.weight(1f),
-                singleLine = true,
-                colors = colors,
-            )
-            CompactButton(
-                text = "Browse",
-                onClick = onBrowseTokensDir,
-                modifier = Modifier.width(64.dp),
-                colors = colors,
-            )
-        }
-        Text(
-            text = "Directory to store authorized user tokens",
-            color = colors.secondaryText,
-            style = compactTextStyle(colors.secondaryText),
-        )
-
-        SettingsLabel("Default Spreadsheet ID", colors)
+        SettingsLabel("Default Spreadsheet URL / ID", colors)
         CompactTextField(
             value = defaultSpreadsheetId,
-            onValueChange = onDefaultSpreadsheetIdChange,
+            onValueChange = { onDefaultSpreadsheetIdChange(extractSpreadsheetId(it)) },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             colors = colors,
+        )
+        Text(
+            text = "Paste a Google Sheets URL or enter the Spreadsheet ID directly",
+            color = colors.secondaryText,
+            style = compactTextStyle(colors.secondaryText),
         )
 
         SettingsLabel("Default Sheet Name", colors)
@@ -129,4 +81,10 @@ fun SheetsSettingsContent(
             primary = true,
         )
     }
+}
+
+private fun extractSpreadsheetId(input: String): String {
+    val trimmed = input.trim()
+    val matchResult = Regex("/spreadsheets/d/([a-zA-Z0-9_-]+)").find(trimmed)
+    return matchResult?.groupValues?.get(1) ?: trimmed
 }
