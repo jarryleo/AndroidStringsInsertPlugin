@@ -330,10 +330,7 @@ class InsertStringsUI(
                 }
                 result.fold(
                     onSuccess = { sheetRows ->
-                        SwingUtilities.invokeLater {
-                            applySheetRowsToUi(sheetRows)
-                            showToast("Read from Google Sheets.")
-                        }
+                        SwingUtilities.invokeLater { showToast("Read from Google Sheets.") }
                         val dataSummary = if (sheetRows.isEmpty()) "表格为空" else "读取到 ${sheetRows.size} 行数据"
                         SheetsToolResult("读取表格", true, dataSummary, sheetRows)
                     },
@@ -355,10 +352,7 @@ class InsertStringsUI(
                 val result = SheetsManager.searchRowByKey(project, spreadsheetId, range, key)
                 result.fold(
                     onSuccess = { (_, row) ->
-                        SwingUtilities.invokeLater {
-                            applySheetRowToUi(row)
-                            showToast("Found key '$key' in Google Sheets.")
-                        }
+                        SwingUtilities.invokeLater { showToast("Found key '$key' in Google Sheets.") }
                         SheetsToolResult("搜索表格", true, "找到 key '$key'", listOf(row))
                     },
                     onFailure = {
