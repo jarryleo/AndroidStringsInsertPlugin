@@ -528,7 +528,7 @@ class InsertStringsUI(
             var context = ""
             try {
                 SwingUtilities.invokeAndWait {
-                    chatMessages.add(ChatMessage(role = "user", content = resultMessage))
+                    chatMessages.add(ChatMessage(role = "tool", content = resultMessage))
                     context = buildChatContext()
                 }
             } catch (e: Exception) {

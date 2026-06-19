@@ -202,7 +202,7 @@ object AITranslator {
                             msg.content
                         }
                         add(JsonObject().apply {
-                            addProperty("role", msg.role)
+                            addProperty("role", if (msg.role == "tool") "user" else msg.role)
                             addProperty("content", content)
                         })
                     }
@@ -227,7 +227,7 @@ object AITranslator {
                             msg.content
                         }
                         add(JsonObject().apply {
-                            addProperty("role", msg.role)
+                            addProperty("role", if (msg.role == "tool") "user" else msg.role)
                             addProperty("content", content)
                         })
                     }

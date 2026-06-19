@@ -153,6 +153,7 @@ private fun ChatBubble(
     colors: IdeColors,
 ) {
     val isUser = message.role == "user"
+    val isTool = message.role == "tool"
     val bubbleColor = if (isUser) colors.accent else colors.fieldBackground
     val alignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
     val border = if (isUser) {
@@ -163,23 +164,42 @@ private fun ChatBubble(
     Column(
         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
     ) {
-        Box(
-            modifier = Modifier.fillMaxWidth(),
-            contentAlignment = alignment,
-        ) {
+        if (isTool) {
             Box(
                 modifier = Modifier
-                    .widthIn(max = 500.dp)
-                    .padding(start = if (isUser) 32.dp else 0.dp, end = if (isUser) 0.dp else 32.dp)
-                    .background(bubbleColor, RoundedCornerShape(12.dp))
-                    .then(border)
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                    .background(colors.fieldBackground, RoundedCornerShape(6.dp))
+                    .border(width = 1.dp, color = colors.border, RoundedCornerShape(6.dp))
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
             ) {
                 SelectionContainer {
-                    MarkdownContent(
-                        markdown = message.content,
-                        colors = colors,
+                    Text(
+                        text = message.content,
+                        color = colors.secondaryText,
+                        style = compactTextStyle(colors.secondaryText),
                     )
+                }
+            }
+        } else {
+            Box(
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = alignment,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .widthIn(max = 500.dp)
+                        .padding(start = if (isUser) 32.dp else 0.dp, end = if (isUser) 0.dp else 32.dp)
+                        .background(bubbleColor, RoundedCornerShape(12.dp))
+                        .then(border)
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                ) {
+                    SelectionContainer {
+                        MarkdownContent(
+                            markdown = message.content,
+                            colors = colors,
+                        )
+                    }
                 }
             }
         }
