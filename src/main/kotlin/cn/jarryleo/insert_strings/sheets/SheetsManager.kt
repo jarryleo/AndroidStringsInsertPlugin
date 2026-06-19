@@ -185,12 +185,28 @@ object SheetsManager {
             val code = params["code"]
             val error = params["error"]
 
-            val html = if (code != null) {
-                "<html><body><h2>Authorization successful. You can close this tab.</h2></body></html>"
-            } else if (error != null) {
-                "<html><body><h2>Authorization failed: $error</h2></body></html>"
-            } else {
-                "<html><body><h2>Waiting for authorization...</h2></body></html>"
+            val html = when {
+                code != null -> renderCallbackPage(
+                    status = "success",
+                    title = "Authorization Successful",
+                    subtitle = "InsertStrings has been granted access to your Google Sheets.",
+                    detail = "You can now close this tab and return to the IDE.",
+                    accent = "#16a34a"
+                )
+                error != null -> renderCallbackPage(
+                    status = "error",
+                    title = "Authorization Failed",
+                    subtitle = "Google returned an error and no access was granted.",
+                    detail = escapeHtml(error),
+                    accent = "#dc2626"
+                )
+                else -> renderCallbackPage(
+                    status = "waiting",
+                    title = "Waiting for Authorization",
+                    subtitle = "Complete the sign-in flow in this browser to continue.",
+                    detail = "This page will update automatically.",
+                    accent = "#2563eb"
+                )
             }
 
             exchange.responseHeaders.add("Content-Type", "text/html; charset=UTF-8")
@@ -221,6 +237,116 @@ object SheetsManager {
                 val parts = it.split("=", limit = 2)
                 URLDecoder.decode(parts[0], "UTF-8") to URLDecoder.decode(parts[1], "UTF-8")
             }
+    }
+
+    private fun escapeHtml(text: String): String =
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&#39;")
+
+    private fun renderCallbackPage(
+        status: String,
+        title: String,
+        subtitle: String,
+        detail: String,
+        accent: String
+    ): String {
+        val icon = when (status) {
+            "success" -> """<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>"""
+            "error" -> """<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>"""
+            else -> """<svg class="spin" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.5"/></svg>"""
+        }
+        val badgeClass = if (status == "waiting") "badge spin-badge" else "badge"
+        return """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>$title</title>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: #1f2937;
+                -webkit-font-smoothing: antialiased;
+            }
+            .card {
+                width: 420px;
+                max-width: calc(100vw - 48px);
+                background: #ffffff;
+                border-radius: 20px;
+                padding: 48px 40px 40px;
+                text-align: center;
+                box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
+                animation: rise .5s cubic-bezier(.2,.8,.2,1) both;
+            }
+            @keyframes rise { from { opacity: 0; transform: translateY(18px) scale(.98); } to { opacity: 1; transform: none; } }
+            .$badgeClass {
+                width: 84px;
+                height: 84px;
+                border-radius: 50%;
+                margin: 0 auto 28px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background: $accent;
+                box-shadow: 0 12px 28px ${accent}55;
+            }
+            .badge svg { width: 44px; height: 44px; }
+            .spin { animation: rot 1s linear infinite; }
+            @keyframes rot { to { transform: rotate(360deg); } }
+            h1 {
+                font-size: 22px;
+                font-weight: 700;
+                margin-bottom: 14px;
+                letter-spacing: -.2px;
+            }
+            .subtitle {
+                font-size: 15px;
+                line-height: 1.55;
+                color: #4b5563;
+                margin-bottom: 22px;
+            }
+            .detail {
+                font-size: 13px;
+                color: #6b7280;
+                background: #f3f4f6;
+                border-radius: 10px;
+                padding: 12px 16px;
+                word-break: break-word;
+            }
+            .footer {
+                margin-top: 30px;
+                font-size: 12.5px;
+                color: #9ca3af;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 7px;
+            }
+            .dot { width: 7px; height: 7px; border-radius: 50%; background: $accent; }
+            .brand { font-weight: 600; color: #6b7280; }
+        </style>
+        </head>
+        <body>
+            <div class="card">
+                <div class="$badgeClass">$icon</div>
+                <h1>$title</h1>
+                <p class="subtitle">$subtitle</p>
+                <div class="detail">$detail</div>
+                <div class="footer"><span class="dot"></span><span class="brand">InsertStrings</span> &middot; Google Sheets</div>
+            </div>
+        </body>
+        </html>
+        """.trimIndent()
     }
 
     private fun requestAuthorizationCodeFromUser(authorizationUrl: String): String {
