@@ -40,6 +40,17 @@ class InsertStringsUI(
     private lateinit var project: Project
     private lateinit var insertStringsManager: InsertStringsManager
 
+    companion object {
+        private const val MAX_TOOL_ROUNDS = 3
+    }
+
+    private data class SheetsToolResult(
+        val operation: String,
+        val success: Boolean,
+        val message: String,
+        val data: List<List<String>>? = null
+    )
+
     private var stringName by mutableStateOf("")
     private val rows = mutableStateListOf<StringRow>()
     private var showSettings by mutableStateOf(false)
@@ -286,75 +297,95 @@ class InsertStringsUI(
         applySheetRowsToUi(listOf(row))
     }
 
-    private fun executeSheetsOperation(action: AiAction.SheetsOperation) {
-        when (action.operation) {
+    private fun executeSheetsOperationSync(action: AiAction.SheetsOperation): SheetsToolResult {
+        return when (action.operation) {
             AiAction.SheetsOperation.Operation.WRITE -> {
                 val rowsToWrite = action.rows ?: buildSheetRows()
                 val spreadsheetId = SheetsManager.resolveSpreadsheetId(project, action.spreadsheetId)
                 val range = action.range ?: "${SheetsManager.defaultSheetName(project)}!A1:Z1000"
                 if (spreadsheetId.isBlank()) {
-                    showToast("Spreadsheet ID is empty.")
-                    return
+                    return SheetsToolResult("写入表格", false, "Spreadsheet ID 为空，请先在设置中配置。")
                 }
-                ApplicationManager.getApplication().executeOnPooledThread {
-                    val result = SheetsManager.writeRange(project, spreadsheetId, range, rowsToWrite)
-                    SwingUtilities.invokeLater {
-                        result.fold(
-                            onSuccess = { showToast("Wrote to Google Sheets.") },
-                            onFailure = { showToast(it.message ?: "Sheets write failed.") }
-                        )
+                val result = SheetsManager.writeRange(project, spreadsheetId, range, rowsToWrite)
+                result.fold(
+                    onSuccess = {
+                        SwingUtilities.invokeLater { showToast("Wrote to Google Sheets.") }
+                        SheetsToolResult("写入表格", true, "成功写入 ${rowsToWrite.size} 行数据到范围 $range")
+                    },
+                    onFailure = {
+                        SheetsToolResult("写入表格", false, it.message ?: "Sheets write failed.")
                     }
-                }
+                )
             }
             AiAction.SheetsOperation.Operation.READ -> {
                 val spreadsheetId = SheetsManager.resolveSpreadsheetId(project, action.spreadsheetId)
                 val range = action.range ?: "${SheetsManager.defaultSheetName(project)}!A1:Z1000"
                 if (spreadsheetId.isBlank()) {
-                    showToast("Spreadsheet ID is empty.")
-                    return
+                    return SheetsToolResult("读取表格", false, "Spreadsheet ID 为空，请先在设置中配置。")
                 }
-                ApplicationManager.getApplication().executeOnPooledThread {
-                    val result = if (action.key.isNullOrBlank()) {
-                        SheetsManager.readRange(project, spreadsheetId, range)
-                    } else {
-                        SheetsManager.searchRowByKey(project, spreadsheetId, range, action.key).map { listOf(it.second) }
-                    }
-                    SwingUtilities.invokeLater {
-                        result.fold(
-                            onSuccess = { sheetRows ->
-                                applySheetRowsToUi(sheetRows)
-                                showToast("Read from Google Sheets.")
-                            },
-                            onFailure = { showToast(it.message ?: "Sheets read failed.") }
-                        )
-                    }
+                val result = if (action.key.isNullOrBlank()) {
+                    SheetsManager.readRange(project, spreadsheetId, range)
+                } else {
+                    SheetsManager.searchRowByKey(project, spreadsheetId, range, action.key).map { listOf(it.second) }
                 }
+                result.fold(
+                    onSuccess = { sheetRows ->
+                        SwingUtilities.invokeLater {
+                            applySheetRowsToUi(sheetRows)
+                            showToast("Read from Google Sheets.")
+                        }
+                        val dataSummary = if (sheetRows.isEmpty()) "表格为空" else "读取到 ${sheetRows.size} 行数据"
+                        SheetsToolResult("读取表格", true, dataSummary, sheetRows)
+                    },
+                    onFailure = {
+                        SheetsToolResult("读取表格", false, it.message ?: "Sheets read failed.")
+                    }
+                )
             }
             AiAction.SheetsOperation.Operation.SEARCH -> {
                 val key = action.key
                 if (key.isNullOrBlank()) {
-                    showToast("Search key is empty.")
-                    return
+                    return SheetsToolResult("搜索表格", false, "Search key 为空。")
                 }
                 val spreadsheetId = SheetsManager.resolveSpreadsheetId(project, action.spreadsheetId)
                 val range = action.range ?: "${SheetsManager.defaultSheetName(project)}!A1:Z1000"
                 if (spreadsheetId.isBlank()) {
-                    showToast("Spreadsheet ID is empty.")
-                    return
+                    return SheetsToolResult("搜索表格", false, "Spreadsheet ID 为空，请先在设置中配置。")
                 }
-                ApplicationManager.getApplication().executeOnPooledThread {
-                    val result = SheetsManager.searchRowByKey(project, spreadsheetId, range, key)
-                    SwingUtilities.invokeLater {
-                        result.fold(
-                            onSuccess = { (_, row) ->
-                                applySheetRowToUi(row)
-                                showToast("Found key '$key' in Google Sheets.")
-                            },
-                            onFailure = { showToast(it.message ?: "Sheets search failed.") }
-                        )
+                val result = SheetsManager.searchRowByKey(project, spreadsheetId, range, key)
+                result.fold(
+                    onSuccess = { (_, row) ->
+                        SwingUtilities.invokeLater {
+                            applySheetRowToUi(row)
+                            showToast("Found key '$key' in Google Sheets.")
+                        }
+                        SheetsToolResult("搜索表格", true, "找到 key '$key'", listOf(row))
+                    },
+                    onFailure = {
+                        SheetsToolResult("搜索表格", false, it.message ?: "Sheets search failed.")
+                    }
+                )
+            }
+        }
+    }
+
+    private fun buildToolResultMessage(results: List<SheetsToolResult>): String {
+        return buildString {
+            appendLine("[工具执行结果]")
+            results.forEachIndexed { index, result ->
+                if (index > 0) appendLine()
+                appendLine("操作${index + 1}:")
+                appendLine("  类型: ${result.operation}")
+                appendLine("  状态: ${if (result.success) "成功" else "失败"}")
+                appendLine("  信息: ${result.message}")
+                if (result.data != null && result.data.isNotEmpty()) {
+                    appendLine("  数据:")
+                    result.data.forEach { row ->
+                        appendLine("    ${row.joinToString(" | ")}")
                     }
                 }
             }
+            appendLine("请根据以上结果回复用户。")
         }
     }
 
@@ -402,8 +433,7 @@ class InsertStringsUI(
             val reply = AITranslator.chat(chatMessages.toList(), context)
             SwingUtilities.invokeLater {
                 chatMessages.add(ChatMessage(role = "assistant", content = reply.reply))
-                chatSending = false
-                handleAiActions(reply.actions)
+                handleAiActions(reply.actions, 0)
             }
         }
     }
@@ -464,17 +494,53 @@ class InsertStringsUI(
         }
     }
 
-    private fun handleAiActions(actions: List<AiAction>) {
+    private fun handleAiActions(actions: List<AiAction>, depth: Int) {
         val insertActions = actions.filterIsInstance<AiAction.InsertStrings>()
         if (insertActions.isNotEmpty()) {
             executeInsertActions(insertActions)
         }
-        val sheetsActions = actions.filterIsInstance<AiAction.SheetsOperation>()
-        sheetsActions.forEach { executeSheetsOperation(it) }
         val askActions = actions.filterIsInstance<AiAction.AskUser>()
         if (askActions.isNotEmpty()) {
-            // 问题内容已经包含在 reply 中，用户继续对话即可
             showToast(askActions.first().question)
+        }
+
+        val sheetsActions = actions.filterIsInstance<AiAction.SheetsOperation>()
+        if (sheetsActions.isEmpty()) {
+            chatSending = false
+            return
+        }
+
+        if (depth >= MAX_TOOL_ROUNDS) {
+            chatMessages.add(
+                ChatMessage(
+                    role = "assistant",
+                    content = "已达到工具调用最大轮数（$MAX_TOOL_ROUNDS 轮），操作已结束。"
+                )
+            )
+            chatSending = false
+            return
+        }
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val toolResults = sheetsActions.map { executeSheetsOperationSync(it) }
+            val resultMessage = buildToolResultMessage(toolResults)
+
+            var context = ""
+            try {
+                SwingUtilities.invokeAndWait {
+                    chatMessages.add(ChatMessage(role = "user", content = resultMessage))
+                    context = buildChatContext()
+                }
+            } catch (e: Exception) {
+                context = buildChatContext()
+            }
+
+            val followUp = AITranslator.chat(chatMessages.toList(), context)
+
+            SwingUtilities.invokeLater {
+                chatMessages.add(ChatMessage(role = "assistant", content = followUp.reply))
+                handleAiActions(followUp.actions, depth + 1)
+            }
         }
     }
 

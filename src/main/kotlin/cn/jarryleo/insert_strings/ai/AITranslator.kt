@@ -64,7 +64,10 @@ object AITranslator {
 9. 翻译内容中如需使用 XML 特殊字符，请转义：&amp; &lt; &gt; &quot; &apos;。
 10. 当用户要求把翻译写入 Google Sheets、同步到表格、导出到表格时，返回 `sheets_operation` 动作，`operation` 为 `write`，`rows` 第一行为表头（key + 语言目录名），后续每行是一条翻译。
 11. 当用户要求从 Google Sheets 读取翻译、查找表格中的翻译时，返回 `sheets_operation` 动作，`operation` 为 `read`，可指定 `key` 只读取匹配行。
-12. 如果用户只是普通聊天或询问，不需要返回 actions。"""
+12. 如果用户只是普通聊天或询问，不需要返回 actions。
+13. 当你返回了包含 sheets_operation 的 actions 后，系统会自动执行这些操作并将结果以「工具执行结果」的格式发回给你。请根据执行结果继续回复用户，说明操作是否成功以及读取到的内容。不要回复「请稍候」之类的等待语，因为操作已经执行完毕。
+14. 收到工具执行结果后，只需在 reply 中总结结果即可，不要再重复返回已执行过的 actions。
+15. 如果工具执行结果显示失败，请在 reply 中告知用户失败原因，并建议可能的解决方案（如配置代理、检查表格ID等）。"""
 
     private const val ANTHROPIC_VERSION = "2023-06-01"
     private val httpClient: HttpClient = HttpClient.newBuilder()
