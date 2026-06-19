@@ -5,7 +5,6 @@ import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.ai.AiEndpoint
@@ -19,7 +18,6 @@ fun AiSettingsContent(
     aiModel: String,
     modelOptions: List<String>,
     modelFetchStatus: String,
-    onClose: () -> Unit,
     onAiUrlChange: (String) -> Unit,
     onAiApiKeyChange: (String) -> Unit,
     onAiProtocolChange: (AiProtocol) -> Unit,
@@ -35,26 +33,6 @@ fun AiSettingsContent(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text(
-                text = "AI Settings",
-                modifier = Modifier.weight(1f),
-                color = colors.text,
-                style = compactTextStyle(colors.text),
-                fontWeight = FontWeight.Bold,
-            )
-            CompactButton(
-                text = "Back",
-                onClick = onClose,
-                modifier = Modifier.width(56.dp),
-                colors = colors,
-            )
-        }
-
         SettingsLabel("URL", colors)
         Row(
             modifier = Modifier.fillMaxWidth(),

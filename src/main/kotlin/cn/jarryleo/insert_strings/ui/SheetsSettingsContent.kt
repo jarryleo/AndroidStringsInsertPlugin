@@ -5,7 +5,6 @@ import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -15,7 +14,6 @@ fun SheetsSettingsContent(
     defaultSpreadsheetId: String,
     defaultSheetName: String,
     connectionStatus: String,
-    onClose: () -> Unit,
     onCredentialsPathChange: (String) -> Unit,
     onTokensPathChange: (String) -> Unit,
     onDefaultSpreadsheetIdChange: (String) -> Unit,
@@ -31,26 +29,6 @@ fun SheetsSettingsContent(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text(
-                text = "Google Sheets Settings",
-                modifier = Modifier.weight(1f),
-                color = colors.text,
-                style = compactTextStyle(colors.text),
-                fontWeight = FontWeight.Bold,
-            )
-            CompactButton(
-                text = "Back",
-                onClick = onClose,
-                modifier = Modifier.width(56.dp),
-                colors = colors,
-            )
-        }
-
         SettingsLabel("Credentials JSON Path", colors)
         Row(
             modifier = Modifier.fillMaxWidth(),

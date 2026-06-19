@@ -60,18 +60,13 @@ class InsertStringsUI(
     private var chatSending by mutableStateOf(false)
 
     // Google Sheets state
-    private var showSheetsSettings by mutableStateOf(false)
     private var sheetsCredentialsPath by mutableStateOf("")
     private var sheetsTokensPath by mutableStateOf("")
     private var sheetsDefaultSpreadsheetId by mutableStateOf("")
     private var sheetsDefaultSheetName by mutableStateOf("Sheet1")
     private var sheetsConnectionStatus by mutableStateOf("")
 
-    private var showSheetsOperations by mutableStateOf(false)
-    private var sheetsSpreadsheetId by mutableStateOf("")
-    private var sheetsRange by mutableStateOf("")
-    private var sheetsSearchKey by mutableStateOf("")
-    private var sheetsOperationStatus by mutableStateOf("")
+    private var settingsTab by mutableStateOf(SettingsTab.AI)
 
     private val rootPanel = ComposePanel().apply {
         setContent {
@@ -89,8 +84,6 @@ class InsertStringsUI(
                     toastMessage = toastMessage,
                     showSettings = showSettings,
                     showChat = showChat,
-                    showSheetsSettings = showSheetsSettings,
-                    showSheetsOperations = showSheetsOperations,
                     aiUrl = aiUrl,
                     aiApiKey = aiApiKey,
                     aiProtocol = aiProtocol,
@@ -100,20 +93,18 @@ class InsertStringsUI(
                     chatMessages = chatMessages,
                     chatInput = chatInput,
                     chatSending = chatSending,
+                    settingsTab = settingsTab,
+                    onSettingsTabChange = { settingsTab = it },
                     onOpenSettings = { showSettings = true },
                     onCloseSettings = { showSettings = false },
                     onOpenChat = { showChat = true },
                     onCloseChat = { showChat = false },
-                    onOpenSheetsSettings = { showSheetsSettings = true },
-                    onCloseSheetsSettings = { showSheetsSettings = false },
-                    onOpenSheetsOperations = { showSheetsOperations = true },
-                    onCloseSheetsOperations = { showSheetsOperations = false },
                     onAiUrlChange = { aiUrl = it },
                     onAiApiKeyChange = { aiApiKey = it },
                     onAiProtocolChange = { aiProtocol = it },
                     onAiModelChange = { aiModel = it },
                     onFetchModels = ::fetchModels,
-                    onSaveSettings = ::saveSettings,
+                    onSaveAiSettings = ::saveSettings,
                     sheetsCredentialsPath = sheetsCredentialsPath,
                     sheetsTokensPath = sheetsTokensPath,
                     sheetsDefaultSpreadsheetId = sheetsDefaultSpreadsheetId,
@@ -127,17 +118,6 @@ class InsertStringsUI(
                     onBrowseSheetsTokensDir = ::browseSheetsTokensDir,
                     onTestSheetsConnection = ::testSheetsConnection,
                     onSaveSheetsSettings = ::saveSheetsSettings,
-                    sheetsSpreadsheetId = sheetsSpreadsheetId,
-                    sheetsRange = sheetsRange,
-                    sheetsSearchKey = sheetsSearchKey,
-                    sheetsOperationStatus = sheetsOperationStatus,
-                    onSheetsSpreadsheetIdChange = { sheetsSpreadsheetId = it },
-                    onSheetsRangeChange = { sheetsRange = it },
-                    onSheetsSearchKeyChange = { sheetsSearchKey = it },
-                    onReadFromSheets = ::readFromSheets,
-                    onWriteToSheets = { writeToSheets(append = false) },
-                    onAppendToSheets = { writeToSheets(append = true) },
-                    onSearchSheets = ::searchSheets,
                     onChatInputChange = { chatInput = it },
                     onSendChat = ::sendChat,
                     onNewChat = ::newChat,
@@ -254,8 +234,6 @@ class InsertStringsUI(
         sheetsTokensPath = settings.tokensDirectoryPath
         sheetsDefaultSpreadsheetId = settings.defaultSpreadsheetId
         sheetsDefaultSheetName = settings.defaultSheetName
-        sheetsSpreadsheetId = settings.defaultSpreadsheetId
-        sheetsRange = "${settings.defaultSheetName}!A1:Z1000"
     }
 
     private fun saveSheetsSettings() {
@@ -266,7 +244,6 @@ class InsertStringsUI(
             defaultSheetName = sheetsDefaultSheetName,
         )
         sheetsConnectionStatus = "Saved."
-        showSheetsSettings = false
     }
 
     private fun testSheetsConnection() {
@@ -300,77 +277,6 @@ class InsertStringsUI(
         }
         if (chooser.showOpenDialog(rootPanel) == JFileChooser.APPROVE_OPTION) {
             sheetsTokensPath = chooser.selectedFile.absolutePath
-        }
-    }
-
-    private fun readFromSheets() {
-        val spreadsheetId = SheetsManager.resolveSpreadsheetId(sheetsSpreadsheetId)
-        if (spreadsheetId.isBlank()) {
-            sheetsOperationStatus = "Spreadsheet ID is empty."
-            return
-        }
-        sheetsOperationStatus = "Reading..."
-        ApplicationManager.getApplication().executeOnPooledThread {
-            val result = SheetsManager.readRange(spreadsheetId, sheetsRange)
-            SwingUtilities.invokeLater {
-                result.fold(
-                    onSuccess = { rows ->
-                        applySheetRowsToUi(rows)
-                        sheetsOperationStatus = "Read ${rows.size} rows."
-                    },
-                    onFailure = { sheetsOperationStatus = it.message ?: "Read failed." }
-                )
-            }
-        }
-    }
-
-    private fun writeToSheets(append: Boolean = false) {
-        val spreadsheetId = SheetsManager.resolveSpreadsheetId(sheetsSpreadsheetId)
-        if (spreadsheetId.isBlank()) {
-            sheetsOperationStatus = "Spreadsheet ID is empty."
-            return
-        }
-        sheetsOperationStatus = if (append) "Appending..." else "Writing..."
-        ApplicationManager.getApplication().executeOnPooledThread {
-            val rows = buildSheetRows()
-            val result = if (append) {
-                SheetsManager.appendRange(spreadsheetId, sheetsRange, rows)
-            } else {
-                SheetsManager.writeRange(spreadsheetId, sheetsRange, rows)
-            }
-            SwingUtilities.invokeLater {
-                result.fold(
-                    onSuccess = {
-                        sheetsOperationStatus = if (append) "Appended ${rows.size} rows." else "Wrote ${rows.size} rows."
-                    },
-                    onFailure = { sheetsOperationStatus = it.message ?: "Write failed." }
-                )
-            }
-        }
-    }
-
-    private fun searchSheets() {
-        val spreadsheetId = SheetsManager.resolveSpreadsheetId(sheetsSpreadsheetId)
-        if (spreadsheetId.isBlank()) {
-            sheetsOperationStatus = "Spreadsheet ID is empty."
-            return
-        }
-        if (sheetsSearchKey.isBlank()) {
-            sheetsOperationStatus = "Search key is empty."
-            return
-        }
-        sheetsOperationStatus = "Searching..."
-        ApplicationManager.getApplication().executeOnPooledThread {
-            val result = SheetsManager.searchRowByKey(spreadsheetId, sheetsRange, sheetsSearchKey)
-            SwingUtilities.invokeLater {
-                result.fold(
-                    onSuccess = { (_, row) ->
-                        applySheetRowToUi(row)
-                        sheetsOperationStatus = "Found key '${sheetsSearchKey}'."
-                    },
-                    onFailure = { sheetsOperationStatus = it.message ?: "Search failed." }
-                )
-            }
         }
     }
 
@@ -461,8 +367,8 @@ class InsertStringsUI(
                 }
             }
             AiAction.SheetsOperation.Operation.SEARCH -> {
-                val key = action.key ?: sheetsSearchKey
-                if (key.isBlank()) {
+                val key = action.key
+                if (key.isNullOrBlank()) {
                     showToast("Search key is empty.")
                     return
                 }
@@ -707,8 +613,7 @@ private fun InsertStringsContent(
     toastMessage: String,
     showSettings: Boolean,
     showChat: Boolean,
-    showSheetsSettings: Boolean,
-    showSheetsOperations: Boolean,
+    settingsTab: SettingsTab,
     aiUrl: String,
     aiApiKey: String,
     aiProtocol: AiProtocol,
@@ -718,20 +623,17 @@ private fun InsertStringsContent(
     chatMessages: List<ChatMessage>,
     chatInput: String,
     chatSending: Boolean,
+    onSettingsTabChange: (SettingsTab) -> Unit,
     onOpenSettings: () -> Unit,
     onCloseSettings: () -> Unit,
     onOpenChat: () -> Unit,
     onCloseChat: () -> Unit,
-    onOpenSheetsSettings: () -> Unit,
-    onCloseSheetsSettings: () -> Unit,
-    onOpenSheetsOperations: () -> Unit,
-    onCloseSheetsOperations: () -> Unit,
     onAiUrlChange: (String) -> Unit,
     onAiApiKeyChange: (String) -> Unit,
     onAiProtocolChange: (AiProtocol) -> Unit,
     onAiModelChange: (String) -> Unit,
     onFetchModels: () -> Unit,
-    onSaveSettings: () -> Unit,
+    onSaveAiSettings: () -> Unit,
     sheetsCredentialsPath: String,
     sheetsTokensPath: String,
     sheetsDefaultSpreadsheetId: String,
@@ -745,17 +647,6 @@ private fun InsertStringsContent(
     onBrowseSheetsTokensDir: () -> Unit,
     onTestSheetsConnection: () -> Unit,
     onSaveSheetsSettings: () -> Unit,
-    sheetsSpreadsheetId: String,
-    sheetsRange: String,
-    sheetsSearchKey: String,
-    sheetsOperationStatus: String,
-    onSheetsSpreadsheetIdChange: (String) -> Unit,
-    onSheetsRangeChange: (String) -> Unit,
-    onSheetsSearchKeyChange: (String) -> Unit,
-    onReadFromSheets: () -> Unit,
-    onWriteToSheets: () -> Unit,
-    onAppendToSheets: () -> Unit,
-    onSearchSheets: () -> Unit,
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
     onNewChat: () -> Unit,
@@ -774,56 +665,35 @@ private fun InsertStringsContent(
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 if (showSettings) {
-                    AiSettingsContent(
+                    SettingsContent(
+                        selectedTab = settingsTab,
+                        onTabChange = onSettingsTabChange,
+                        onClose = onCloseSettings,
                         aiUrl = aiUrl,
                         aiApiKey = aiApiKey,
                         aiProtocol = aiProtocol,
                         aiModel = aiModel,
                         modelOptions = modelOptions,
                         modelFetchStatus = modelFetchStatus,
-                        onClose = onCloseSettings,
                         onAiUrlChange = onAiUrlChange,
                         onAiApiKeyChange = onAiApiKeyChange,
                         onAiProtocolChange = onAiProtocolChange,
                         onAiModelChange = onAiModelChange,
                         onFetchModels = onFetchModels,
-                        onSave = onSaveSettings,
-                        modifier = Modifier.fillMaxSize(),
-                        colors = colors,
-                    )
-                } else if (showSheetsSettings) {
-                    SheetsSettingsContent(
-                        credentialsPath = sheetsCredentialsPath,
-                        tokensPath = sheetsTokensPath,
-                        defaultSpreadsheetId = sheetsDefaultSpreadsheetId,
-                        defaultSheetName = sheetsDefaultSheetName,
-                        connectionStatus = sheetsConnectionStatus,
-                        onClose = onCloseSheetsSettings,
-                        onCredentialsPathChange = onSheetsCredentialsPathChange,
-                        onTokensPathChange = onSheetsTokensPathChange,
-                        onDefaultSpreadsheetIdChange = onSheetsDefaultSpreadsheetIdChange,
-                        onDefaultSheetNameChange = onSheetsDefaultSheetNameChange,
-                        onBrowseCredentials = onBrowseSheetsCredentials,
-                        onBrowseTokensDir = onBrowseSheetsTokensDir,
-                        onTestConnection = onTestSheetsConnection,
-                        onSave = onSaveSheetsSettings,
-                        modifier = Modifier.fillMaxSize(),
-                        colors = colors,
-                    )
-                } else if (showSheetsOperations) {
-                    SheetsOperationsContent(
-                        spreadsheetId = sheetsSpreadsheetId,
-                        sheetRange = sheetsRange,
-                        searchKey = sheetsSearchKey,
-                        operationStatus = sheetsOperationStatus,
-                        onClose = onCloseSheetsOperations,
-                        onSpreadsheetIdChange = onSheetsSpreadsheetIdChange,
-                        onSheetRangeChange = onSheetsRangeChange,
-                        onSearchKeyChange = onSheetsSearchKeyChange,
-                        onRead = onReadFromSheets,
-                        onWrite = onWriteToSheets,
-                        onAppend = onAppendToSheets,
-                        onSearch = onSearchSheets,
+                        onSaveAiSettings = onSaveAiSettings,
+                        sheetsCredentialsPath = sheetsCredentialsPath,
+                        sheetsTokensPath = sheetsTokensPath,
+                        sheetsDefaultSpreadsheetId = sheetsDefaultSpreadsheetId,
+                        sheetsDefaultSheetName = sheetsDefaultSheetName,
+                        sheetsConnectionStatus = sheetsConnectionStatus,
+                        onSheetsCredentialsPathChange = onSheetsCredentialsPathChange,
+                        onSheetsTokensPathChange = onSheetsTokensPathChange,
+                        onSheetsDefaultSpreadsheetIdChange = onSheetsDefaultSpreadsheetIdChange,
+                        onSheetsDefaultSheetNameChange = onSheetsDefaultSheetNameChange,
+                        onBrowseSheetsCredentials = onBrowseSheetsCredentials,
+                        onBrowseSheetsTokensDir = onBrowseSheetsTokensDir,
+                        onTestSheetsConnection = onTestSheetsConnection,
+                        onSaveSheetsSettings = onSaveSheetsSettings,
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )
@@ -861,18 +731,6 @@ private fun InsertStringsContent(
                             text = "Chat",
                             onClick = onOpenChat,
                             modifier = Modifier.width(52.dp),
-                            colors = colors,
-                        )
-                        CompactButton(
-                            text = "Sheets",
-                            onClick = onOpenSheetsOperations,
-                            modifier = Modifier.width(56.dp),
-                            colors = colors,
-                        )
-                        CompactButton(
-                            text = "Sheets Set",
-                            onClick = onOpenSheetsSettings,
-                            modifier = Modifier.width(80.dp),
                             colors = colors,
                         )
                         CompactButton(

@@ -33,8 +33,8 @@ repositories {
 //GW - Gateway
 
 intellij {
-    version = "2026.1.3"
-    type = "IU"
+    version = "2025.1.3"
+    type = "IC"
     plugins = listOf("java")
 }
 
