@@ -127,6 +127,8 @@ fun AiChatContent(
 
         val quickPhrases = remember {
             listOf(
+                "帮我检查表格全部的翻译",
+                "帮我修正完善表格全部翻译",
                 "帮我检查选择的翻译是否有误",
                 "帮我补全和修正选中的翻译",
                 "帮我把选中的翻译插入表格",

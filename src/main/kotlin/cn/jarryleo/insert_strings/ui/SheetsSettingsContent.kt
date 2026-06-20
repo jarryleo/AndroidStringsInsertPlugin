@@ -11,10 +11,13 @@ fun SheetsSettingsContent(
     defaultSpreadsheetId: String,
     defaultSheetName: String,
     connectionStatus: String,
+    availableSheetNames: List<String>,
+    listStatus: String,
     onDefaultSpreadsheetIdChange: (String) -> Unit,
     onDefaultSheetNameChange: (String) -> Unit,
     onTestConnection: () -> Unit,
     onSave: () -> Unit,
+    onRefreshSheets: () -> Unit,
     modifier: Modifier = Modifier,
     colors: IdeColors,
 ) {
@@ -43,13 +46,23 @@ fun SheetsSettingsContent(
         )
 
         SettingsLabel("Default Sheet Name", colors)
-        CompactTextField(
-            value = defaultSheetName,
-            onValueChange = onDefaultSheetNameChange,
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            colors = colors,
-        )
+        if (availableSheetNames.isNotEmpty()) {
+            ModelField(
+                value = defaultSheetName,
+                options = availableSheetNames,
+                onValueChange = onDefaultSheetNameChange,
+                modifier = Modifier.fillMaxWidth(),
+                colors = colors,
+            )
+        } else {
+            CompactTextField(
+                value = defaultSheetName,
+                onValueChange = onDefaultSheetNameChange,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                colors = colors,
+            )
+        }
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -61,11 +74,33 @@ fun SheetsSettingsContent(
                 modifier = Modifier.weight(1f),
                 colors = colors,
             )
+            CompactButton(
+                text = "Refresh Sheets",
+                onClick = onRefreshSheets,
+                modifier = Modifier.weight(1f),
+                colors = colors,
+            )
         }
 
         if (connectionStatus.isNotEmpty()) {
             Text(
                 text = connectionStatus,
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText),
+            )
+        }
+
+        if (listStatus.isNotEmpty()) {
+            Text(
+                text = listStatus,
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText),
+            )
+        }
+
+        if (availableSheetNames.isNotEmpty()) {
+            Text(
+                text = "可用工作表: ${availableSheetNames.joinToString(", ")}",
                 color = colors.secondaryText,
                 style = compactTextStyle(colors.secondaryText),
             )

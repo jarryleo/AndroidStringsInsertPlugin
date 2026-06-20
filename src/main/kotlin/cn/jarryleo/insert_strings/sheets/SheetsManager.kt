@@ -10,7 +10,12 @@ import com.google.api.client.json.gson.GsonFactory
 import com.google.api.client.util.store.FileDataStoreFactory
 import com.google.api.services.sheets.v4.Sheets
 import com.google.api.services.sheets.v4.SheetsScopes
+import com.google.api.services.sheets.v4.model.BatchUpdateSpreadsheetRequest
 import com.google.api.services.sheets.v4.model.ClearValuesRequest
+import com.google.api.services.sheets.v4.model.DeleteDimensionRequest
+import com.google.api.services.sheets.v4.model.DimensionRange
+import com.google.api.services.sheets.v4.model.InsertDimensionRequest
+import com.google.api.services.sheets.v4.model.Request
 import com.google.api.services.sheets.v4.model.ValueRange
 import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.project.Project
@@ -484,5 +489,445 @@ object SheetsManager {
 
     fun resolveSpreadsheetId(project: Project, spreadsheetId: String?): String {
         return spreadsheetId?.trim()?.takeIf { it.isNotBlank() } ?: defaultSpreadsheetId(project)
+    }
+
+    /**
+     * 表格中单个工作表的元信息。
+     */
+    data class SheetInfo(
+        val title: String,
+        val sheetId: Int,
+        val rowCount: Int,
+        val columnCount: Int
+    )
+
+    /**
+     * 获取指定表格文件中所有工作表的名称及尺寸。
+     */
+    fun listSheetNames(project: Project, spreadsheetId: String): Result<List<SheetInfo>> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val spreadsheet = service.spreadsheets().get(spreadsheetId)
+                .setIncludeGridData(false)
+                .execute()
+            spreadsheet.sheets?.map { sheet ->
+                val props = sheet.properties
+                val grid = props?.gridProperties
+                SheetInfo(
+                    title = props?.title ?: "",
+                    sheetId = props?.sheetId ?: 0,
+                    rowCount = grid?.rowCount ?: 0,
+                    columnCount = grid?.columnCount ?: 0
+                )
+            } ?: emptyList()
+        }
+    }
+
+    /**
+     * 读取整个工作表的所有数据。
+     */
+    fun readSheet(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String
+    ): Result<List<List<String>>> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        val safeSheet = sanitizeSheetName(sheetName)
+        return readRange(project, spreadsheetId, "$safeSheet!A1:Z100000")
+    }
+
+    /**
+     * 精确更新某一行（1-based 行号）。仅写入给定行，不影响其他行。
+     */
+    fun updateRow(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        rowNumber: Int,
+        values: List<String>
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        if (rowNumber < 1) return Result.failure(IllegalArgumentException("Row number must be >= 1."))
+        if (values.isEmpty()) return Result.failure(IllegalArgumentException("No values to write."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val safeSheet = sanitizeSheetName(sheetName)
+            val endCol = columnIndexToLetter(values.size - 1)
+            val range = "$safeSheet!A$rowNumber:$endCol$rowNumber"
+            val body = ValueRange().setValues(listOf(values))
+            service.spreadsheets().values()
+                .update(spreadsheetId, range, body)
+                .setValueInputOption("USER_ENTERED")
+                .execute()
+        }
+    }
+
+    /**
+     * 在指定行号位置插入一个新行，原行及之后的数据整体下移。
+     * rowNumber 为 1-based，例如 rowNumber=3 时，原第 3 行及之后内容下移到第 4 行起。
+     */
+    fun insertRow(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        rowNumber: Int,
+        values: List<String>
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        if (rowNumber < 1) return Result.failure(IllegalArgumentException("Row number must be >= 1."))
+        if (values.isEmpty()) return Result.failure(IllegalArgumentException("No values to insert."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val safeSheet = sanitizeSheetName(sheetName)
+            val sheetId = resolveSheetId(service, spreadsheetId, safeSheet)
+                ?: throw IllegalStateException("Sheet '$safeSheet' not found in spreadsheet.")
+
+            // 1) 先在目标行位置插入一空行（0-based 索引）
+            val insertRequest = Request().setInsertDimension(
+                InsertDimensionRequest()
+                    .setRange(
+                        DimensionRange()
+                            .setSheetId(sheetId)
+                            .setDimension("ROWS")
+                            .setStartIndex(rowNumber - 1)
+                            .setEndIndex(rowNumber)
+                    )
+                    .setInheritFromBefore(true)
+            )
+            service.spreadsheets()
+                .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(listOf(insertRequest)))
+                .execute()
+
+            // 2) 再把数据写入刚刚插入的空行
+            val endCol = columnIndexToLetter(values.size - 1)
+            val range = "$safeSheet!A$rowNumber:$endCol$rowNumber"
+            val body = ValueRange().setValues(listOf(values))
+            service.spreadsheets().values()
+                .update(spreadsheetId, range, body)
+                .setValueInputOption("USER_ENTERED")
+                .execute()
+        }
+    }
+
+    /**
+     * 在工作表末尾追加一行数据。
+     */
+    fun appendRow(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        values: List<String>
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        if (values.isEmpty()) return Result.failure(IllegalArgumentException("No values to append."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val safeSheet = sanitizeSheetName(sheetName)
+            val body = ValueRange().setValues(listOf(values))
+            service.spreadsheets().values()
+                .append(spreadsheetId, "$safeSheet!A1", body)
+                .setValueInputOption("USER_ENTERED")
+                .setInsertDataOption("INSERT_ROWS")
+                .execute()
+        }
+    }
+
+    /**
+     * 删除指定行（1-based）。后续行整体上移。
+     */
+    fun deleteRow(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        rowNumber: Int
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        if (rowNumber < 1) return Result.failure(IllegalArgumentException("Row number must be >= 1."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val safeSheet = sanitizeSheetName(sheetName)
+            val sheetId = resolveSheetId(service, spreadsheetId, safeSheet)
+                ?: throw IllegalStateException("Sheet '$safeSheet' not found in spreadsheet.")
+
+            val deleteRequest = Request().setDeleteDimension(
+                DeleteDimensionRequest()
+                    .setRange(
+                        DimensionRange()
+                            .setSheetId(sheetId)
+                            .setDimension("ROWS")
+                            .setStartIndex(rowNumber - 1)
+                            .setEndIndex(rowNumber)
+                    )
+            )
+            service.spreadsheets()
+                .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(listOf(deleteRequest)))
+                .execute()
+        }
+    }
+
+    /**
+     * 清空指定行的内容（保留空行，不改变行数）。
+     */
+    fun clearRow(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        rowNumber: Int,
+        columnCount: Int = 26
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        if (rowNumber < 1) return Result.failure(IllegalArgumentException("Row number must be >= 1."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val safeSheet = sanitizeSheetName(sheetName)
+            val endCol = columnIndexToLetter(columnCount - 1)
+            val range = "$safeSheet!A$rowNumber:$endCol$rowNumber"
+            service.spreadsheets().values()
+                .clear(spreadsheetId, range, ClearValuesRequest())
+                .execute()
+        }
+    }
+
+    /**
+     * 查找某一行：在 [sheetName] 的第一列中匹配 [key]，返回 1-based 行号与整行内容。
+     */
+    fun searchRowInSheet(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        key: String
+    ): Result<Pair<Int, List<String>>> {
+        if (key.isBlank()) return Result.failure(IllegalArgumentException("Search key is empty."))
+        val safeSheet = sanitizeSheetName(sheetName)
+        return searchRowByKey(project, spreadsheetId, "$safeSheet!A1:Z100000", key)
+    }
+
+    // ==================== 列操作 ====================
+
+    /**
+     * 在指定列号位置插入一个新列，原该列及之后的数据整体右移。
+     * columnIndex 为 1-based。values 第一个元素为表头，其余为该列各行的值。
+     */
+    fun insertColumn(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        columnIndex: Int,
+        values: List<String>
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        if (columnIndex < 1) return Result.failure(IllegalArgumentException("Column index must be >= 1."))
+        if (values.isEmpty()) return Result.failure(IllegalArgumentException("No values to insert."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val safeSheet = sanitizeSheetName(sheetName)
+            val sheetId = resolveSheetId(service, spreadsheetId, safeSheet)
+                ?: throw IllegalStateException("Sheet '$safeSheet' not found in spreadsheet.")
+
+            val insertRequest = Request().setInsertDimension(
+                InsertDimensionRequest()
+                    .setRange(
+                        DimensionRange()
+                            .setSheetId(sheetId)
+                            .setDimension("COLUMNS")
+                            .setStartIndex(columnIndex - 1)
+                            .setEndIndex(columnIndex)
+                    )
+                    .setInheritFromBefore(true)
+            )
+            service.spreadsheets()
+                .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(listOf(insertRequest)))
+                .execute()
+
+            writeColumnValues(service, spreadsheetId, safeSheet, columnIndex, values)
+        }
+    }
+
+    /**
+     * 在工作表末尾追加一个新列。values 第一个元素为表头，其余为该列各行的值。
+     */
+    fun appendColumn(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        values: List<String>
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        if (values.isEmpty()) return Result.failure(IllegalArgumentException("No values to append."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val safeSheet = sanitizeSheetName(sheetName)
+            val sheetId = resolveSheetId(service, spreadsheetId, safeSheet)
+                ?: throw IllegalStateException("Sheet '$safeSheet' not found in spreadsheet.")
+
+            val currentColCount = readRange(project, spreadsheetId, "$safeSheet!A1:ZZ1")
+                .getOrNull()?.firstOrNull()?.size ?: 0
+            val newColumnIndex = currentColCount + 1
+
+            val insertRequest = Request().setInsertDimension(
+                InsertDimensionRequest()
+                    .setRange(
+                        DimensionRange()
+                            .setSheetId(sheetId)
+                            .setDimension("COLUMNS")
+                            .setStartIndex(currentColCount)
+                            .setEndIndex(currentColCount + 1)
+                    )
+                    .setInheritFromBefore(currentColCount > 0)
+            )
+            service.spreadsheets()
+                .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(listOf(insertRequest)))
+                .execute()
+
+            writeColumnValues(service, spreadsheetId, safeSheet, newColumnIndex, values)
+        }
+    }
+
+    /**
+     * 删除指定列（1-based）。后续列整体左移。
+     */
+    fun deleteColumn(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        columnIndex: Int
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        if (columnIndex < 1) return Result.failure(IllegalArgumentException("Column index must be >= 1."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val safeSheet = sanitizeSheetName(sheetName)
+            val sheetId = resolveSheetId(service, spreadsheetId, safeSheet)
+                ?: throw IllegalStateException("Sheet '$safeSheet' not found in spreadsheet.")
+
+            val deleteRequest = Request().setDeleteDimension(
+                DeleteDimensionRequest()
+                    .setRange(
+                        DimensionRange()
+                            .setSheetId(sheetId)
+                            .setDimension("COLUMNS")
+                            .setStartIndex(columnIndex - 1)
+                            .setEndIndex(columnIndex)
+                    )
+            )
+            service.spreadsheets()
+                .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(listOf(deleteRequest)))
+                .execute()
+        }
+    }
+
+    /**
+     * 清空指定列的内容但保留空列，不改变列数。
+     */
+    fun clearColumn(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        columnIndex: Int,
+        rowCount: Int = 1000
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        if (columnIndex < 1) return Result.failure(IllegalArgumentException("Column index must be >= 1."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val safeSheet = sanitizeSheetName(sheetName)
+            val colLetter = columnIndexToLetter(columnIndex - 1)
+            val range = "$safeSheet!$colLetter" + "1:$colLetter$rowCount"
+            service.spreadsheets().values()
+                .clear(spreadsheetId, range, ClearValuesRequest())
+                .execute()
+        }
+    }
+
+    /**
+     * 精确更新某一列（1-based）。values 第一个元素为表头，其余为该列各行的值。
+     */
+    fun updateColumn(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        columnIndex: Int,
+        values: List<String>
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        if (columnIndex < 1) return Result.failure(IllegalArgumentException("Column index must be >= 1."))
+        if (values.isEmpty()) return Result.failure(IllegalArgumentException("No values to write."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val safeSheet = sanitizeSheetName(sheetName)
+            writeColumnValues(service, spreadsheetId, safeSheet, columnIndex, values)
+        }
+    }
+
+    /**
+     * 获取指定工作表的列数（基于第一行的实际列数）。
+     */
+    fun columnCountOf(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String
+    ): Result<Int> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        return runCatching {
+            val safeSheet = sanitizeSheetName(sheetName)
+            readRange(project, spreadsheetId, "$safeSheet!A1:ZZ1")
+                .getOrNull()?.firstOrNull()?.size ?: 0
+        }
+    }
+
+    private fun writeColumnValues(
+        service: Sheets,
+        spreadsheetId: String,
+        safeSheet: String,
+        columnIndex: Int,
+        values: List<String>
+    ) {
+        val colLetter = columnIndexToLetter(columnIndex - 1)
+        val range = "$safeSheet!$colLetter" + "1:$colLetter${values.size}"
+        val body = ValueRange().setValues(values.map { listOf(it) })
+        service.spreadsheets().values()
+            .update(spreadsheetId, range, body)
+            .setValueInputOption("USER_ENTERED")
+            .execute()
+    }
+
+    private fun resolveSheetId(service: Sheets, spreadsheetId: String, sheetName: String): Int? {
+        val spreadsheet = service.spreadsheets().get(spreadsheetId)
+            .setIncludeGridData(false)
+            .execute()
+        return spreadsheet.sheets?.firstOrNull {
+            it.properties?.title?.equals(sheetName, ignoreCase = true) == true
+        }?.properties?.sheetId
+    }
+
+    private fun sanitizeSheetName(sheetName: String): String {
+        val trimmed = sheetName.trim()
+        if (trimmed.isEmpty()) return "Sheet1"
+        // 包含空格或特殊字符时需要用单引号包裹
+        return if (trimmed.any { it.isWhitespace() || it in "'!#$%" }) "'$trimmed'" else trimmed
+    }
+
+    private fun columnIndexToLetter(index: Int): String {
+        if (index < 0) return "A"
+        var n = index
+        val sb = StringBuilder()
+        while (n >= 0) {
+            sb.insert(0, ('A' + (n % 26)))
+            n = n / 26 - 1
+        }
+        return sb.toString()
     }
 }
