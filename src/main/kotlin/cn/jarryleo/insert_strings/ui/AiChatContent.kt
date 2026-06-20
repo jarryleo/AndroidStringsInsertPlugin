@@ -3,6 +3,8 @@ package cn.jarryleo.insert_strings.ui
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -12,10 +14,14 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.ai.ChatMessage
 
@@ -200,22 +206,10 @@ private fun ChatBubble(
         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
     ) {
         if (isTool) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 4.dp, vertical = 2.dp)
-                    .background(colors.fieldBackground, RoundedCornerShape(6.dp))
-                    .border(width = 1.dp, color = colors.border, RoundedCornerShape(6.dp))
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
-            ) {
-                SelectionContainer {
-                    Text(
-                        text = message.content,
-                        color = colors.secondaryText,
-                        style = compactTextStyle(colors.secondaryText),
-                    )
-                }
-            }
+            ToolBubble(
+                content = message.content,
+                colors = colors,
+            )
         } else {
             Box(
                 modifier = Modifier.fillMaxWidth(),
@@ -255,6 +249,80 @@ private fun ChatBubble(
                         tone = classifyOptionTone(option),
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolBubble(
+    content: String,
+    colors: IdeColors,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val summary = remember(content) {
+        val trimmed = content.trim()
+        when {
+            trimmed.startsWith("[工具执行结果]") -> "工具执行结果"
+            trimmed.startsWith("[系统监督]") -> "系统监督提示"
+            trimmed.startsWith("[工具文档加载失败]") -> "工具文档加载失败"
+            trimmed.contains("工具文档") -> "工具文档加载"
+            else -> {
+                val firstLine = trimmed.lineSequence().firstOrNull { it.isNotBlank() } ?: ""
+                if (firstLine.length > 60) firstLine.take(60) + "…" else firstLine
+            }
+        }
+    }
+    val lineCount = remember(content) {
+        content.count { it == '\n' } + 1
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 2.dp)
+            .background(colors.fieldBackground, RoundedCornerShape(6.dp))
+            .border(width = 1.dp, color = colors.border, RoundedCornerShape(6.dp)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) { expanded = !expanded }
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = if (expanded) "▼" else "▶",
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = summary,
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (!expanded) {
+                Text(
+                    text = "($lineCount 行)",
+                    color = colors.secondaryText,
+                    style = compactTextStyle(colors.secondaryText),
+                )
+            }
+        }
+        if (expanded) {
+            SelectionContainer {
+                Text(
+                    text = content,
+                    color = colors.secondaryText,
+                    style = compactTextStyle(colors.secondaryText),
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                )
             }
         }
     }
