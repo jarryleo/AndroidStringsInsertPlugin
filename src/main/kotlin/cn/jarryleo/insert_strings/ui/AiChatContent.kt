@@ -252,9 +252,42 @@ private fun ChatBubble(
                         onClick = { onOptionClick(messageIndex, option) },
                         enabled = !chatSending,
                         colors = colors,
+                        tone = classifyOptionTone(option),
                     )
                 }
             }
         }
+    }
+}
+
+private fun classifyOptionTone(text: String): ButtonTone {
+    val lower = text.trim().lowercase()
+    if (lower.isEmpty()) return ButtonTone.NEUTRAL
+
+    val negativeKeywords = listOf(
+        "取消", "否", "拒绝", "停止", "否认", "放弃", "关闭",
+        "cancel", "no", "deny", "stop", "abort", "discard", "close", "quit", "reject"
+    )
+    val warningKeywords = listOf(
+        "覆盖", "删除", "清空", "移除", "重置", "替换", "格式化",
+        "overwrite", "delete", "remove", "clear", "reset", "replace", "drop", "wipe", "format"
+    )
+    val positiveKeywords = listOf(
+        "追加", "插入", "同意", "确认", "允许", "继续", "确定", "执行", "保存", "应用", "是", "好", "可以",
+        "在列表末尾", "新建", "添加", "创建",
+        "append", "insert", "yes", "ok", "confirm", "allow", "continue", "apply", "save",
+        "add", "create", "new", "proceed", "accept", "agree"
+    )
+    val infoKeywords = listOf(
+        "查看", "读取", "检查", "选择", "切换", "浏览", "详情", "帮助",
+        "view", "read", "check", "select", "switch", "browse", "detail", "help", "show", "inspect"
+    )
+
+    return when {
+        negativeKeywords.any { lower.contains(it) } -> ButtonTone.NEGATIVE
+        warningKeywords.any { lower.contains(it) } -> ButtonTone.WARNING
+        positiveKeywords.any { lower.contains(it) } -> ButtonTone.POSITIVE
+        infoKeywords.any { lower.contains(it) } -> ButtonTone.INFO
+        else -> ButtonTone.NEUTRAL
     }
 }

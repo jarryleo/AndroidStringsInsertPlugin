@@ -13,6 +13,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.VisualTransformation
@@ -44,6 +45,24 @@ fun CompactTextField(
     )
 }
 
+enum class ButtonTone {
+    NEUTRAL,
+    POSITIVE,
+    WARNING,
+    NEGATIVE,
+    INFO,
+}
+
+private fun toneColors(tone: ButtonTone): Triple<Color, Color, Color> {
+    return when (tone) {
+        ButtonTone.POSITIVE -> Triple(Color(0xFF16A34A), Color(0xFFDCFCE7), Color(0xFF15803D))
+        ButtonTone.WARNING -> Triple(Color(0xFFEA580C), Color(0xFFFFEDD5), Color(0xFFC2410C))
+        ButtonTone.NEGATIVE -> Triple(Color(0xFFDC2626), Color(0xFFFEE2E2), Color(0xFFB91C1C))
+        ButtonTone.INFO -> Triple(Color(0xFF2563EB), Color(0xFFDBEAFE), Color(0xFF1D4ED8))
+        ButtonTone.NEUTRAL -> Triple(Color.Unspecified, Color.Unspecified, Color.Unspecified)
+    }
+}
+
 @Composable
 fun CompactButton(
     text: String,
@@ -52,21 +71,35 @@ fun CompactButton(
     colors: IdeColors,
     primary: Boolean = false,
     enabled: Boolean = true,
+    tone: ButtonTone = ButtonTone.NEUTRAL,
 ) {
-    val background = if (primary) colors.accent else colors.buttonBackground
-    val foreground = if (primary) colors.accentText else colors.text
-    val border = if (primary) colors.accent else colors.buttonBorder
+    val (accent, tintBg, accentDark) = toneColors(tone)
+    val background = when {
+        !enabled -> colors.fieldBackground
+        primary -> colors.accent
+        tone != ButtonTone.NEUTRAL -> tintBg
+        else -> colors.buttonBackground
+    }
+    val foreground = when {
+        !enabled -> colors.secondaryText
+        primary -> colors.accentText
+        tone != ButtonTone.NEUTRAL -> accentDark
+        else -> colors.text
+    }
+    val border = when {
+        !enabled -> colors.fieldBorder
+        primary -> colors.accent
+        tone != ButtonTone.NEUTRAL -> accent
+        else -> colors.buttonBorder
+    }
     val interactionSource = remember { MutableInteractionSource() }
 
     Box(
         modifier = modifier
             .height(26.dp)
-            .background(
-                if (enabled) background else colors.fieldBackground,
-                RoundedCornerShape(3.dp)
-            )
+            .background(background, RoundedCornerShape(3.dp))
             .border(
-                BorderStroke(1.dp, if (enabled) border else colors.fieldBorder),
+                BorderStroke(1.dp, border),
                 RoundedCornerShape(3.dp)
             )
             .clickable(
@@ -80,8 +113,8 @@ fun CompactButton(
     ) {
         Text(
             text = text,
-            color = if (enabled) foreground else colors.secondaryText,
-            style = compactTextStyle(if (enabled) foreground else colors.secondaryText),
+            color = foreground,
+            style = compactTextStyle(foreground),
             maxLines = 1,
         )
     }
