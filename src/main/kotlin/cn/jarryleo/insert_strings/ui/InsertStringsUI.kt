@@ -47,8 +47,8 @@ class InsertStringsUI(
 
     companion object {
         // 单次对话中 AI 调用工具的最大轮数。超过则强制结束,防止死循环。
-        // 设 15 足以覆盖现实中的多步操作(检查+修正等),又能及时止损。
-        private const val MAX_ITERATIONS = 15
+        // 设 30 足以覆盖现实中的多步操作(检查+修正等),又能及时止损。
+        private const val MAX_ITERATIONS = 30
         // 批量翻译审查时每批的行数。控制单次 AI 调用 token,避免溢出。
         private const val REVIEW_BATCH_SIZE = 80
         // load_tool_doc 按需加载工具文档的最大连续次数,防止 AI 反复加载文档而不执行操作。
