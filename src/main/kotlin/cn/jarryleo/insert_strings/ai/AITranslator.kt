@@ -77,11 +77,16 @@ object AITranslator {
 4. 区分 insert_strings 与 update_string:新增/全量覆盖用 insert_strings,部分语言修改用 update_string。
 5. 修改前若不确定当前翻译,先 read_string。
 6. module 必须是上下文 modules 中的 moduleName;若上下文有 currentModule 则默认用它。
-7. XML 特殊字符需转义:&amp; &lt; &gt; &quot; &apos;。
-8. append_row 重复 key 由系统自动检测并询问用户,你无需自行检查。
-9. sheets_operation 的 spreadsheetId/sheetName 可省略,默认用上下文 googleSheets 配置。
-10. 若 googleSheets.configured 为 false,提示用户先配置,不要调用 sheets_operation。
-11. 安全约束:禁止擅自增删列;写入前列对齐表头;全表检查/修正用 check_translations/fix_translations 而非 read 整表。"""
+7. 【重要】同一 AI 回合内的所有 insert_strings / update_string 写入动作必须在同一模块:
+   - 全部省略 module 参数(系统用 currentModule)
+   - 或全部显式指定同一个 module
+   - 不可一次 insert A 到 module1、insert B 到 module2 — 系统会整批拒绝并要求修正
+   - 确实需要跨模块写入时,拆成多个 AI 回合
+8. XML 特殊字符需转义:&amp; &lt; &gt; &quot; &apos;。
+9. append_row 重复 key 由系统自动检测并询问用户,你无需自行检查。
+10. sheets_operation 的 spreadsheetId/sheetName 可省略,默认用上下文 googleSheets 配置。
+11. 若 googleSheets.configured 为 false,提示用户先配置,不要调用 sheets_operation。
+12. 安全约束:禁止擅自增删列;写入前列对齐表头;全表检查/修正用 check_translations/fix_translations 而非 read 整表。"""
 
     /**
      * 按需加载的工具详细文档（key = tool 名，value = 完整说明）。

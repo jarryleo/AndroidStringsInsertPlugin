@@ -111,6 +111,16 @@ class InsertStringsUI(
     )
     private var pendingSheetsInsert: PendingSheetsInsert? = null
 
+    /**
+     * action 与其对应的 tool_call_id 配对,用于 execute 方法的精确回传。
+     * 取代之前 `actions: List<T> + actionToolCallIds: List<String>` 的下标对齐模式,
+     * 避免过滤后下标错位的 bug。
+     */
+    private data class ActionWithToolCall(
+        val action: AiAction,
+        val toolCallId: String
+    )
+
     private val rootPanel = ComposePanel().apply {
         setContent {
             MaterialTheme {
@@ -1229,6 +1239,10 @@ class InsertStringsUI(
     /**
      * 处理一次 AI 回复:按优先级分发到 task_complete / ask_user / load_tool_doc / insert / sheets 各分支。
      * 各分支处理完后再决定是否继续 tool loop。
+     *
+     * 关键设计:统一用 [ActionWithToolCall] 配对列表传递 action 与其 tool_call_id,
+     * 杜绝「过滤后下标错位」的历史 bug。写操作(insert/update)还要先做模块一致性校验,
+     * 防止 AI 一次回合内把不同 strings 插入到不同模块。
      */
     private fun processAiReply(
         reply: AiReply,
@@ -1236,33 +1250,38 @@ class InsertStringsUI(
         context: String,
         iteration: Int
     ) {
+        // 构造精确配对:每个 action 携带自己的 tool_call_id,不再依赖下标
+        val pairs: List<ActionWithToolCall> = reply.actions.mapIndexedNotNull { i, action ->
+            val toolCallId = actionToolCallIds.getOrNull(i).orEmpty()
+            if (toolCallId.isEmpty()) null else ActionWithToolCall(action, toolCallId)
+        }
+
         // Priority 1: task_complete 终止对话
-        reply.actions.filterIsInstance<AiAction.TaskComplete>().firstOrNull()?.let { complete ->
-            handleTaskComplete(complete)
+        pairs.firstOrNull { it.action is AiAction.TaskComplete }?.let { (complete, _) ->
+            handleTaskComplete(complete as AiAction.TaskComplete)
             return
         }
 
         // Priority 2: ask_user
-        val askUserIdx = reply.actions.indexOfFirst { it is AiAction.AskUser }
-        if (askUserIdx >= 0) {
-            val askAction = reply.actions[askUserIdx] as AiAction.AskUser
+        val askUserEntry = pairs.firstOrNull { it.action is AiAction.AskUser }
+        if (askUserEntry != null) {
+            val askAction = askUserEntry.action as AiAction.AskUser
             if (askAction.options.isNotEmpty()) {
                 // 带 options:挂到 assistant 消息渲染按钮,记录 toolCallId,等待用户点击
                 chatMessages[chatMessages.lastIndex] =
                     chatMessages.last().copy(options = askAction.options)
-                pendingAskUserToolCallId = actionToolCallIds[askUserIdx].takeIf { it.isNotEmpty() }
+                pendingAskUserToolCallId = askUserEntry.toolCallId.takeIf { it.isNotEmpty() }
                 chatSending = false
                 return
             }
             // 无 options:仅提示用户,自动添加 tool result 继续
             showToast(askAction.question)
-            val toolCallId = actionToolCallIds[askUserIdx]
-            if (toolCallId.isNotEmpty()) {
+            if (askUserEntry.toolCallId.isNotEmpty()) {
                 chatMessages.add(
                     ChatMessage(
                         role = "tool",
                         content = "[已向用户显示问题,无需回复] ${askAction.question}",
-                        toolCallId = toolCallId
+                        toolCallId = askUserEntry.toolCallId
                     )
                 )
                 continueToolLoopInBackground(context, iteration + 1)
@@ -1272,43 +1291,106 @@ class InsertStringsUI(
         }
 
         // Priority 3: load_tool_doc
-        val hasLoadDoc = reply.actions.any { it is AiAction.LoadToolDoc }
-        if (hasLoadDoc) {
-            handleLoadToolDoc(reply.actions, actionToolCallIds, context, iteration)
+        val loadDocEntries = pairs.filter { it.action is AiAction.LoadToolDoc }
+        if (loadDocEntries.isNotEmpty()) {
+            handleLoadToolDoc(loadDocEntries, context, iteration)
             return
         }
 
-        // Priority 4: query_keys / read_string / update_string / find_keys_by_text(strings.xml 主动操作能力)
-        // 按 reply.actions 原序提取,保持与 actionToolCallIds 的下标对齐
-        val stringsActions = reply.actions.filter {
-            it is AiAction.QueryKeys ||
-                it is AiAction.ReadString ||
-                it is AiAction.UpdateString ||
-                it is AiAction.FindKeysByText
+        // Priority 4-5: strings.xml 写操作(insert_strings / update_string)统一做模块一致性校验
+        val writeEntries = pairs.filter {
+            it.action is AiAction.InsertStrings || it.action is AiAction.UpdateString
         }
-        if (stringsActions.isNotEmpty()) {
-            executeStringsOps(stringsActions, actionToolCallIds, context, iteration)
+        if (writeEntries.isNotEmpty()) {
+            val conflict = detectWriteModuleConflict(writeEntries)
+            if (conflict != null) {
+                // 跨模块冲突:整批拒绝,把错误回传给 AI 让其修正
+                rejectWriteModuleConflict(writeEntries, conflict, context, iteration)
+                return
+            }
+        }
+
+        // Priority 4: query_keys / read_string / update_string / find_keys_by_text(strings.xml 主动操作能力)
+        // 注意:update_string 已被上面的模块一致性校验拦截(若有问题就 reject),此处仅含只读动作
+        val stringReadEntries = pairs.filter {
+            it.action is AiAction.QueryKeys ||
+                it.action is AiAction.ReadString ||
+                it.action is AiAction.FindKeysByText
+        }
+        val stringWriteEntries = pairs.filter { it.action is AiAction.UpdateString }
+        val stringsEntries = stringReadEntries + stringWriteEntries
+        if (stringsEntries.isNotEmpty()) {
+            executeStringsOps(stringsEntries, context, iteration)
             return
         }
 
         // Priority 5: insert_strings
-        val insertActions = reply.actions.filterIsInstance<AiAction.InsertStrings>()
-        if (insertActions.isNotEmpty()) {
-            executeInsertActions(insertActions, actionToolCallIds, context, iteration)
+        val insertEntries = pairs.filter { it.action is AiAction.InsertStrings }
+        if (insertEntries.isNotEmpty()) {
+            executeInsertActions(insertEntries, context, iteration)
             return
         }
 
         // Priority 6: sheets_operation / find_rows_by_text
-        val sheetsActions = reply.actions.filter {
-            it is AiAction.SheetsOperation || it is AiAction.FindRowsByText
+        val sheetsEntries = pairs.filter {
+            it.action is AiAction.SheetsOperation || it.action is AiAction.FindRowsByText
         }
-        if (sheetsActions.isNotEmpty()) {
-            executeSheetsActions(sheetsActions, actionToolCallIds, context, iteration)
+        if (sheetsEntries.isNotEmpty()) {
+            executeSheetsActions(sheetsEntries, context, iteration)
             return
         }
 
         // 没有任何可执行 tool call:AI 只是在说,等用户输入
         chatSending = false
+    }
+
+    /**
+     * 检测 write actions(insert_strings + update_string)是否指定了不同模块。
+     * @return 冲突描述(列出所有显式指定的 module);若全部一致或仅有 0~1 个显式 module,返回 null
+     */
+    private fun detectWriteModuleConflict(
+        writeEntries: List<ActionWithToolCall>
+    ): String? {
+        val explicitModules = writeEntries
+            .mapNotNull { entry ->
+                val m = when (val action = entry.action) {
+                    is AiAction.InsertStrings -> action.module
+                    is AiAction.UpdateString -> action.module
+                    else -> null
+                }?.trim()?.takeIf { it.isNotEmpty() }
+                m
+            }
+            .distinct()
+        return if (explicitModules.size > 1) explicitModules.joinToString(", ") else null
+    }
+
+    /**
+     * 整批拒绝跨模块的 write actions,给每个 action 发错误 tool_result。
+     * AI 会在下一轮看到错误并修正(统一 module 或全部省略 module 让系统用 currentModule)。
+     */
+    private fun rejectWriteModuleConflict(
+        writeEntries: List<ActionWithToolCall>,
+        explicitModulesCsv: String,
+        context: String,
+        iteration: Int
+    ) {
+        val errorMsg = buildString {
+            append("[工具执行异常] 跨模块冲突:本轮内 insert_strings/update_string 动作指定了多个不同 module(")
+            append(explicitModulesCsv)
+            append(")。同一 AI 回合内的所有字符串写入必须在同一模块。")
+            append("请重新组织 actions:全部省略 module 参数(系统使用 currentModule),")
+            append("或全部显式指定同一 module。若确实需要写入多个模块,请拆成多个 AI 回合。")
+        }
+        chatMessages.add(
+            ChatMessage(role = "tool", content = errorMsg, toolCallId = writeEntries.first().toolCallId)
+        )
+        // 其余 action 同样发错误,避免协议错位
+        writeEntries.drop(1).forEach { entry ->
+            chatMessages.add(
+                ChatMessage(role = "tool", content = errorMsg, toolCallId = entry.toolCallId)
+            )
+        }
+        continueToolLoopInBackground(context, iteration + 1)
     }
 
     private fun handleTaskComplete(complete: AiAction.TaskComplete) {
@@ -1333,8 +1415,7 @@ class InsertStringsUI(
      * 然后继续 tool loop 让 AI 返回实际执行动作。
      */
     private fun handleLoadToolDoc(
-        actions: List<AiAction>,
-        actionToolCallIds: List<String>,
+        entries: List<ActionWithToolCall>,
         context: String,
         iteration: Int
     ) {
@@ -1350,8 +1431,9 @@ class InsertStringsUI(
         }
         toolDocLoadCount++
 
-        val requestedTools = actions.filterIsInstance<AiAction.LoadToolDoc>()
-            .map { it.tool }.distinct()
+        val requestedTools = entries.mapNotNull { (action, _) ->
+            (action as? AiAction.LoadToolDoc)?.tool
+        }.distinct()
         val docsToInject = requestedTools.mapNotNull { tool ->
             AITranslator.getToolDoc(tool)?.let { doc -> tool to doc }
         }
@@ -1371,14 +1453,11 @@ class InsertStringsUI(
         }
 
         // 为每个 load_tool_doc 调用添加对应的 tool result(一对一关联 toolCallId)
-        actions.forEachIndexed { i, action ->
-            if (action is AiAction.LoadToolDoc) {
-                val toolCallId = actionToolCallIds[i]
-                if (toolCallId.isNotEmpty()) {
-                    chatMessages.add(
-                        ChatMessage(role = "tool", content = summary, toolCallId = toolCallId)
-                    )
-                }
+        entries.forEach { (_, toolCallId) ->
+            if (toolCallId.isNotEmpty()) {
+                chatMessages.add(
+                    ChatMessage(role = "tool", content = summary, toolCallId = toolCallId)
+                )
             }
         }
 
@@ -1388,27 +1467,24 @@ class InsertStringsUI(
 
     /**
      * 统一执行 query_keys / read_string / update_string / find_keys_by_text 四类 strings.xml 操作。
-     * actions 保持与 [actionToolCallIds] 同序(下标对齐),每个动作独立生成 tool result。
+     * 每个 entry 自带 toolCallId,内部按 entry 解构后独立生成 tool result。
+     * 模块一致性已在 processAiReply 校验,此处直接执行。
      */
     private fun executeStringsOps(
-        actions: List<AiAction>,
-        actionToolCallIds: List<String>,
+        entries: List<ActionWithToolCall>,
         context: String,
         iteration: Int
     ) {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
-                // 后台线程执行所有动作,收集 (toolCallId, resultText) 映射,统一回 EDT
                 val pendingResults = mutableListOf<Pair<String, String>>()
-                actions.forEachIndexed { i, action ->
-                    val toolCallId = actionToolCallIds.getOrNull(i).orEmpty()
-                    if (toolCallId.isEmpty()) return@forEachIndexed
+                entries.forEach { (action, toolCallId) ->
                     val resultText = when (action) {
                         is AiAction.QueryKeys -> runQueryKeys(action)
                         is AiAction.ReadString -> runReadString(action)
                         is AiAction.UpdateString -> runUpdateString(action)
                         is AiAction.FindKeysByText -> runFindKeysByText(action)
-                        else -> return@forEachIndexed
+                        else -> return@forEach
                     }
                     pendingResults.add(toolCallId to resultText)
                 }
@@ -1588,16 +1664,16 @@ class InsertStringsUI(
     /**
      * 执行 sheets 域动作(SheetsOperation + FindRowsByText)并把每个结果作为 tool result 回传。
      * 在执行前自动检测 append_row 动作是否有重复 key,若有则暂停并询问用户。
-     * actions 与 [actionToolCallIds] 同序对齐。
+     * 每个 entry 自带 toolCallId,内部按 entry 解构后独立生成 tool result。
      */
     private fun executeSheetsActions(
-        actions: List<AiAction>,
-        actionToolCallIds: List<String>,
+        entries: List<ActionWithToolCall>,
         context: String,
         iteration: Int
     ) {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
+                val actions = entries.map { it.action }
                 // 仅 SheetsOperation 需要重复 key 检测;FindRowsByText 是只读操作
                 val sheetsOps = actions.filterIsInstance<AiAction.SheetsOperation>()
                 val appendActions = sheetsOps.filter {
@@ -1621,9 +1697,14 @@ class InsertStringsUI(
                             ?.toSet() ?: emptySet()
                         val duplicates = newKeys.filter { it in existingKeys }.toSet()
                         if (duplicates.isNotEmpty()) {
+                            // 重复 key 场景:把 entry 列表投影回 SheetsOperation + 对应 toolCallId
+                            val sheetsOpsWithIds = entries
+                                .mapNotNull { (action, toolCallId) ->
+                                    if (action is AiAction.SheetsOperation) action to toolCallId else null
+                                }
                             val pending = PendingSheetsInsert(
                                 actions = sheetsOps,
-                                actionToolCallIds = actionToolCallIds,
+                                actionToolCallIds = sheetsOpsWithIds.map { it.second },
                                 duplicateKeys = duplicates,
                                 spreadsheetId = spreadsheetId,
                                 sheetName = sheetName,
@@ -1653,9 +1734,7 @@ class InsertStringsUI(
 
                 // 准备所有 toolCallId→结果 映射,统一回 EDT
                 val pendingResults = mutableListOf<Pair<String, String>>()
-                actions.forEachIndexed { i, action ->
-                    val toolCallId = actionToolCallIds.getOrNull(i).orEmpty()
-                    if (toolCallId.isEmpty()) return@forEachIndexed
+                entries.forEach { (action, toolCallId) ->
                     val content = when (action) {
                         is AiAction.SheetsOperation -> {
                             val result = executeSheetsOperationSync(action)
@@ -1674,7 +1753,7 @@ class InsertStringsUI(
                             }
                         }
                         is AiAction.FindRowsByText -> runFindRowsByText(action)
-                        else -> return@forEachIndexed
+                        else -> return@forEach
                     }
                     pendingResults.add(toolCallId to content)
                 }
@@ -1690,8 +1769,7 @@ class InsertStringsUI(
             } catch (e: Exception) {
                 // 异常兜底:为所有未响应的 tool_call 添加错误 tool result,避免协议错位
                 SwingUtilities.invokeLater {
-                    actions.forEachIndexed { i, action ->
-                        val toolCallId = actionToolCallIds.getOrNull(i).orEmpty()
+                    entries.forEach { (action, toolCallId) ->
                         if (toolCallId.isNotEmpty()) {
                             val typeLabel = when (action) {
                                 is AiAction.SheetsOperation -> action.operation.name
@@ -1725,6 +1803,19 @@ class InsertStringsUI(
      * - 末尾插入:原样执行所有 append_row
      * - 取消:不执行,为每个 pending tool_call 添加「用户已取消」的 tool result
      */
+    /**
+     * 把 SheetsOperation 列表 + 平行的 toolCallId 列表打包成 [ActionWithToolCall] 列表,
+     * 供 executeSheetsActions 使用。
+     */
+    private fun buildSheetsActionEntries(
+        actions: List<AiAction.SheetsOperation>,
+        toolCallIds: List<String>
+    ): List<ActionWithToolCall> {
+        return actions.mapIndexed { i, action ->
+            ActionWithToolCall(action, toolCallIds.getOrNull(i).orEmpty())
+        }.filter { it.toolCallId.isNotEmpty() }
+    }
+
     private fun resolveDuplicateInsert(option: String, pending: PendingSheetsInsert) {
         when {
             option.contains("覆盖") -> {
@@ -1755,8 +1846,7 @@ class InsertStringsUI(
                             }
                         }
                         executeSheetsActions(
-                            resolvedActions,
-                            pending.actionToolCallIds,
+                            buildSheetsActionEntries(resolvedActions, pending.actionToolCallIds),
                             pending.context,
                             pending.iteration
                         )
@@ -1778,8 +1868,7 @@ class InsertStringsUI(
                 ApplicationManager.getApplication().executeOnPooledThread {
                     try {
                         executeSheetsActions(
-                            pending.actions,
-                            pending.actionToolCallIds,
+                            buildSheetsActionEntries(pending.actions, pending.actionToolCallIds),
                             pending.context,
                             pending.iteration
                         )
@@ -1938,11 +2027,11 @@ class InsertStringsUI(
     }
 
     private fun executeInsertActions(
-        actions: List<AiAction.InsertStrings>,
-        actionToolCallIds: List<String>,
+        entries: List<ActionWithToolCall>,
         context: String,
         iteration: Int
     ) {
+        val actions = entries.mapNotNull { it.action as? AiAction.InsertStrings }
         if (actions.isEmpty()) {
             continueToolLoopInBackground(context, iteration + 1)
             return
@@ -1951,17 +2040,32 @@ class InsertStringsUI(
         val currentModuleName = contextInfo?.currentModule?.moduleName
         val moduleWithMostLines = contextInfo?.moduleWithMostLines
 
-        // 逐个执行,记录每条的成功/失败信息
-        val results = actions.map { action ->
-            val targetModule = resolveTargetModule(
-                action.module,
-                currentModuleName,
-                moduleWithMostLines?.moduleName
-            )
-            if (targetModule == null) {
-                showToast("No target module for ${action.name}")
-                return@map "未指定目标模块" to false
+        // 决定本批次的统一目标模块(模块一致性已由 processAiReply 校验过,此处安全取第一个非空 module)
+        val batchModule = resolveTargetModule(
+            actions.firstNotNullOfOrNull { it.module?.takeIf { m -> m.isNotBlank() } },
+            currentModuleName,
+            moduleWithMostLines?.moduleName
+        )
+        if (batchModule == null) {
+            // 理论上不会走到这里(校验时已拦截),兜底
+            entries.forEach { (_, toolCallId) ->
+                if (toolCallId.isNotEmpty()) {
+                    chatMessages.add(
+                        ChatMessage(
+                            role = "tool",
+                            content = "[工具执行异常] insert_strings 未指定目标模块且无 currentModule",
+                            toolCallId = toolCallId
+                        )
+                    )
+                }
             }
+            continueToolLoopInBackground(context, iteration + 1)
+            return
+        }
+
+        // 逐个执行到 batchModule
+        val results = actions.map { action ->
+            val targetModule = batchModule
             val stringsInfoList = if (targetModule == currentModuleName) {
                 val existingTranslations = keyEntries.firstOrNull()?.stringsInfoList
                     ?.associate { it.language to it.text } ?: emptyMap()
@@ -1995,36 +2099,28 @@ class InsertStringsUI(
             }
         }
 
-        // 刷新 UI(只对最后一条 action 的目标模块操作,沿用原行为)
-        val lastAction = actions.last()
-        val targetModule = resolveTargetModule(
-            lastAction.module,
-            currentModuleName,
-            moduleWithMostLines?.moduleName
-        )
-        if (targetModule != null) {
-            val allEntries = actions.map { action ->
-                KeyedStringsInfo(
-                    action.name,
-                    "",
-                    ContextManager.scanModuleForKey(project, targetModule, action.name)
-                )
-            }
-            insertStringsManager.updateUI(allEntries)
+        // 刷新 UI(全部用 batchModule,保证一致性)
+        val allEntries = actions.map { action ->
+            KeyedStringsInfo(
+                action.name,
+                "",
+                ContextManager.scanModuleForKey(project, batchModule, action.name)
+            )
         }
+        insertStringsManager.updateUI(allEntries)
         val names = actions.joinToString(", ") { it.name }
         showToast("Inserted: $names")
         showChat = false
 
-        // 为每个 insert_strings 调用添加对应的 tool result
-        actions.forEachIndexed { i, action ->
-            val toolCallId = actionToolCallIds.getOrNull(i).orEmpty()
+        // 为每个 insert_strings 调用添加对应的 tool result(使用 entry 自带的 toolCallId,避免下标错位)
+        entries.forEachIndexed { i, (_, toolCallId) ->
+            val action = actions.getOrNull(i)
             val (msg, _) = results.getOrNull(i) ?: ("" to false)
-            if (toolCallId.isNotEmpty()) {
+            if (action != null && toolCallId.isNotEmpty()) {
                 chatMessages.add(
                     ChatMessage(
                         role = "tool",
-                        content = "[工具执行结果] insert_strings name=${action.name} 状态:$msg",
+                        content = "[工具执行结果] insert_strings module=$batchModule name=${action.name} 状态:$msg",
                         toolCallId = toolCallId
                     )
                 )
