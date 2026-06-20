@@ -102,8 +102,19 @@ fun AiChatContent(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     itemsIndexed(chatMessages) { index, msg ->
+                        // 工具气泡携带任务摘要:取前一条 assistant 消息的文本作为 AI 意图
+                        val taskSummary = if (msg.role == "tool" && index > 0) {
+                            val prev = chatMessages.getOrNull(index - 1)
+                            if (prev?.role == "assistant" &&
+                                prev.toolCalls.isNotEmpty() &&
+                                prev.content.isNotBlank()
+                            ) {
+                                prev.content
+                            } else null
+                        } else null
                         ChatBubble(
                             message = msg,
+                            taskSummary = taskSummary,
                             messageIndex = index,
                             onOptionClick = onOptionClick,
                             chatSending = chatSending,
@@ -192,6 +203,7 @@ private fun ChatBubble(
     onOptionClick: (Int, String) -> Unit,
     chatSending: Boolean,
     colors: IdeColors,
+    taskSummary: String? = null,
 ) {
     val isUser = message.role == "user"
     val isTool = message.role == "tool"
@@ -208,6 +220,7 @@ private fun ChatBubble(
         if (isTool) {
             ToolBubble(
                 content = message.content,
+                taskSummary = taskSummary,
                 colors = colors,
             )
         } else {
@@ -258,24 +271,17 @@ private fun ChatBubble(
 private fun ToolBubble(
     content: String,
     colors: IdeColors,
+    taskSummary: String? = null,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    // 主摘要:从 content 抽取操作名 + 状态 + 简略信息
     val summary = remember(content) {
-        val trimmed = content.trim()
-        when {
-            trimmed.startsWith("[工具执行结果]") -> "工具执行结果"
-            trimmed.startsWith("[系统监督]") -> "系统监督提示"
-            trimmed.startsWith("[工具文档加载失败]") -> "工具文档加载失败"
-            trimmed.contains("工具文档") -> "工具文档加载"
-            else -> {
-                val firstLine = trimmed.lineSequence().firstOrNull { it.isNotBlank() } ?: ""
-                if (firstLine.length > 60) firstLine.take(60) + "…" else firstLine
-            }
-        }
+        buildToolSummary(content)
     }
     val lineCount = remember(content) {
         content.count { it == '\n' } + 1
     }
+    val displayTaskSummary = taskSummary?.takeIf { it.isNotBlank() }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -315,6 +321,17 @@ private fun ToolBubble(
                 )
             }
         }
+        // 任务摘要:紧贴折叠头下方,折叠/展开状态均显示
+        if (displayTaskSummary != null) {
+            Text(
+                text = "任务: ${truncateSummary(displayTaskSummary, 80)}",
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 24.dp, end = 10.dp, bottom = 5.dp),
+            )
+        }
         if (expanded) {
             SelectionContainer {
                 Text(
@@ -326,6 +343,63 @@ private fun ToolBubble(
             }
         }
     }
+}
+
+/**
+ * 从工具结果 content 中抽取「操作名 + 状态 + 简略信息」,作为折叠状态的单行摘要。
+ * 兼容多种消息格式,失败时回退到首行截断。
+ */
+private fun buildToolSummary(content: String): String {
+    val trimmed = content.trim()
+    return when {
+        trimmed.startsWith("[工具执行结果]") -> {
+            val op = extractField(trimmed, "操作") ?: "操作"
+            val success = trimmed.contains("状态:成功")
+            val icon = if (success) "✅" else "❌"
+            val info = extractField(trimmed, "信息")
+            if (info != null) {
+                "$icon $op · $info"
+            } else {
+                "$icon $op"
+            }
+        }
+        trimmed.startsWith("[用户取消]") -> {
+            val rest = trimmed.removePrefix("[用户取消]").trim()
+            "🚫 已取消 · ${rest.ifEmpty { "操作" }}"
+        }
+        trimmed.startsWith("[工具执行异常]") -> {
+            val rest = trimmed.removePrefix("[工具执行异常]").trim()
+            "❌ 异常 · ${truncateText(rest, 50)}"
+        }
+        trimmed.startsWith("[系统监督]") -> "系统监督提示"
+        trimmed.startsWith("[工具文档加载失败]") -> "❌ 文档加载失败"
+        trimmed.contains("工具文档") -> "📄 工具文档加载"
+        else -> {
+            val firstLine = trimmed.lineSequence().firstOrNull { it.isNotBlank() } ?: ""
+            if (firstLine.length > 60) firstLine.take(60) + "…" else firstLine
+        }
+    }
+}
+
+/** 从 `key:xxx` 形式中抽取字段值(简单实现,不支持转义)。 */
+private fun extractField(text: String, key: String): String? {
+    val marker = "$key:"
+    val start = text.indexOf(marker)
+    if (start < 0) return null
+    val valueStart = start + marker.length
+    // 取到下一个空格分隔字段之前
+    val rest = text.substring(valueStart)
+    val endIdx = rest.indexOf(' ').let { if (it < 0) rest.length else it }
+    val raw = rest.substring(0, endIdx).trim()
+    return raw.takeIf { it.isNotEmpty() }
+}
+
+private fun truncateText(text: String, max: Int): String =
+    if (text.length <= max) text else text.take(max) + "…"
+
+private fun truncateSummary(text: String, max: Int): String {
+    val cleaned = text.replace('\n', ' ').trim()
+    return if (cleaned.length <= max) cleaned else cleaned.take(max) + "…"
 }
 
 private fun classifyOptionTone(text: String): ButtonTone {

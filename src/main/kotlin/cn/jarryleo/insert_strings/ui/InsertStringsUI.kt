@@ -1136,10 +1136,16 @@ class InsertStringsUI(
 
         SwingUtilities.invokeLater {
             // 1. 记入 assistant 消息,带 tool_calls
+            //    若 AI 只返回 tool_calls 没文字,填充占位文案,避免空气泡
+            val assistantContent = when {
+                reply.reply.isNotBlank() -> reply.reply
+                reply.toolCalls.isNotEmpty() -> "执行操作: ${summarizeToolCalls(reply.toolCalls)}"
+                else -> ""
+            }
             chatMessages.add(
                 ChatMessage(
                     role = "assistant",
-                    content = reply.reply,
+                    content = assistantContent,
                     toolCalls = reply.toolCalls
                 )
             )
@@ -1623,6 +1629,18 @@ class InsertStringsUI(
                     })
                 }
             })
+        }
+    }
+
+    /**
+     * 把一批 tool_call 折叠成一行简短描述,用于 assistant 消息占位文案。
+     * 重复同名工具会合并计数,避免长列表刷屏。
+     */
+    private fun summarizeToolCalls(toolCalls: List<cn.jarryleo.insert_strings.ai.ToolCall>): String {
+        if (toolCalls.isEmpty()) return ""
+        val grouped = toolCalls.groupingBy { it.name }.eachCount()
+        return grouped.entries.joinToString("、") { (name, count) ->
+            if (count > 1) "$name×$count" else name
         }
     }
 
