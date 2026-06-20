@@ -65,7 +65,7 @@ object AITranslator {
 - find_keys_by_text: 反查 — 通过翻译文本查找 key(exact/contains/regex,可选 module/language 限定)。
 - insert_strings: 插入/全量覆盖翻译(translations 必含 values 默认英语并覆盖其他语言,适合新增 key)。
 - update_string: 精准修改指定 key 的部分语言翻译,只动提供的语言,其他保持原样(适合「修一个语言」「修个别语言」场景)。
-- 主动发现流程:用户给的 key 不明确时,先用 query_keys 搜索;修改前先 read_string 确认原文;用 update_string 精准修改。看到一段翻译想反查 key,用 find_keys_by_text。
+- 主动发现流程:用户给的 key 不明确时,先用 query_keys 搜索,搜索模块优先为 currentModule,currentModule不存在时省略module参数,切勿使用项目名称作为模块参数;修改前先 read_string 确认原文;用 update_string 精准修改。看到一段翻译想反查 key,用 find_keys_by_text。
 
 ### Google 表格操作
 - sheets_operation: 详见工具参数(枚举)。列操作需用户确认;修改/删除行前先 search 定位行号;全表检查/修正优先用 check_translations/fix_translations;填充/清除背景色用 fill_color / clear_color,需提供 range(A1 表示法)与 color(hex 或命名色);设置/批量改文字色用 set_text_color,或在写值时随 rows/columnValues 并列传 rowTextColors/columnTextColors 逐格上色。
@@ -85,7 +85,7 @@ object AITranslator {
 6. module 必须是 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName);若上下文有 currentModule 则默认用它。
 7. 【重要】同一 AI 回合内的所有 insert_strings / update_string 写入动作必须在同一模块:
    - 全部省略 module 参数(系统用 currentModule)
-   - 或全部显式指定同一个 module
+   - 或全部显式指定同一个 module,切勿使用项目名称作为模块参数
    - 不可一次 insert A 到 module1、insert B 到 module2 — 系统会整批拒绝并要求修正
    - 确实需要跨模块写入时,拆成多个 AI 回合
 8. XML 特殊字符需转义:&amp; &lt; &gt; &quot; &apos;。

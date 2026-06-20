@@ -1,5 +1,6 @@
 package cn.jarryleo.insert_strings.xml
 
+import com.intellij.openapi.application.WriteAction
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleManager
@@ -26,12 +27,8 @@ object ContextManager {
     @JvmStatic
     fun getModuleFiles(project: Project, moduleName: String): List<Pair<VirtualFile, VirtualFile>> {
         ensureInitialized(project)
-        return moduleFilesMap[moduleName] ?: run {
-            val target = ModuleManager.getInstance(project).modules.find { it.name == moduleName }
-                ?: return emptyList()
-            val displayName = getDisplayModuleName(target, project)
-            moduleFilesMap[displayName] ?: emptyList()
-        }
+        val displayName = resolveDisplayModuleName(project, moduleName) ?: return emptyList()
+        return moduleFilesMap[displayName] ?: emptyList()
     }
 
     /**
@@ -56,12 +53,15 @@ object ContextManager {
         val moduleManager = ModuleManager.getInstance(project)
         val fileIndex = ProjectRootManager.getInstance(project).fileIndex
         val rawModuleFiles = mutableMapOf<Module, MutableList<Pair<VirtualFile, VirtualFile>>>()
+        val allModules = moduleManager.modules.toList()
 
         moduleManager.modules.forEach { module ->
             ModuleRootManager.getInstance(module).contentRoots.forEach { root ->
                 findResDirectories(root).forEach { resDir ->
                     // 通过文件索引把 res 目录归属到真正的模块，避免根模块吞掉子模块
-                    val ownerModule = fileIndex.getModuleForFile(resDir) ?: module
+                    val ownerModule = findOwnerModuleForDir(allModules, resDir)
+                        ?: fileIndex.getModuleForFile(resDir)
+                        ?: module
                     resDir.children
                         .filter { it.isDirectory && it.name.startsWith("values") }
                         .forEach { valuesDir ->
@@ -134,18 +134,22 @@ object ContextManager {
     @JvmStatic
     fun getModuleStringsInfo(project: Project, moduleName: String): List<StringsInfo> {
         ensureInitialized(project)
-        val files = moduleFilesMap[moduleName]
-            ?: moduleFilesMap.values.flatten().let { all ->
-                // 尝试用原始模块名查找
-                val target = ModuleManager.getInstance(project).modules.find { it.name == moduleName }
-                    ?: return emptyList()
-                val displayName = getDisplayModuleName(target, project)
-                moduleFilesMap[displayName]
-            }
-            ?: return emptyList()
+        val displayName = resolveDisplayModuleName(project, moduleName) ?: return emptyList()
+        val files = moduleFilesMap[displayName] ?: return emptyList()
         return files.map { (valuesDir, stringsFile) ->
             StringsInfo(stringsFile, valuesDir.name, "", "")
         }
+    }
+
+    @JvmStatic
+    fun resolveDisplayModuleName(project: Project, moduleName: String?): String? {
+        ensureInitialized(project)
+        val candidate = moduleName?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (candidate in moduleFilesMap) return candidate
+        contextInfo?.findModule(candidate)?.let { return it.moduleName }
+        val target = ModuleManager.getInstance(project).modules.find { it.name == candidate }
+            ?: return null
+        return getDisplayModuleName(target, project).takeIf { it in moduleFilesMap }
     }
 
     /**
@@ -163,19 +167,77 @@ object ContextManager {
     }
 
     /**
+     * 在指定模块下补齐缺失的语言文件(values/values-zh-rCN 等目录下的 strings.xml),
+     * 并把新创建的文件刷新进 [moduleFilesMap] 缓存,确保后续 [getModuleStringsInfo] /
+     * [getModuleFiles] 立刻看到。AI 跨语言写值时,目标模块只缺 values 等少数语言时,
+     * 不再因为没文件而漏写 — 所有语言落在同一模块。
+     *
+     * 实现思路:取该模块任意一个已有 values* 目录的父目录(res/),在其下创建
+     * `values[/...]/strings.xml`(空 resources 根)。注意:Android 限定符语言目录
+     * 只允许特定字符,这里只创建合法名称(language 必须以 values 开头)。
+     *
+     * @return 新创建(或已存在)的 strings.xml 文件;模块没有 res 目录时返回 null
+     */
+    @JvmStatic
+    fun ensureLanguageFile(
+        project: Project,
+        moduleName: String,
+        language: String
+    ): VirtualFile? {
+        if (language.isBlank()) return null
+        ensureInitialized(project)
+        val displayName = resolveDisplayModuleName(project, moduleName) ?: return null
+        val existing = moduleFilesMap[displayName]?.firstOrNull { it.first.name == language }
+        if (existing != null) return existing.second
+
+        val anyDir = moduleFilesMap[displayName]?.firstOrNull()?.first
+        val resDir = anyDir?.parent ?: return null
+
+        val newFile: VirtualFile? = WriteAction.computeAndWait<VirtualFile?, Exception> {
+            try {
+                val valuesDir = if (resDir.findChild(language) == null) {
+                    resDir.createChildDirectory(this, language)
+                } else {
+                    resDir.findChild(language)!!
+                }
+                val existingFile = valuesDir.children?.firstOrNull {
+                    it.name.contains("strings", ignoreCase = true) && it.extension == "xml"
+                }
+                if (existingFile != null) {
+                    existingFile
+                } else {
+                    valuesDir.createChildData(this, "strings.xml").apply {
+                        setBinaryContent(
+                            """<?xml version="1.0" encoding="utf-8"?>
+<resources>
+</resources>
+""".toByteArray(Charsets.UTF_8)
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                null
+            }
+        }
+        if (newFile != null) {
+            // 刷新缓存,让后续 getModuleFiles 看到
+            val dir = newFile.parent
+            if (dir != null) {
+                val updated = moduleFilesMap[displayName].orEmpty() + (dir to newFile)
+                moduleFilesMap = moduleFilesMap + (displayName to updated)
+            }
+        }
+        return newFile
+    }
+
+    /**
      * 扫描指定模块中指定 key 的翻译内容
      */
     @JvmStatic
     fun scanModuleForKey(project: Project, moduleName: String, key: String): List<StringsInfo> {
         ensureInitialized(project)
-        val files = moduleFilesMap[moduleName]
-            ?: moduleFilesMap.values.flatten().let {
-                val target = ModuleManager.getInstance(project).modules.find { it.name == moduleName }
-                    ?: return emptyList()
-                val displayName = getDisplayModuleName(target, project)
-                moduleFilesMap[displayName]
-            }
-            ?: return emptyList()
+        val displayName = resolveDisplayModuleName(project, moduleName) ?: return emptyList()
+        val files = moduleFilesMap[displayName] ?: return emptyList()
         return files.map { (valuesDir, stringsFile) ->
             StringsInfo(stringsFile, valuesDir.name, key, getStringText(stringsFile, key))
         }
@@ -199,7 +261,10 @@ object ContextManager {
     }
 
     private fun findModuleDisplayNameForFile(project: Project, file: VirtualFile): String? {
-        val module = ProjectRootManager.getInstance(project).fileIndex.getModuleForFile(file) ?: return null
+        val modules = ModuleManager.getInstance(project).modules.toList()
+        val module = findOwnerModuleForDir(modules, file)
+            ?: ProjectRootManager.getInstance(project).fileIndex.getModuleForFile(file)
+            ?: return null
         return getDisplayModuleName(module, project)
     }
 
@@ -219,6 +284,20 @@ object ContextManager {
         val prefix = "${project.name}."
         val name = module.name
         return if (name.startsWith(prefix)) name.removePrefix(prefix) else name
+    }
+
+    private fun findOwnerModuleForDir(modules: List<Module>, dir: VirtualFile): Module? {
+        val dirPath = dir.path.trimEnd('/')
+        return modules
+            .flatMap { module ->
+                ModuleRootManager.getInstance(module).contentRoots.map { root -> module to root }
+            }
+            .filter { (_, root) ->
+                val rootPath = root.path.trimEnd('/')
+                dirPath == rootPath || dirPath.startsWith("$rootPath/")
+            }
+            .maxByOrNull { (_, root) -> root.path.length }
+            ?.first
     }
 
     private fun findResDirectories(root: VirtualFile): List<VirtualFile> {

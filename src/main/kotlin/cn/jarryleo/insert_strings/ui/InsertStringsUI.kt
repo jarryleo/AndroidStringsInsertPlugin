@@ -1462,10 +1462,16 @@ class InsertStringsUI(
                     is AiAction.UpdateString -> action.module
                     else -> null
                 }?.trim()?.takeIf { it.isNotEmpty() }
-                m
+                normalizeExplicitWriteModule(m)
             }
             .distinct()
         return if (explicitModules.size > 1) explicitModules.joinToString(", ") else null
+    }
+
+    private fun normalizeExplicitWriteModule(moduleName: String?): String? {
+        val candidate = moduleName?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (candidate == ContextManager.contextInfo?.projectName) return null
+        return ContextManager.resolveDisplayModuleName(project, candidate) ?: candidate
     }
 
     /**
@@ -2151,10 +2157,13 @@ class InsertStringsUI(
         val contextInfo = ContextManager.contextInfo
         val currentModuleName = contextInfo?.currentModule?.moduleName
         val moduleWithMostLines = contextInfo?.moduleWithMostLines
+        val moduleList = contextInfo?.modules?.map { it.moduleName }
 
         // 决定本批次的统一目标模块(模块一致性已由 processAiReply 校验过,此处安全取第一个非空 module)
+        // 关键:排除项目名(与 normalizeExplicitWriteModule 同步),避免项目名被当作模块名
+        val projectName = contextInfo?.projectName
         val batchModule = resolveTargetModule(
-            actions.firstNotNullOfOrNull { it.module?.takeIf { m -> m.isNotBlank() } },
+            actions.firstNotNullOfOrNull { it.module?.takeIf { m -> m.isNotBlank() && m != projectName } },
             currentModuleName,
             moduleWithMostLines?.moduleName
         )
@@ -2165,7 +2174,24 @@ class InsertStringsUI(
                     chatMessages.add(
                         ChatMessage(
                             role = "tool",
-                            content = "[工具执行异常] insert_strings 未指定目标模块且无 currentModule",
+                            content = "[工具执行异常] insert_strings 未指定目标模块且无 currentModule , moduleList = $moduleList",
+                            toolCallId = toolCallId
+                        )
+                    )
+                }
+            }
+            continueToolLoopInBackground(context, iteration + 1)
+            return
+        }
+
+        if (batchModule == projectName){
+            // 理论上不会走到这里(校验时已拦截),兜底
+            entries.forEach { (_, toolCallId) ->
+                if (toolCallId.isNotEmpty()) {
+                    chatMessages.add(
+                        ChatMessage(
+                            role = "tool",
+                            content = "[工具执行异常] insert_strings 模块名称 = 项目名称,请勿使用项目名插入翻译 , moduleList = $moduleList",
                             toolCallId = toolCallId
                         )
                     )
@@ -2176,46 +2202,44 @@ class InsertStringsUI(
         }
 
         // 逐个执行到 batchModule
-        // 判断「用户当前表格 keyEntries 是否属于 batchModule」。
-        // 仅当 keyEntries 真的来自 batchModule 时,才走 insert() 复用锚点和 stringsInfoList;
-        // 否则必须走 insertIntoModule(),避免把 values 写错模块 / 写空。
-        val keyEntriesFirstFile = keyEntries.firstOrNull()
-            ?.stringsInfoList?.firstOrNull()?.stringsFile
-        val keyEntriesModule = ContextManager.findModuleNameForFile(project, keyEntriesFirstFile)
-        val useCurrentStringsList = batchModule == currentModuleName
-                && !insertStringsManager.languages.isNullOrEmpty()
-                && (keyEntriesModule == null || keyEntriesModule == batchModule)
+        // 关键改动:不再用 keyEntries 的 stringsInfoList(它的 filePath 是用户原来选中的模块,
+        // 跟 batchModule 可能是两个模块),改为:
+        //   1) 提前在 batchModule 下补齐所有需要的语言文件(缺哪个建哪个)
+        //   2) 总是走 insertIntoModule,以 batchModule 的 stringsInfoList 为准
+        //   3) merged 基础值用 batchModule 现有翻译(用 scanModuleForKey 读真实文件),
+        //      保留用户已存在的翻译不被 AI 漏写的语言「清空」
+
+        // 预聚合:本批所有 action 中要写入的语言并集,提前在 batchModule 下补齐缺失文件。
+        // 这是修复「values 写到别的模块」的关键 — targetModule 没有 values/ 时,直接建一个,
+        // 所有语言落在同一模块,不会再让用户看到 values 在 module A、其它语言在 module B。
+        val allLanguagesNeeded = (actions.flatMap { it.translations.keys } + DEFAULT_LANGUAGE).toSet()
+        allLanguagesNeeded.forEach { lang ->
+            if (!lang.startsWith("values")) return@forEach
+            ContextManager.ensureLanguageFile(project, batchModule, lang)
+        }
+
         val results = actions.map { action ->
             val targetModule = batchModule
-            val stringsInfoList = if (useCurrentStringsList) {
-                val existingTranslations = keyEntries.firstOrNull()?.stringsInfoList
-                    ?.associate { it.language to it.text } ?: emptyMap()
-                val merged = existingTranslations.toMutableMap()
-                merged.putAll(action.translations)
-                // 兜底:确保 values(默认英语)一定存在,避免用户没选英语行 + AI 漏写导致 values/strings.xml 被清空
-                if (DEFAULT_LANGUAGE !in merged) merged[DEFAULT_LANGUAGE] = ""
-                merged
-            } else {
-                val moduleStringsInfo = ContextManager.getModuleStringsInfo(project, targetModule)
-                if (moduleStringsInfo.isEmpty()) {
-                    showToast("Module $targetModule has no strings.xml")
-                    return@map "模块 $targetModule 没有 strings.xml" to false
-                }
-                val merged = moduleStringsInfo.associate { it.language to "" }.toMutableMap()
-                merged.putAll(action.translations)
-                // 兜底:同上,确保 values 键存在
-                if (DEFAULT_LANGUAGE !in merged) merged[DEFAULT_LANGUAGE] = ""
-                merged
+            val moduleStringsInfo = ContextManager.getModuleStringsInfo(project, targetModule)
+            if (moduleStringsInfo.isEmpty()) {
+                showToast("Module $targetModule has no strings.xml")
+                return@map "模块 $targetModule 没有 strings.xml 或缺少 res/ 目录" to false
             }
 
+            // 以 batchModule 现有翻译为底,AI 没写的语言不覆盖(避免漏写时把已有翻译清空)。
+            // 注意:此处只对「已存在的 key」保留翻译;对新增 key 来说,scanModuleForKey 全部返回空串,
+            // 等价于空白底,行为与之前一致。
+            val existingInfo = ContextManager.scanModuleForKey(project, targetModule, action.name)
+            val existingTranslations = existingInfo.associate { it.language to it.text }
+            val merged = existingTranslations.toMutableMap()
+            merged.putAll(action.translations)
+            // 兜底:确保 values(默认英语)一定存在,避免漏写导致 values/strings.xml 被清空
+            if (DEFAULT_LANGUAGE !in merged) merged[DEFAULT_LANGUAGE] = ""
+
             try {
-                if (useCurrentStringsList) {
-                    insertStringsManager.insert(project, mapOf(action.name to stringsInfoList))
-                } else {
-                    insertStringsManager.insertIntoModule(
-                        project, targetModule, mapOf(action.name to stringsInfoList)
-                    )
-                }
+                insertStringsManager.insertIntoModule(
+                    project, targetModule, mapOf(action.name to merged)
+                )
                 "成功" to true
             } catch (e: Exception) {
                 "失败:${e.message ?: "unknown"}" to false
@@ -2259,7 +2283,23 @@ class InsertStringsUI(
         currentModuleName: String?,
         moduleWithMostLinesName: String?
     ): String? {
-        return actionModule?.takeIf { it.isNotBlank() }
+        // 1. AI 显式指定的 module 优先;但若它等于 androidProject.name(常见误传),
+        //    视为未指定,继续走 currentModule/moduleWithMostLines。
+        val contextInfo = ContextManager.contextInfo
+        val projectName = contextInfo?.projectName
+        val realModuleNames = contextInfo?.modules?.map { it.moduleName }?.toSet().orEmpty()
+        val actionModuleSanitized = actionModule?.trim()?.takeIf { it.isNotBlank() }?.let { candidate ->
+            if (candidate == projectName) {
+                // AI 把工程名当 module 传了,无论其他条件如何,一律降级到 currentModule
+                null
+            } else if (candidate in realModuleNames) {
+                candidate
+            } else {
+                // 不在已知模块里(可能 AI 编了一个不存在的名字),不直接信任,降级
+                ContextManager.resolveDisplayModuleName(project, candidate)
+            }
+        }
+        return actionModuleSanitized
             ?: currentModuleName?.takeIf { it.isNotBlank() }
             ?: moduleWithMostLinesName?.takeIf { it.isNotBlank() }
     }
