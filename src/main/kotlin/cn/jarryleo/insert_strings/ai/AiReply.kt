@@ -60,7 +60,8 @@ sealed class AiAction {
             FREEZE_COLUMNS,
             FILL_COLOR,
             CLEAR_COLOR,
-            SET_TEXT_COLOR
+            SET_TEXT_COLOR,
+            CLEAR_TEXT_COLOR
         }
     }
 

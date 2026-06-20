@@ -50,7 +50,7 @@ object ToolDefinitions {
     private const val DESC_INSERT_STRINGS =
         "向 Android strings.xml 插入或修改翻译字符串。" +
             "可同时调用多次以插入多个字符串。" +
-            "translations 键必须覆盖上下文 availableLanguages 列出的所有语言。" +
+            "translations 必须始终包含 \"values\"(默认英语),并覆盖 availableLanguages 中所有其他语言。" +
             "若只想修改个别语言,请改用 update_string(部分语言更新,不覆写其他语言)。"
 
     private const val DESC_UPDATE_STRING =
@@ -171,7 +171,8 @@ object ToolDefinitions {
                     addProperty(
                         "description",
                         "键为语言目录名(values / values-zh-rCN / values-fr 等)," +
-                            "值为对应翻译文本。必须覆盖上下文 availableLanguages 中的所有语言。"
+                            "值为对应翻译文本。必须始终包含 \"values\"(默认英语)," +
+                            "并覆盖 availableLanguages 中的所有其他语言。"
                     )
                 })
             })

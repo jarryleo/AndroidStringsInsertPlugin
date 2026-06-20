@@ -1070,6 +1070,41 @@ object SheetsManager {
         }
     }
 
+    /**
+     * 清除 A1 范围的文字色(恢复默认)。与 [clearColor] 互为镜像:clearColor 清背景,
+     * clearTextColor 清文字色。范围与 setTextColor 行为一致,只清前景色,其他格式保留。
+     * range 若不含 sheet 前缀则用 [defaultSheetName]。
+     */
+    fun clearTextColor(
+        project: Project,
+        spreadsheetId: String,
+        range: String,
+        defaultSheetName: String? = null
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (range.isBlank()) return Result.failure(IllegalArgumentException("Range is empty."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val (sheetName, gridRange) = parseA1Range(service, spreadsheetId, range, defaultSheetName)
+                ?: throw IllegalArgumentException("Range '$range' refers to a sheet not found in spreadsheet.")
+            // 用空 TextFormat 写入并限定 fields,只清文字前景色,其他格式(粗体/斜体/下划线等)保留
+            val request = Request().setRepeatCell(
+                RepeatCellRequest()
+                    .setRange(gridRange)
+                    .setCell(
+                        CellData().setUserEnteredFormat(
+                            CellFormat().setTextFormat(TextFormat())
+                        )
+                    )
+                    .setFields("userEnteredFormat.textFormat.foregroundColor")
+            )
+            service.spreadsheets()
+                .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(listOf(request)))
+                .execute()
+            Unit
+        }
+    }
+
     // ==================== 列操作 ====================
 
     /**

@@ -149,6 +149,20 @@ object ContextManager {
     }
 
     /**
+     * 根据 strings.xml 文件查找其所属模块的显示名(displayModuleName)。
+     * 用在 AI 工具执行链路里,判断「当前 keyEntries 是否与目标模块一致」,避免跨模块串写。
+     * 找不到(未初始化/外部文件)返回 null。
+     */
+    @JvmStatic
+    fun findModuleNameForFile(project: Project, file: VirtualFile?): String? {
+        if (file == null) return null
+        ensureInitialized(project)
+        return moduleFilesMap.entries.firstOrNull { (_, files) ->
+            files.any { it.second == file }
+        }?.key
+    }
+
+    /**
      * 扫描指定模块中指定 key 的翻译内容
      */
     @JvmStatic

@@ -46,6 +46,12 @@ object AITranslator {
     private const val CHAT_SYSTEM_PROMPT =
         """你是一个 Android 应用国际化字符串管理助手。通过 function calling 与系统协作:调用工具执行操作,调用 task_complete 结束任务。
 
+## 关于默认语言 values 的强制约定(重要)
+- 上下文 `availableLanguages` 可能由用户当前选中行的语言决定,如果用户没选英语行,系统会自动补上 `values`。
+- 即使 availableLanguages 没有 `values`,你也必须始终在 `translations` 里包含 `values` 键(默认英语原义)。
+  漏写 values 会让对应模块的 `values/strings.xml` 被写空,这是已知 bug。
+- 插入/全量覆盖 strings.xml 时,translations 必含 `values`,其他目标语言也必含。
+
 ## 强制终止规则(最重要)
 - 唯一的「合法终止」信号是调用 task_complete 工具。
 - 没有调用 task_complete = 你仍在执行 = 系统会持续驱动你继续调用工具。
@@ -57,7 +63,7 @@ object AITranslator {
 - query_keys: 列出/搜索模块内的字符串 key(pattern 正则,可选 includeTranslations)。
 - read_string: 读取指定 key 在所有语言的当前翻译。
 - find_keys_by_text: 反查 — 通过翻译文本查找 key(exact/contains/regex,可选 module/language 限定)。
-- insert_strings: 插入/全量覆盖翻译(translations 需覆盖所有语言,适合新增 key)。
+- insert_strings: 插入/全量覆盖翻译(translations 必含 values 默认英语并覆盖其他语言,适合新增 key)。
 - update_string: 精准修改指定 key 的部分语言翻译,只动提供的语言,其他保持原样(适合「修一个语言」「修个别语言」场景)。
 - 主动发现流程:用户给的 key 不明确时,先用 query_keys 搜索;修改前先 read_string 确认原文;用 update_string 精准修改。看到一段翻译想反查 key,用 find_keys_by_text。
 
@@ -102,7 +108,8 @@ object AITranslator {
             - name（必填）：字符串 key，snake_case。
             - translations（必填）：键为语言目录名（如 values、values-zh-rCN、values-fr），值为对应翻译文本。
             规则：
-            - translations 必须覆盖上下文 availableLanguages 中的所有语言，不能遗漏。
+            - translations 必须包含 `values`(默认英语),即使 availableLanguages 里没有。漏写会导致 values/strings.xml 被写空。
+            - translations 必须覆盖 availableLanguages 中的所有其他语言,不能遗漏。
             - 若上下文有 currentKeys，优先用第一个 key 作为 name；多 key 时可为每个 key 分别返回 insert_strings。
             - 可以同时返回多个 insert_strings 动作插入多个字符串。
             - 翻译内容中 XML 特殊字符需转义：&amp; &lt; &gt; &quot; &apos;。
@@ -255,6 +262,12 @@ object AITranslator {
             - textColor（必填）：颜色字符串（同 fill_color 的 color 格式）。
             场景：把某行标题涂成品牌色、把缺翻译的单元格文字涂红警示、整列文字加色便于阅读。
             示例：{"type":"sheets_operation","operation":"set_text_color","range":"A1:Z1","textColor":"#0F766E"}
+
+            ### clear_text_color
+            清除 A1 范围上已有单元格的文字色，恢复默认（与 clear_color 清背景对应）。range 必填，不需要 textColor。
+            与 set_text_color 行为对称：只清前景色，粗体/斜体/下划线等其它文字格式保留。
+            场景：发现某格文字色不合适想恢复默认、批量清除之前涂的颜色。
+            示例：{"type":"sheets_operation","operation":"clear_text_color","range":"A1:Z1"}
 
             ## 写值时并行上色（per-cell）
             任意写值类操作（write / append_row / insert_row / update_row / insert_column / append_column / update_column）可同时传颜色参数，颜色只对刚写入的单元格生效，不会影响同范围其他单元格。

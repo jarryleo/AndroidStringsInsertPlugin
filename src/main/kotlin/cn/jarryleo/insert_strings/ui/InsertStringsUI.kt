@@ -53,6 +53,9 @@ class InsertStringsUI(
         private const val REVIEW_BATCH_SIZE = 80
         // load_tool_doc 按需加载工具文档的最大连续次数,防止 AI 反复加载文档而不执行操作。
         private const val MAX_TOOL_DOC_LOADS = 4
+        // 默认语言目录名(对应 values/ 目录,Android 默认英语资源)。
+        // 作为兜底确保插入翻译时一定包含 values 键,避免英语写空。
+        private const val DEFAULT_LANGUAGE = "values"
     }
 
     private data class SheetsToolResult(
@@ -912,6 +915,27 @@ class InsertStringsUI(
                     }
                 )
             }
+
+            AiAction.SheetsOperation.Operation.CLEAR_TEXT_COLOR -> {
+                val range = action.range
+                if (range.isNullOrBlank()) {
+                    return SheetsToolResult("清除文字色", false, "range 为空。")
+                }
+                val result = SheetsManager.clearTextColor(project, spreadsheetId, range, sheetName)
+                result.fold(
+                    onSuccess = {
+                        SwingUtilities.invokeLater { showToast("Cleared text color on $range.") }
+                        SheetsToolResult(
+                            "清除文字色",
+                            true,
+                            "已清除工作表 '$sheetName' 范围 $range 的文字色"
+                        )
+                    },
+                    onFailure = {
+                        SheetsToolResult("清除文字色", false, it.message ?: "Sheets clear text color failed.")
+                    }
+                )
+            }
         }
     }
 
@@ -938,6 +962,7 @@ class InsertStringsUI(
             AiAction.SheetsOperation.Operation.FILL_COLOR -> "填充颜色"
             AiAction.SheetsOperation.Operation.CLEAR_COLOR -> "清除颜色"
             AiAction.SheetsOperation.Operation.SET_TEXT_COLOR -> "设置文字色"
+            AiAction.SheetsOperation.Operation.CLEAR_TEXT_COLOR -> "清除文字色"
         }
     }
 
@@ -2031,9 +2056,14 @@ class InsertStringsUI(
 
     private fun buildChatContext(): String {
         val contextInfo = ContextManager.contextInfo ?: return ""
-        val availableLanguages = insertStringsManager.languages?.takeIf { it.isNotEmpty() }
+        // 基础集合:优先用用户在表格里选中的语言,否则用 currentModule 的 xmlFiles。
+        // 始终把默认英语 "values" 包含进去,避免用户没选英语行时 AI 漏写 English,
+        // 进而让 StringsWriter 把 values/strings.xml 写成空文本。
+        val baseLanguages = insertStringsManager.languages?.takeIf { it.isNotEmpty() }
             ?: contextInfo.currentModule?.xmlFiles?.map { it.language }
             ?: emptyList()
+        val availableLanguages = if (DEFAULT_LANGUAGE in baseLanguages) baseLanguages
+        else baseLanguages + DEFAULT_LANGUAGE
         saveCurrentEdits()
         val sheetsSettings = SheetsSettingsService.getInstance(project).state
         val sheetsConfigured = SheetsManager.isConfigured(project)
@@ -2146,13 +2176,24 @@ class InsertStringsUI(
         }
 
         // 逐个执行到 batchModule
+        // 判断「用户当前表格 keyEntries 是否属于 batchModule」。
+        // 仅当 keyEntries 真的来自 batchModule 时,才走 insert() 复用锚点和 stringsInfoList;
+        // 否则必须走 insertIntoModule(),避免把 values 写错模块 / 写空。
+        val keyEntriesFirstFile = keyEntries.firstOrNull()
+            ?.stringsInfoList?.firstOrNull()?.stringsFile
+        val keyEntriesModule = ContextManager.findModuleNameForFile(project, keyEntriesFirstFile)
+        val useCurrentStringsList = batchModule == currentModuleName
+                && !insertStringsManager.languages.isNullOrEmpty()
+                && (keyEntriesModule == null || keyEntriesModule == batchModule)
         val results = actions.map { action ->
             val targetModule = batchModule
-            val stringsInfoList = if (targetModule == currentModuleName) {
+            val stringsInfoList = if (useCurrentStringsList) {
                 val existingTranslations = keyEntries.firstOrNull()?.stringsInfoList
                     ?.associate { it.language to it.text } ?: emptyMap()
                 val merged = existingTranslations.toMutableMap()
                 merged.putAll(action.translations)
+                // 兜底:确保 values(默认英语)一定存在,避免用户没选英语行 + AI 漏写导致 values/strings.xml 被清空
+                if (DEFAULT_LANGUAGE !in merged) merged[DEFAULT_LANGUAGE] = ""
                 merged
             } else {
                 val moduleStringsInfo = ContextManager.getModuleStringsInfo(project, targetModule)
@@ -2162,11 +2203,11 @@ class InsertStringsUI(
                 }
                 val merged = moduleStringsInfo.associate { it.language to "" }.toMutableMap()
                 merged.putAll(action.translations)
+                // 兜底:同上,确保 values 键存在
+                if (DEFAULT_LANGUAGE !in merged) merged[DEFAULT_LANGUAGE] = ""
                 merged
             }
 
-            val useCurrentStringsList = targetModule == currentModuleName
-                    && !insertStringsManager.languages.isNullOrEmpty()
             try {
                 if (useCurrentStringsList) {
                     insertStringsManager.insert(project, mapOf(action.name to stringsInfoList))
