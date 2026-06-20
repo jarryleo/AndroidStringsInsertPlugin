@@ -49,11 +49,15 @@ class InsertStringsUI(
         private const val MAX_REMEDIATION_ROUNDS = 2
         // 监督提示：当 AI 只回复文字却未给出可执行 actions 时注入，强制其返回结构化动作。
         private const val SUPERVISOR_PROMPT =
-            "[系统监督] 检测到你的回复中提到了要执行操作，但本次回复没有包含任何 actions，" +
-                "因此系统并未实际执行任何操作。请直接返回包含正确 actions 的 JSON：" +
-                "把要执行的操作放入 actions 数组。例如删除某 key 所在行需先 search 定位 rowNumber，" +
-                "再 delete_row 传入 rowNumber；可在一次回复中返回多个 actions 完成多步操作。" +
-                "不要只回复文字说明，必须给出 actions。"
+            "[系统监督] 你上次的回复不包含可解析的 JSON actions，系统未执行任何操作。" +
+                "你必须只返回一个纯 JSON 对象（以 { 开头、以 } 结尾），绝对禁止使用 <search_and_update> 或任何自定义标签，" +
+                "禁止使用 markdown 代码块，禁止在 JSON 之外添加任何文字。" +
+                "正确格式示例：\n" +
+                """{"reply":"已帮你补全繁体中文翻译","actions":[{"type":"sheets_operation","operation":"update_row","sheetName":"1.0.3.0","rowNumber":7,"rows":[["mall_tab_room_card","房间名片卡","房間名片卡","Room name card"]]}]}""" + "\n" +
+                "请直接返回符合上述格式的 JSON，把要执行的操作放入 actions 数组。" +
+                "若要修改某行，operation 用 update_row 并传入 rowNumber 和 rows。" +
+                "若要在末尾添加，operation 用 append_row。" +
+                "若要搜索定位行号，operation 用 search 并传入 key。"
     }
 
     private data class SheetsToolResult(
@@ -897,9 +901,10 @@ class InsertStringsUI(
             "读取", "读一下", "read",
             "搜索", "查找", "search",
             "检查", "审查", "check",
-            "修正", "修复", "fix",
+            "修正", "修复", "补全", "补充", "fix",
             "写入", "write",
-            "列出", "list_sheets", "工作表列表"
+            "列出", "list_sheets", "工作表列表",
+            "search_and_update", "update_row", "append_row", "insert_row", "delete_row"
         )
         return intentKeywords.any { text.contains(it) }
     }

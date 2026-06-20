@@ -177,6 +177,19 @@ object AITranslator {
   ]
 }
 
+## 严格禁止的回复格式（以下格式系统无法解析，会导致操作不执行）
+
+1. 禁止使用 XML/HTML 自定义标签包裹操作参数。以下都是错误示例：
+   <search_and_update>1.0.3.0 mall_tab_room_card 7 [[...]]</search_and_update>
+   <update_row sheetName="1.0.3.0" rowNumber="7">...</update_row>
+   <insert>key values zh-rCN</insert>
+2. 禁止用自然语言描述操作步骤而不返回 actions 数组。例如「现在帮你修复，将翻译写入表格：」后面跟参数，这是无效的。
+3. 禁止在 JSON 对象之外添加任何文字、标签或说明。整个回复必须以 { 开头、以 } 结尾。
+4. 禁止使用 markdown 代码块标记包裹 JSON。
+
+唯一可接受的回复格式是一个纯 JSON 对象，以 { 开头、以 } 结尾，不包含任何其他内容。
+如果需要执行表格操作，必须将操作放入 "actions" 数组，type 为 "sheets_operation"，operation 为 "update_row"/"append_row" 等标准值。
+
 规则：
 1. 当用户要求插入、添加、写入、修改翻译时，必须在 `actions` 中返回一个或多个 `insert_strings` 动作。
 2. `name` 是 Android strings.xml 中的 string name，使用 snake_case。
