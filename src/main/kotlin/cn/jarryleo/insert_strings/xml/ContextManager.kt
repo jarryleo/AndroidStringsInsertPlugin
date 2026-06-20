@@ -19,6 +19,22 @@ object ContextManager {
     private var moduleFilesMap: Map<String, List<Pair<VirtualFile, VirtualFile>>> = emptyMap()
 
     /**
+     * 获取模块的 values 目录与 strings.xml 文件对。
+     * 对 AI 工具调用开放,允许扫描任意模块的所有语言文件。
+     * @return values 目录 -> strings.xml 映射列表,模块不存在时返回空列表
+     */
+    @JvmStatic
+    fun getModuleFiles(project: Project, moduleName: String): List<Pair<VirtualFile, VirtualFile>> {
+        ensureInitialized(project)
+        return moduleFilesMap[moduleName] ?: run {
+            val target = ModuleManager.getInstance(project).modules.find { it.name == moduleName }
+                ?: return emptyList()
+            val displayName = getDisplayModuleName(target, project)
+            moduleFilesMap[displayName] ?: emptyList()
+        }
+    }
+
+    /**
      * 初始化项目所有模块的 strings.xml 上下文信息
      */
     @JvmStatic

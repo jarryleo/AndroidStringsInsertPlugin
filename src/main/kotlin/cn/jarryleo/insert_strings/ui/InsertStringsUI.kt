@@ -22,8 +22,11 @@ import cn.jarryleo.insert_strings.sheets.SheetsManager
 import cn.jarryleo.insert_strings.sheets.SheetsSettingsService
 import cn.jarryleo.insert_strings.xml.ContextManager
 import cn.jarryleo.insert_strings.xml.KeyedStringsInfo
+import cn.jarryleo.insert_strings.xml.KeyReadResult
+import cn.jarryleo.insert_strings.xml.KeySearchResult
 import cn.jarryleo.insert_strings.xml.ModuleInfo
 import cn.jarryleo.insert_strings.xml.StringsInfo
+import cn.jarryleo.insert_strings.xml.StringsService
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.intellij.openapi.application.ApplicationManager
@@ -1212,14 +1215,24 @@ class InsertStringsUI(
             return
         }
 
-        // Priority 4: insert_strings
+        // Priority 4: query_keys / read_string / update_string(strings.xml 主动操作能力)
+        // 按 reply.actions 原序提取,保持与 actionToolCallIds 的下标对齐
+        val stringsActions = reply.actions.filter {
+            it is AiAction.QueryKeys || it is AiAction.ReadString || it is AiAction.UpdateString
+        }
+        if (stringsActions.isNotEmpty()) {
+            executeStringsOps(stringsActions, actionToolCallIds, context, iteration)
+            return
+        }
+
+        // Priority 5: insert_strings
         val insertActions = reply.actions.filterIsInstance<AiAction.InsertStrings>()
         if (insertActions.isNotEmpty()) {
             executeInsertActions(insertActions, actionToolCallIds, context, iteration)
             return
         }
 
-        // Priority 5: sheets_operation
+        // Priority 6: sheets_operation
         val sheetsActions = reply.actions.filterIsInstance<AiAction.SheetsOperation>()
         if (sheetsActions.isNotEmpty()) {
             executeSheetsActions(sheetsActions, actionToolCallIds, context, iteration)
@@ -1303,6 +1316,151 @@ class InsertStringsUI(
 
         // 继续 tool loop:让 AI 拿到文档后返回实际工具调用
         continueToolLoopInBackground(context, iteration + 1)
+    }
+
+    /**
+     * 统一执行 query_keys / read_string / update_string 三类 strings.xml 操作。
+     * actions 保持与 [actionToolCallIds] 同序(下标对齐),每个动作独立生成 tool result。
+     */
+    private fun executeStringsOps(
+        actions: List<AiAction>,
+        actionToolCallIds: List<String>,
+        context: String,
+        iteration: Int
+    ) {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                // 后台线程执行所有动作,收集 (toolCallId, resultText) 映射,统一回 EDT
+                val pendingResults = mutableListOf<Pair<String, String>>()
+                actions.forEachIndexed { i, action ->
+                    val toolCallId = actionToolCallIds.getOrNull(i).orEmpty()
+                    if (toolCallId.isEmpty()) return@forEachIndexed
+                    val resultText = when (action) {
+                        is AiAction.QueryKeys -> runQueryKeys(action)
+                        is AiAction.ReadString -> runReadString(action)
+                        is AiAction.UpdateString -> runUpdateString(action)
+                        else -> return@forEachIndexed
+                    }
+                    pendingResults.add(toolCallId to resultText)
+                }
+                SwingUtilities.invokeLater {
+                    pendingResults.forEach { (toolCallId, content) ->
+                        chatMessages.add(
+                            ChatMessage(role = "tool", content = content, toolCallId = toolCallId)
+                        )
+                    }
+                    continueToolLoopInBackground(context, iteration + 1)
+                }
+            } catch (e: Exception) {
+                SwingUtilities.invokeLater {
+                    chatMessages.add(
+                        ChatMessage(
+                            role = "assistant",
+                            content = "strings.xml 操作执行异常:${e.message ?: "unknown"}"
+                        )
+                    )
+                    chatSending = false
+                }
+            }
+        }
+    }
+
+    private fun runQueryKeys(action: AiAction.QueryKeys): String {
+        val moduleName = resolveTargetModule(
+            action.module,
+            ContextManager.contextInfo?.currentModule?.moduleName,
+            ContextManager.contextInfo?.moduleWithMostLines?.moduleName
+        ) ?: return "[工具执行结果] 类型:query_keys 状态:失败 信息:未指定目标模块且无 currentModule"
+
+        val results: List<KeySearchResult>
+        val totalMatched: Int
+        if (action.pattern.isNullOrBlank()) {
+            val keys = StringsService.listKeys(project, moduleName, action.limit ?: 50, action.offset ?: 0)
+            results = keys.map { KeySearchResult(it, emptyMap(), "") }
+            totalMatched = keys.size
+        } else {
+            results = StringsService.searchKeys(
+                project = project,
+                moduleName = moduleName,
+                pattern = action.pattern,
+                limit = action.limit ?: 50,
+                offset = action.offset ?: 0,
+                includeTranslations = action.includeTranslations
+            )
+            totalMatched = results.size
+        }
+        return buildString {
+            append("[工具执行结果] 类型:query_keys 模块:").append(moduleName)
+            append(" pattern:").append(action.pattern ?: "(无)")
+            append(" 状态:成功 命中:").append(totalMatched)
+            if (results.isEmpty()) {
+                appendLine("\n未找到匹配的 key。")
+            } else {
+                appendLine()
+                results.forEachIndexed { idx, r ->
+                    append(idx + 1).append(". ").append(r.key)
+                    if (action.includeTranslations && r.translations.isNotEmpty()) {
+                        appendLine()
+                        r.translations.forEach { (lang, text) ->
+                            append("    ").append(lang).append(": ")
+                            appendLine(if (text.length > 80) text.take(80) + "…" else text)
+                        }
+                    } else {
+                        appendLine()
+                    }
+                }
+                if (action.pattern.isNullOrBlank() && totalMatched >= (action.limit ?: 50)) {
+                    appendLine("… 可能还有更多 key,可用 offset 分页。")
+                }
+            }
+        }
+    }
+
+    private fun runReadString(action: AiAction.ReadString): String {
+        val moduleName = resolveTargetModule(
+            action.module,
+            ContextManager.contextInfo?.currentModule?.moduleName,
+            ContextManager.contextInfo?.moduleWithMostLines?.moduleName
+        ) ?: return "[工具执行结果] 类型:read_string 状态:失败 信息:未指定目标模块"
+        val result = StringsService.readKey(project, moduleName, action.name)
+            ?: return "[工具执行结果] 类型:read_string key:${action.name} 模块:$moduleName 状态:失败 信息:模块不存在或没有 strings.xml"
+        if (result.translations.isEmpty()) {
+            return "[工具执行结果] 类型:read_string key:${action.name} 模块:$moduleName 状态:成功 信息:该 key 不存在"
+        }
+        return buildString {
+            append("[工具执行结果] 类型:read_string key:").append(result.key)
+            append(" 模块:").append(moduleName)
+            append(" 状态:成功")
+            appendLine()
+            result.translations.forEach { (lang, text) ->
+                append("  ").append(lang).append(": ")
+                appendLine(if (text.isEmpty()) "(空)" else text)
+            }
+        }
+    }
+
+    private fun runUpdateString(action: AiAction.UpdateString): String {
+        val moduleName = resolveTargetModule(
+            action.module,
+            ContextManager.contextInfo?.currentModule?.moduleName,
+            ContextManager.contextInfo?.moduleWithMostLines?.moduleName
+        ) ?: return "[工具执行结果] 类型:update_string 状态:失败 信息:未指定目标模块"
+        val results = StringsService.updateKey(project, moduleName, action.name, action.translations)
+        val successCount = results.values.count { it == "成功" }
+        val totalTarget = action.translations.size
+        val updated = results.size
+        val skipped = totalTarget - updated
+        return buildString {
+            append("[工具执行结果] 类型:update_string key:").append(action.name)
+            append(" 模块:").append(moduleName)
+            append(" 状态:").append(if (successCount == updated && updated == totalTarget) "成功" else "部分失败")
+            append(" 成功:").append(successCount).append('/').append(totalTarget)
+            if (skipped > 0) append(" 跳过(无该语言文件):").append(skipped)
+            appendLine()
+            results.forEach { (lang, msg) ->
+                append("  ").append(lang).append(": ").appendLine(msg)
+            }
+        }
     }
 
     /**

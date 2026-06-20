@@ -44,7 +44,7 @@ object AITranslator {
     private const val BATCH_TRANSLATE_SYSTEM_PROMPT =
         "你是一个专业的翻译，为开发安卓APP提供国际化翻译服务。我会给你多条文本和目标语言代码，请翻译成目标语言，并严格以 JSON 对象返回，key 为我给出的标识（原样保留），value 为对应翻译结果纯文本。不要 markdown 代码块，不要任何解释。"
     private const val CHAT_SYSTEM_PROMPT =
-        """你是一个 Android 应用国际化字符串管理助手。通过 function calling 与系统协作：调用工具执行操作，调用 task_complete 结束任务。
+        """你是一个 Android 应用国际化字符串管理助手。通过 function calling 与系统协作:调用工具执行操作,调用 task_complete 结束任务。
 
 ## 强制终止规则(最重要)
 - 唯一的「合法终止」信号是调用 task_complete 工具。
@@ -53,23 +53,33 @@ object AITranslator {
 - 多步骤任务(如「检查 X 翻译,不准则修正」)必须按顺序执行每一步,直到真正完成或必须 ask_user 等待用户输入。
 
 ## 工具一览
-- insert_strings: 向 strings.xml 插入/修改翻译。
-- sheets_operation: Google 表格操作(枚举见工具参数)。列操作需用户确认;修改/删除行前先 search 定位行号;全表检查/修正优先用 check_translations/fix_translations。
-- ask_user: 向用户提问,options 非空时显示按钮。关键参数缺失/风险操作/目标不明确时使用。
-- load_tool_doc: 按需加载工具详细文档(工具名:sheets_basic / sheets_row_ops / sheets_column_ops / sheets_freeze / sheets_review / insert_strings)。
+### strings.xml 操作
+- query_keys: 列出/搜索模块内的字符串 key(pattern 正则,可选 includeTranslations)。
+- read_string: 读取指定 key 在所有语言的当前翻译。
+- insert_strings: 插入/全量覆盖翻译(translations 需覆盖所有语言,适合新增 key)。
+- update_string: 精准修改指定 key 的部分语言翻译,只动提供的语言,其他保持原样(适合「修一个语言」「修个别语言」场景)。
+- 主动发现流程:用户给的 key 不明确时,先用 query_keys 搜索;修改前先 read_string 确认原文;用 update_string 精准修改。
+
+### Google 表格操作
+- sheets_operation: 详见工具参数(枚举)。列操作需用户确认;修改/删除行前先 search 定位行号;全表检查/修正优先用 check_translations/fix_translations。
+
+### 通用
+- ask_user: 向用户提问,options 非空时显示按钮。
+- load_tool_doc: 按需加载工具详细文档。
 - task_complete: 结束对话,status 取 success / partial / failed。
 
 ## 行为规则
 1. 操作必须通过工具调用完成,不要只在文字里描述。
 2. 每次回复可以同时包含文字(给用户看)和多个工具调用。
 3. 收到工具结果后,如果目标尚未达成,必须继续调用工具推进。
-4. insert_strings 的 translations 必须覆盖上下文 availableLanguages 中的所有语言。
-5. module 必须是上下文 modules 中的 moduleName;若上下文有 currentModule 则默认用它。
-6. XML 特殊字符需转义:&amp; &lt; &gt; &quot; &apos;。
-7. append_row 重复 key 由系统自动检测并询问用户,你无需自行检查。
-8. sheets_operation 的 spreadsheetId/sheetName 可省略,默认用上下文 googleSheets 配置;availableSheets 非空时 sheetName 须从中选取。
-9. 若 googleSheets.configured 为 false,提示用户先配置,不要调用 sheets_operation。
-10. 安全约束:禁止擅自增删列;写入前列对齐表头;全表检查/修正用 check_translations/fix_translations 而非 read 整表。"""
+4. 区分 insert_strings 与 update_string:新增/全量覆盖用 insert_strings,部分语言修改用 update_string。
+5. 修改前若不确定当前翻译,先 read_string。
+6. module 必须是上下文 modules 中的 moduleName;若上下文有 currentModule 则默认用它。
+7. XML 特殊字符需转义:&amp; &lt; &gt; &quot; &apos;。
+8. append_row 重复 key 由系统自动检测并询问用户,你无需自行检查。
+9. sheets_operation 的 spreadsheetId/sheetName 可省略,默认用上下文 googleSheets 配置。
+10. 若 googleSheets.configured 为 false,提示用户先配置,不要调用 sheets_operation。
+11. 安全约束:禁止擅自增删列;写入前列对齐表头;全表检查/修正用 check_translations/fix_translations 而非 read 整表。"""
 
     /**
      * 按需加载的工具详细文档（key = tool 名，value = 完整说明）。
@@ -826,6 +836,33 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         val args: JsonObject = runCatching { JsonParser.parseString(call.arguments).asJsonObject }
             .getOrNull() ?: return null
         return when (call.name) {
+            ToolDefinitions.TOOL_QUERY_KEYS -> {
+                val module = args.get("module")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val pattern = args.get("pattern")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val limit = args.get("limit")?.let { runCatching { it.asInt }.getOrNull() }
+                val offset = args.get("offset")?.let { runCatching { it.asInt }.getOrNull() }
+                val includeTranslations = args.get("includeTranslations")?.let {
+                    runCatching { it.asBoolean }.getOrNull()
+                } ?: false
+                AiAction.QueryKeys(module, pattern, limit, offset, includeTranslations)
+            }
+            ToolDefinitions.TOOL_READ_STRING -> {
+                val name = args.get("name")?.asString?.trim() ?: return null
+                if (name.isEmpty()) return null
+                val module = args.get("module")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                AiAction.ReadString(module, name)
+            }
+            ToolDefinitions.TOOL_UPDATE_STRING -> {
+                val name = args.get("name")?.asString?.trim() ?: return null
+                if (name.isEmpty()) return null
+                val module = args.get("module")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val translationsObj = args.getAsJsonObject("translations") ?: return null
+                val translations = translationsObj.entrySet()
+                    .associate { it.key to it.value.extractText() }
+                    .filterValues { it.isNotEmpty() }
+                if (translations.isEmpty()) return null
+                AiAction.UpdateString(module, name, translations)
+            }
             ToolDefinitions.TOOL_INSERT_STRINGS -> {
                 val name = args.get("name")?.asString?.trim() ?: return null
                 val module = args.get("module")?.asString?.trim()?.takeIf { it.isNotEmpty() }

@@ -23,6 +23,9 @@ object ToolDefinitions {
     /** 工具名 → JSON Schema 的 properties 引用,供 driver 在解析 tool_call.arguments 时复用。 */
     val toolNames: List<String> = listOf(
         TOOL_INSERT_STRINGS,
+        TOOL_UPDATE_STRING,
+        TOOL_QUERY_KEYS,
+        TOOL_READ_STRING,
         TOOL_SHEETS_OPERATION,
         TOOL_ASK_USER,
         TOOL_LOAD_TOOL_DOC,
@@ -30,6 +33,9 @@ object ToolDefinitions {
     )
 
     const val TOOL_INSERT_STRINGS = "insert_strings"
+    const val TOOL_UPDATE_STRING = "update_string"
+    const val TOOL_QUERY_KEYS = "query_keys"
+    const val TOOL_READ_STRING = "read_string"
     const val TOOL_SHEETS_OPERATION = "sheets_operation"
     const val TOOL_ASK_USER = "ask_user"
     const val TOOL_LOAD_TOOL_DOC = "load_tool_doc"
@@ -40,7 +46,23 @@ object ToolDefinitions {
     private const val DESC_INSERT_STRINGS =
         "向 Android strings.xml 插入或修改翻译字符串。" +
             "可同时调用多次以插入多个字符串。" +
-            "translations 键必须覆盖上下文 availableLanguages 列出的所有语言。"
+            "translations 键必须覆盖上下文 availableLanguages 列出的所有语言。" +
+            "若只想修改个别语言,请改用 update_string(部分语言更新,不覆写其他语言)。"
+
+    private const val DESC_UPDATE_STRING =
+        "精准修改指定 key 的部分语言翻译,只动 translations 中列出的语言,其他语言保持原样。" +
+            "适用场景:用户说「把 X 的繁体改成 Y」「修正 Z 的某个语言翻译」,无需提供全部语言。" +
+            "若 key 不存在则自动创建。"
+
+    private const val DESC_QUERY_KEYS =
+        "列出或搜索模块内的字符串 key。" +
+            "pattern 为空时列出所有 key;非空时按正则匹配 key 名(例: \"mall_.*\")。" +
+            "includeTranslations=true 时返回各语言当前翻译(消耗较多 token,谨慎使用)。" +
+            "适用场景:用户说「找一下关于房间的 key」「列出所有错误提示的 key」,或 AI 需要先发现 key 名再修改。"
+
+    private const val DESC_READ_STRING =
+        "读取指定 key 在模块所有语言的当前翻译,返回 key+各语言文本+文件路径。" +
+            "适用场景:用户说「看看 X 现在怎么翻译的」,AI 在修改前先确认原文,避免覆盖已有正确翻译。"
 
     private const val DESC_SHEETS_OPERATION =
         "执行 Google 表格操作。operation 决定具体动作类型。" +
@@ -66,6 +88,9 @@ object ToolDefinitions {
     private fun buildOpenAiTools(): JsonArray {
         return JsonArray().apply {
             add(openAiTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
+            add(openAiTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
+            add(openAiTool(TOOL_QUERY_KEYS, DESC_QUERY_KEYS, openAiQueryKeysParams()))
+            add(openAiTool(TOOL_READ_STRING, DESC_READ_STRING, openAiReadStringParams()))
             add(openAiTool(TOOL_SHEETS_OPERATION, DESC_SHEETS_OPERATION, openAiSheetsOperationParams()))
             add(openAiTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(openAiTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
@@ -76,6 +101,9 @@ object ToolDefinitions {
     private fun buildAnthropicTools(): JsonArray {
         return JsonArray().apply {
             add(anthropicTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
+            add(anthropicTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
+            add(anthropicTool(TOOL_QUERY_KEYS, DESC_QUERY_KEYS, openAiQueryKeysParams()))
+            add(anthropicTool(TOOL_READ_STRING, DESC_READ_STRING, openAiReadStringParams()))
             add(anthropicTool(TOOL_SHEETS_OPERATION, DESC_SHEETS_OPERATION, openAiSheetsOperationParams()))
             add(anthropicTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(anthropicTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
@@ -125,6 +153,79 @@ object ToolDefinitions {
                         "description",
                         "键为语言目录名(values / values-zh-rCN / values-fr 等)," +
                             "值为对应翻译文本。必须覆盖上下文 availableLanguages 中的所有语言。"
+                    )
+                })
+            })
+            add("required", JsonArray().apply {
+                add("name")
+                add("translations")
+            })
+        }
+    }
+
+    private fun openAiQueryKeysParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("module", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,目标模块名,必须是上下文 modules 中的 moduleName。省略时用 currentModule。")
+                })
+                add("pattern", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选正则表达式,对 key 名做匹配。为空或省略时列出所有 key(分页)。")
+                })
+                add("limit", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "可选,最大返回条数,默认 50,最大 500。")
+                })
+                add("offset", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "可选,分页偏移,默认 0。")
+                })
+                add("includeTranslations", obj {
+                    addProperty("type", "boolean")
+                    addProperty("description", "可选,是否在结果中带各语言当前翻译。默认 false。开启后 token 消耗大,谨慎使用。")
+                })
+            })
+        }
+    }
+
+    private fun openAiReadStringParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("module", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,目标模块名。省略时用 currentModule。")
+                })
+                add("name", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,字符串 key 名。")
+                })
+            })
+            add("required", JsonArray().apply { add("name") })
+        }
+    }
+
+    private fun openAiUpdateStringParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("module", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,目标模块名。省略时用 currentModule。")
+                })
+                add("name", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,字符串 key,使用 snake_case。")
+                })
+                add("translations", obj {
+                    addProperty("type", "object")
+                    addProperty(
+                        "description",
+                        "必填,键为语言目录名(values/values-zh-rCN/values-fr 等),值仅包含需要修改的翻译。" +
+                            "未列出的语言保持原样。"
                     )
                 })
             })

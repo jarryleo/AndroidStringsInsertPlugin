@@ -71,6 +71,47 @@ sealed class AiAction {
         val status: String,
         val notes: String? = null
     ) : AiAction()
+
+    /**
+     * 列出/搜索模块内的字符串 key(AI 主动发现能力)。
+     *
+     * @param module             目标模块名,省略时用 currentModule
+     * @param pattern            可选正则;为空时退化为全量列表
+     * @param limit              最大返回条数,默认 50
+     * @param offset             分页偏移,默认 0
+     * @param includeTranslations 是否在结果中带各语言当前翻译(默认 false,节省 token)
+     */
+    data class QueryKeys(
+        val module: String?,
+        val pattern: String?,
+        val limit: Int?,
+        val offset: Int?,
+        val includeTranslations: Boolean
+    ) : AiAction()
+
+    /**
+     * 读取指定 key 在模块所有语言的当前翻译(AI 精确读取能力)。
+     * @param module 目标模块名,省略时用 currentModule
+     * @param name   必填,字符串 key
+     */
+    data class ReadString(
+        val module: String?,
+        val name: String
+    ) : AiAction()
+
+    /**
+     * 部分语言更新指定 key 的翻译(精准修改,不覆写未提供的语言)。
+     * 与 [InsertStrings] 的「全量覆盖」语义不同,本动作只动 [translations] 中列出的语言。
+     *
+     * @param module       目标模块名,省略时用 currentModule
+     * @param name         必填,字符串 key
+     * @param translations 键为语言目录名(例: "values-zh-rTW"),值为新翻译
+     */
+    data class UpdateString(
+        val module: String?,
+        val name: String,
+        val translations: Map<String, String>
+    ) : AiAction()
 }
 
 data class AiReply(
