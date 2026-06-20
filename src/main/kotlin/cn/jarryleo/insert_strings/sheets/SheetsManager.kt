@@ -14,8 +14,11 @@ import com.google.api.services.sheets.v4.model.BatchUpdateSpreadsheetRequest
 import com.google.api.services.sheets.v4.model.ClearValuesRequest
 import com.google.api.services.sheets.v4.model.DeleteDimensionRequest
 import com.google.api.services.sheets.v4.model.DimensionRange
+import com.google.api.services.sheets.v4.model.GridProperties
 import com.google.api.services.sheets.v4.model.InsertDimensionRequest
 import com.google.api.services.sheets.v4.model.Request
+import com.google.api.services.sheets.v4.model.SheetProperties
+import com.google.api.services.sheets.v4.model.UpdateSheetPropertiesRequest
 import com.google.api.services.sheets.v4.model.ValueRange
 import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.project.Project
@@ -707,6 +710,80 @@ object SheetsManager {
         if (key.isBlank()) return Result.failure(IllegalArgumentException("Search key is empty."))
         val safeSheet = sanitizeSheetName(sheetName)
         return searchRowByKey(project, spreadsheetId, "$safeSheet!A1:Z100000", key)
+    }
+
+    // ==================== 冻结行列 ====================
+
+    /**
+     * 冻结表格顶部指定行数，使其在滚动时保持可见。
+     * rowCount 为 0 表示取消冻结行。
+     */
+    fun freezeRows(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        rowCount: Int
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        if (rowCount < 0) return Result.failure(IllegalArgumentException("Frozen row count must be >= 0."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val safeSheet = sanitizeSheetName(sheetName)
+            val sheetId = resolveSheetId(service, spreadsheetId, safeSheet)
+                ?: throw IllegalStateException("Sheet '$safeSheet' not found in spreadsheet.")
+            val updateRequest = Request().setUpdateSheetProperties(
+                UpdateSheetPropertiesRequest()
+                    .setProperties(
+                        SheetProperties()
+                            .setSheetId(sheetId)
+                            .setGridProperties(
+                                GridProperties()
+                                    .setFrozenRowCount(rowCount)
+                            )
+                    )
+                    .setFields("gridProperties.frozenRowCount")
+            )
+            service.spreadsheets()
+                .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(listOf(updateRequest)))
+                .execute()
+        }
+    }
+
+    /**
+     * 冻结表格左侧指定列数，使其在滚动时保持可见。
+     * columnCount 为 0 表示取消冻结列。
+     */
+    fun freezeColumns(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        columnCount: Int
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        if (columnCount < 0) return Result.failure(IllegalArgumentException("Frozen column count must be >= 0."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val safeSheet = sanitizeSheetName(sheetName)
+            val sheetId = resolveSheetId(service, spreadsheetId, safeSheet)
+                ?: throw IllegalStateException("Sheet '$safeSheet' not found in spreadsheet.")
+            val updateRequest = Request().setUpdateSheetProperties(
+                UpdateSheetPropertiesRequest()
+                    .setProperties(
+                        SheetProperties()
+                            .setSheetId(sheetId)
+                            .setGridProperties(
+                                GridProperties()
+                                    .setFrozenColumnCount(columnCount)
+                            )
+                    )
+                    .setFields("gridProperties.frozenColumnCount")
+            )
+            service.spreadsheets()
+                .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(listOf(updateRequest)))
+                .execute()
+        }
     }
 
     // ==================== 列操作 ====================

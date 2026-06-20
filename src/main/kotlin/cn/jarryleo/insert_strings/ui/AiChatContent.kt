@@ -29,6 +29,7 @@ fun AiChatContent(
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
     onQuickSend: (String) -> Unit,
+    onOptionClick: (Int, String) -> Unit,
     modifier: Modifier = Modifier,
     colors: IdeColors,
 ) {
@@ -94,9 +95,12 @@ fun AiChatContent(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    itemsIndexed(chatMessages) { _, msg ->
+                    itemsIndexed(chatMessages) { index, msg ->
                         ChatBubble(
                             message = msg,
+                            messageIndex = index,
+                            onOptionClick = onOptionClick,
+                            chatSending = chatSending,
                             colors = colors,
                         )
                     }
@@ -178,6 +182,9 @@ fun AiChatContent(
 @Composable
 private fun ChatBubble(
     message: ChatMessage,
+    messageIndex: Int,
+    onOptionClick: (Int, String) -> Unit,
+    chatSending: Boolean,
     colors: IdeColors,
 ) {
     val isUser = message.role == "user"
@@ -228,6 +235,24 @@ private fun ChatBubble(
                             colors = colors,
                         )
                     }
+                }
+            }
+        }
+        if (!isUser && !isTool && message.options.isNotEmpty()) {
+            FlowRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp, start = 4.dp, end = 32.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                message.options.forEach { option ->
+                    CompactButton(
+                        text = option,
+                        onClick = { onOptionClick(messageIndex, option) },
+                        enabled = !chatSending,
+                        colors = colors,
+                    )
                 }
             }
         }

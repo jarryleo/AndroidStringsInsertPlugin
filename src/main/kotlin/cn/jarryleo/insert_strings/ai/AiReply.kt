@@ -8,7 +8,8 @@ sealed class AiAction {
     ) : AiAction()
 
     data class AskUser(
-        val question: String
+        val question: String,
+        val options: List<String> = emptyList()
     ) : AiAction()
 
     data class SheetsOperation(
@@ -21,7 +22,9 @@ sealed class AiAction {
         val rows: List<List<String>>?,
         val columnIndex: Int?,
         val columnHeader: String?,
-        val columnValues: List<String>?
+        val columnValues: List<String>?,
+        val freezeRowCount: Int? = null,
+        val freezeColumnCount: Int? = null
     ) : AiAction() {
         enum class Operation {
             READ,
@@ -39,7 +42,9 @@ sealed class AiAction {
             CLEAR_COLUMN,
             UPDATE_COLUMN,
             CHECK_TRANSLATIONS,
-            FIX_TRANSLATIONS
+            FIX_TRANSLATIONS,
+            FREEZE_ROWS,
+            FREEZE_COLUMNS
         }
     }
 }

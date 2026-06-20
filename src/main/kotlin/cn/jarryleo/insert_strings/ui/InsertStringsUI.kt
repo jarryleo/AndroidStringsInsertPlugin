@@ -95,6 +95,15 @@ class InsertStringsUI(
 
     private var settingsTab by mutableStateOf(SettingsTab.AI)
 
+    private data class PendingSheetsInsert(
+        val actions: List<AiAction.SheetsOperation>,
+        val duplicateKeys: Set<String>,
+        val spreadsheetId: String,
+        val sheetName: String,
+        val depth: Int
+    )
+    private var pendingSheetsInsert: PendingSheetsInsert? = null
+
     private val rootPanel = ComposePanel().apply {
         setContent {
             MaterialTheme {
@@ -149,6 +158,7 @@ class InsertStringsUI(
                     onSendChat = ::sendChat,
                     onQuickSend = ::quickSend,
                     onNewChat = ::newChat,
+                    onOptionClick = ::onChatOptionClick,
                 )
             }
         }
@@ -761,6 +771,54 @@ class InsertStringsUI(
                 SwingUtilities.invokeLater { showToast(report.summary.ifBlank { "修正完成" }) }
                 SheetsToolResult("修正全部翻译", report.success, report.toReportText(), terminal = true)
             }
+
+            AiAction.SheetsOperation.Operation.FREEZE_ROWS -> {
+                val rowCount = action.freezeRowCount
+                if (rowCount == null || rowCount < 0) {
+                    return SheetsToolResult("冻结行", false, "freezeRowCount 无效，必须为 >= 0 的整数。")
+                }
+                val result = SheetsManager.freezeRows(project, spreadsheetId, sheetName, rowCount)
+                result.fold(
+                    onSuccess = {
+                        SwingUtilities.invokeLater {
+                            showToast(if (rowCount == 0) "已取消冻结行" else "已冻结前 $rowCount 行")
+                        }
+                        SheetsToolResult(
+                            "冻结行",
+                            true,
+                            if (rowCount == 0) "已取消工作表 '$sheetName' 的冻结行"
+                            else "已冻结工作表 '$sheetName' 前 $rowCount 行"
+                        )
+                    },
+                    onFailure = {
+                        SheetsToolResult("冻结行", false, it.message ?: "Sheets freeze rows failed.")
+                    }
+                )
+            }
+
+            AiAction.SheetsOperation.Operation.FREEZE_COLUMNS -> {
+                val colCount = action.freezeColumnCount
+                if (colCount == null || colCount < 0) {
+                    return SheetsToolResult("冻结列", false, "freezeColumnCount 无效，必须为 >= 0 的整数。")
+                }
+                val result = SheetsManager.freezeColumns(project, spreadsheetId, sheetName, colCount)
+                result.fold(
+                    onSuccess = {
+                        SwingUtilities.invokeLater {
+                            showToast(if (colCount == 0) "已取消冻结列" else "已冻结前 $colCount 列")
+                        }
+                        SheetsToolResult(
+                            "冻结列",
+                            true,
+                            if (colCount == 0) "已取消工作表 '$sheetName' 的冻结列"
+                            else "已冻结工作表 '$sheetName' 前 $colCount 列"
+                        )
+                    },
+                    onFailure = {
+                        SheetsToolResult("冻结列", false, it.message ?: "Sheets freeze columns failed.")
+                    }
+                )
+            }
         }
     }
 
@@ -782,6 +840,8 @@ class InsertStringsUI(
             AiAction.SheetsOperation.Operation.CLEAR_COLUMN -> "清空列"
             AiAction.SheetsOperation.Operation.CHECK_TRANSLATIONS -> "检查全部翻译"
             AiAction.SheetsOperation.Operation.FIX_TRANSLATIONS -> "修正全部翻译"
+            AiAction.SheetsOperation.Operation.FREEZE_ROWS -> "冻结行"
+            AiAction.SheetsOperation.Operation.FREEZE_COLUMNS -> "冻结列"
         }
     }
 
@@ -1041,6 +1101,14 @@ class InsertStringsUI(
 
     private fun sendChatMessage(text: String) {
         chatMessages.add(ChatMessage(role = "user", content = text))
+        continueChatWithAi()
+    }
+
+    /**
+     * 公共 AI 调用 + 监督纠偏 + 动作处理。
+     * 调用前应已将用户消息加入 chatMessages。供 sendChatMessage 和 onChatOptionClick 共用。
+     */
+    private fun continueChatWithAi() {
         chatSending = true
         val context = buildChatContext()
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -1088,6 +1156,28 @@ class InsertStringsUI(
                 }
             }
         }
+    }
+
+    /**
+     * 对话气泡选项按钮点击回调。
+     * 清除按钮后判断是待处理的重复 key 插入还是普通 AskUser，分别处理。
+     */
+    private fun onChatOptionClick(messageIndex: Int, option: String) {
+        // 清除该消息的 options 使按钮消失
+        if (messageIndex in chatMessages.indices) {
+            val msg = chatMessages[messageIndex]
+            chatMessages[messageIndex] = msg.copy(options = emptyList())
+        }
+        // 重复 key 插入等待用户选择
+        val pending = pendingSheetsInsert
+        if (pending != null) {
+            pendingSheetsInsert = null
+            resolveDuplicateInsert(option, pending)
+            return
+        }
+        // 普通 AskUser：将用户选择作为消息发回 AI 继续对话
+        chatMessages.add(ChatMessage(role = "user", content = option))
+        continueChatWithAi()
     }
 
     private fun newChat() {
@@ -1167,7 +1257,21 @@ class InsertStringsUI(
         }
         val askActions = actions.filterIsInstance<AiAction.AskUser>()
         if (askActions.isNotEmpty()) {
-            showToast(askActions.first().question)
+            val askAction = askActions.first()
+            if (askAction.options.isNotEmpty()) {
+                // 带 options 的 AskUser：在气泡底部展示按钮，等待用户点击，暂不继续执行
+                chatMessages.add(
+                    ChatMessage(
+                        role = "assistant",
+                        content = askAction.question,
+                        options = askAction.options
+                    )
+                )
+                chatSending = false
+                return
+            } else {
+                showToast(askAction.question)
+            }
         }
 
         val sheetsActions = actions.filterIsInstance<AiAction.SheetsOperation>()
@@ -1187,8 +1291,60 @@ class InsertStringsUI(
             return
         }
 
+        executeSheetsActions(sheetsActions, depth)
+    }
+
+    /**
+     * 执行 sheets 操作并处理后续 AI 回复。
+     * 在执行前自动检测 append_row 动作是否有重复 key，若有则暂停并询问用户。
+     */
+    private fun executeSheetsActions(sheetsActions: List<AiAction.SheetsOperation>, depth: Int) {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
+                // 重复 key 检测：append_row 动作执行前读取表格现有 key，发现重复则暂停并询问用户
+                val appendActions = sheetsActions.filter {
+                    it.operation == AiAction.SheetsOperation.Operation.APPEND_ROW
+                }
+                if (appendActions.isNotEmpty()) {
+                    val spreadsheetId = SheetsManager.resolveSpreadsheetId(
+                        project, appendActions.first().spreadsheetId
+                    )
+                    val sheetName = appendActions.first().sheetName
+                        ?: SheetsManager.defaultSheetName(project)
+                    val newKeys = appendActions.mapNotNull {
+                        it.rows?.firstOrNull()?.firstOrNull()?.takeIf { k -> k.isNotBlank() }
+                    }
+                    if (spreadsheetId.isNotBlank() && newKeys.isNotEmpty()) {
+                        val existingKeys = SheetsManager.readSheet(project, spreadsheetId, sheetName)
+                            .getOrNull()
+                            ?.mapNotNull { it.firstOrNull()?.trim()?.takeIf { k -> k.isNotBlank() } }
+                            ?.toSet() ?: emptySet()
+                        val duplicates = newKeys.filter { it in existingKeys }.toSet()
+                        if (duplicates.isNotEmpty()) {
+                            val pending = PendingSheetsInsert(
+                                sheetsActions, duplicates, spreadsheetId, sheetName, depth
+                            )
+                            SwingUtilities.invokeLater {
+                                pendingSheetsInsert = pending
+                                chatMessages.add(
+                                    ChatMessage(
+                                        role = "assistant",
+                                        content = "检测到以下 key 已存在于表格中：" +
+                                            "${duplicates.joinToString(", ")}。请选择如何处理：",
+                                        options = listOf(
+                                            "覆盖相同key的内容",
+                                            "在列表末尾插入相同的key",
+                                            "取消操作"
+                                        )
+                                    )
+                                )
+                                chatSending = false
+                            }
+                            return@executeOnPooledThread
+                        }
+                    }
+                }
+
                 val toolResults = sheetsActions.map { executeSheetsOperationSync(it) }
 
                 // 若全部为终态报告（批量审查/修正），直接展示报告，不再发起后续 AI 调用（省 token）。
@@ -1233,6 +1389,80 @@ class InsertStringsUI(
                     )
                     chatSending = false
                 }
+            }
+        }
+    }
+
+    /**
+     * 重复 key 插入的用户选择处理。
+     * - 覆盖：将重复 key 的 append_row 转为 search + update_row，非重复的保持 append_row。
+     * - 末尾插入：原样执行所有 append_row。
+     * - 取消：不执行，告知用户。
+     */
+    private fun resolveDuplicateInsert(option: String, pending: PendingSheetsInsert) {
+        when {
+            option.contains("覆盖") -> {
+                chatSending = true
+                ApplicationManager.getApplication().executeOnPooledThread {
+                    try {
+                        val resolvedActions = pending.actions.map { action ->
+                            if (action.operation == AiAction.SheetsOperation.Operation.APPEND_ROW) {
+                                val key = action.rows?.firstOrNull()?.firstOrNull()
+                                if (key != null && key in pending.duplicateKeys) {
+                                    val searchResult = SheetsManager.searchRowInSheet(
+                                        project, pending.spreadsheetId, pending.sheetName, key
+                                    )
+                                    searchResult.fold(
+                                        onSuccess = { (rowNum, _) ->
+                                            action.copy(
+                                                operation = AiAction.SheetsOperation.Operation.UPDATE_ROW,
+                                                rowNumber = rowNum
+                                            )
+                                        },
+                                        onFailure = { action }
+                                    )
+                                } else {
+                                    action
+                                }
+                            } else {
+                                action
+                            }
+                        }
+                        executeSheetsActions(resolvedActions, pending.depth)
+                    } catch (e: Exception) {
+                        SwingUtilities.invokeLater {
+                            chatMessages.add(
+                                ChatMessage(
+                                    role = "assistant",
+                                    content = "覆盖操作执行异常：${e.message ?: "unknown"}"
+                                )
+                            )
+                            chatSending = false
+                        }
+                    }
+                }
+            }
+            option.contains("末尾") -> {
+                chatSending = true
+                ApplicationManager.getApplication().executeOnPooledThread {
+                    try {
+                        executeSheetsActions(pending.actions, pending.depth)
+                    } catch (e: Exception) {
+                        SwingUtilities.invokeLater {
+                            chatMessages.add(
+                                ChatMessage(
+                                    role = "assistant",
+                                    content = "追加操作执行异常：${e.message ?: "unknown"}"
+                                )
+                            )
+                            chatSending = false
+                        }
+                    }
+                }
+            }
+            else -> {
+                chatMessages.add(ChatMessage(role = "assistant", content = "已取消插入操作。"))
+                chatSending = false
             }
         }
     }
@@ -1377,6 +1607,7 @@ private fun InsertStringsContent(
     onSendChat: () -> Unit,
     onQuickSend: (String) -> Unit,
     onNewChat: () -> Unit,
+    onOptionClick: (Int, String) -> Unit,
 ) {
     val colors = rememberIdeColors()
 
@@ -1431,6 +1662,7 @@ private fun InsertStringsContent(
                         onChatInputChange = onChatInputChange,
                         onSendChat = onSendChat,
                         onQuickSend = onQuickSend,
+                        onOptionClick = onOptionClick,
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )
