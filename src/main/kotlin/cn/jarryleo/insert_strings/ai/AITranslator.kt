@@ -10,10 +10,32 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
 
+/**
+ * function calling 协议下的一次工具调用(assistant 消息中)。
+ * @param id        模型返回的 tool_call_id / tool_use_id,需要在 tool result 中回传以关联。
+ * @param name      工具名。
+ * @param arguments 工具参数的 JSON 字符串(由模型原样返回,driver 自行解析)。
+ */
+data class ToolCall(
+    val id: String,
+    val name: String,
+    val arguments: String
+)
+
+/**
+ * 聊天消息(驱动层 + UI 共享)。
+ *
+ * 多模字段(用于 function calling):
+ * - [toolCalls]  助手消息携带的工具调用列表。
+ * - [toolCallId] 工具结果消息关联的 tool_call_id(OpenAI 协议);Anthropic 协议下用同样的字段映射到 tool_use_id。
+ * - [options]    UI 层 AskUser 按钮选项,与 AI 协议无关。
+ */
 data class ChatMessage(
     val role: String,
     val content: String,
-    val options: List<String> = emptyList()
+    val options: List<String> = emptyList(),
+    val toolCalls: List<ToolCall> = emptyList(),
+    val toolCallId: String? = null
 )
 
 object AITranslator {
@@ -22,63 +44,32 @@ object AITranslator {
     private const val BATCH_TRANSLATE_SYSTEM_PROMPT =
         "你是一个专业的翻译，为开发安卓APP提供国际化翻译服务。我会给你多条文本和目标语言代码，请翻译成目标语言，并严格以 JSON 对象返回，key 为我给出的标识（原样保留），value 为对应翻译结果纯文本。不要 markdown 代码块，不要任何解释。"
     private const val CHAT_SYSTEM_PROMPT =
-        """你是一个 Android 应用国际化字符串管理助手。你必须始终只返回一个纯 JSON 对象（以 { 开头、以 } 结尾），禁止 markdown 代码块、禁止 XML/HTML 自定义标签、禁止 JSON 以外的任何文字。
+        """你是一个 Android 应用国际化字符串管理助手。通过 function calling 与系统协作：调用工具执行操作，调用 task_complete 结束任务。
 
-回复 JSON 结构：
-{
-  "reply": "给用户看的中文回复文本",
-  "actions": [
-    {"type": "insert_strings", "module": "模块名(可选)", "name": "snake_case key", "translations": {"values": "默认语言", "values-zh-rCN": "简体中文"}},
-    {"type": "sheets_operation", "operation": "operation名", ...字段},
-    {"type": "ask_user", "question": "问题文本", "options": ["选项1", "选项2"]},
-    {"type": "load_tool_doc", "tool": "工具名"}
-  ]
-}
+## 强制终止规则(最重要)
+- 唯一的「合法终止」信号是调用 task_complete 工具。
+- 没有调用 task_complete = 你仍在执行 = 系统会持续驱动你继续调用工具。
+- 在用户的目标完整达成前,不要调用 task_complete。即使用户消息只是「读取表格」,也要在拿到结果、给出总结后才算完成。
+- 多步骤任务(如「检查 X 翻译,不准则修正」)必须按顺序执行每一步,直到真正完成或必须 ask_user 等待用户输入。
 
-## 可用工具一览（仅名称与简述，需要详细用法时用 load_tool_doc 加载）
+## 工具一览
+- insert_strings: 向 strings.xml 插入/修改翻译。
+- sheets_operation: Google 表格操作(枚举见工具参数)。列操作需用户确认;修改/删除行前先 search 定位行号;全表检查/修正优先用 check_translations/fix_translations。
+- ask_user: 向用户提问,options 非空时显示按钮。关键参数缺失/风险操作/目标不明确时使用。
+- load_tool_doc: 按需加载工具详细文档(工具名:sheets_basic / sheets_row_ops / sheets_column_ops / sheets_freeze / sheets_review / insert_strings)。
+- task_complete: 结束对话,status 取 success / partial / failed。
 
-### insert_strings（直接可用，无需加载文档）
-向 Android strings.xml 插入/修改翻译。字段：module(可选)、name、translations(键为语言目录名如 values/values-zh-rCN)。
-
-### sheets_operation（Google 表格操作，operation 取值如下）
-- list_sheets — 列出所有工作表名称
-- read — 读取表格数据
-- search — 按 key 查找行号
-- write — 覆盖写入指定范围
-- append_row — 末尾追加行
-- insert_row — 指定位置插入行
-- update_row — 更新指定行
-- delete_row — 删除指定行
-- clear_row — 清空指定行
-- insert_column — 插入列(需用户确认)
-- append_column — 末尾追加列(需用户确认)
-- update_column — 更新列(需用户确认)
-- delete_column — 删除列(需用户确认)
-- clear_column — 清空列(需用户确认)
-- freeze_rows — 冻结行
-- freeze_columns — 冻结列
-- check_translations — 全表翻译检查(系统分批处理)
-- fix_translations — 全表翻译修正(系统分批处理并写入)
-
-### ask_user（直接可用）
-向用户提问，options 非空时展示按钮供用户选择。
-
-### load_tool_doc（按需加载工具文档）
-当你不确定某个工具的完整字段、用法或工作流时，返回此动作请求加载详细文档。系统会把该工具的完整说明注入对话，你据此继续操作。
-字段：tool（工具名，取值：insert_strings / sheets_row_ops / sheets_column_ops / sheets_freeze / sheets_review / sheets_basic）
-建议：首次使用某类操作前先 load_tool_doc，拿到详细文档后再返回实际执行动作。
-
-## 核心规则
-1. 需要执行操作时必须返回 actions，禁止只用文字描述操作。
-2. insert_strings 的 translations 键必须覆盖上下文 availableLanguages 列出的所有语言。
-3. module 必须用上下文 modules 中的 moduleName；若上下文有 currentModule 则默认用它，无需询问。
-4. 若无 currentModule 且用户未指定模块，用 ask_user 询问是否插入到 moduleWithMostLines。
-5. XML 特殊字符需转义：&amp; &lt; &gt; &quot; &apos;。
-6. 返回 sheets_operation 后系统自动执行并回传结果，据此在 reply 中总结。收到结果后不要重复返回已执行的 actions。
-7. append_row 重复 key 由系统自动检测并询问用户，你无需自行检查。
-8. sheets_operation 的 spreadsheetId/sheetName 可省略，默认用上下文 googleSheets 配置。availableSheets 非空时 sheetName 须从中选取。
-9. 若 googleSheets.configured 为 false，提示用户先配置，不要返回 sheets_operation。
-10. 安全约束：修改/删除行前先用 search 定位行号；禁止擅自增删列；写入前列对齐表头；全表检查/修正用 check_translations/fix_translations 而非 read 整表。"""
+## 行为规则
+1. 操作必须通过工具调用完成,不要只在文字里描述。
+2. 每次回复可以同时包含文字(给用户看)和多个工具调用。
+3. 收到工具结果后,如果目标尚未达成,必须继续调用工具推进。
+4. insert_strings 的 translations 必须覆盖上下文 availableLanguages 中的所有语言。
+5. module 必须是上下文 modules 中的 moduleName;若上下文有 currentModule 则默认用它。
+6. XML 特殊字符需转义:&amp; &lt; &gt; &quot; &apos;。
+7. append_row 重复 key 由系统自动检测并询问用户,你无需自行检查。
+8. sheets_operation 的 spreadsheetId/sheetName 可省略,默认用上下文 googleSheets 配置;availableSheets 非空时 sheetName 须从中选取。
+9. 若 googleSheets.configured 为 false,提示用户先配置,不要调用 sheets_operation。
+10. 安全约束:禁止擅自增删列;写入前列对齐表头;全表检查/修正用 check_translations/fix_translations 而非 read 整表。"""
 
     /**
      * 按需加载的工具详细文档（key = tool 名，value = 完整说明）。
@@ -429,11 +420,9 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             if (response.statusCode() !in 200..299) {
                 throw IllegalStateException("HTTP ${response.statusCode()}: ${response.body().limitForMessage()}")
             }
-            val responseText = when (protocol) {
-                AiProtocol.OPENAI -> parseOpenAiText(response.body())
-                AiProtocol.ANTHROPIC -> parseAnthropicText(response.body())
-            }
-            parseAiReply(responseText)
+            // function calling 响应同时包含文本与 tool_calls,需解析完整 JSON。
+            // 优先用专用解析;若失败,退化到抽取纯文本以便用户至少看到回复。
+            parseAiReply(response.body())
         }.getOrElse {
             AiReply(it.message ?: "AI chat failed.", emptyList())
         }
@@ -626,6 +615,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
     private fun openAiChatBody(model: String, messages: List<ChatMessage>, context: String): String {
         val root = JsonObject().apply {
             addProperty("model", model)
+            add("tools", ToolDefinitions.openAiTools)
             add(
                 "messages",
                 JsonArray().apply {
@@ -639,17 +629,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                             addProperty("content", "## 当前项目上下文（JSON）\n$context")
                         })
                     }
-                    messages.forEachIndexed { index, msg ->
-                        val content = if (index == messages.lastIndex && msg.role == "user" && context.isNotBlank()) {
-                            buildUserJsonMessage(msg.content, context)
-                        } else {
-                            msg.content
-                        }
-                        add(JsonObject().apply {
-                            addProperty("role", if (msg.role == "tool") "user" else msg.role)
-                            addProperty("content", content)
-                        })
-                    }
+                    messages.forEach { msg -> add(msg.toOpenAiMessage()) }
                 }
             )
         }
@@ -659,50 +639,272 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
     private fun anthropicChatBody(model: String, messages: List<ChatMessage>, context: String): String {
         val root = JsonObject().apply {
             addProperty("model", model)
-            addProperty("system", CHAT_SYSTEM_PROMPT + if (context.isNotBlank()) "\n## 当前项目上下文（JSON）\n$context" else "")
             addProperty("max_tokens", 4096)
+            val systemParts = buildString {
+                append(CHAT_SYSTEM_PROMPT)
+                if (context.isNotBlank()) {
+                    append("\n## 当前项目上下文（JSON）\n").append(context)
+                }
+            }
+            addProperty("system", systemParts)
+            add("tools", ToolDefinitions.anthropicTools)
             add(
                 "messages",
                 JsonArray().apply {
-                    messages.forEachIndexed { index, msg ->
-                        val content = if (index == messages.lastIndex && msg.role == "user" && context.isNotBlank()) {
-                            buildUserJsonMessage(msg.content, context)
-                        } else {
-                            msg.content
-                        }
-                        add(JsonObject().apply {
-                            addProperty("role", if (msg.role == "tool") "user" else msg.role)
-                            addProperty("content", content)
-                        })
-                    }
+                    messages.forEach { msg -> add(msg.toAnthropicMessage()) }
                 }
             )
         }
         return root.toString()
     }
 
-    private fun buildUserJsonMessage(message: String, context: String): String {
-        return try {
-            val contextObj = JsonParser.parseString(context).asJsonObject
-            contextObj.addProperty("userMessage", message)
-            contextObj.toString()
-        } catch (e: Exception) {
-            JsonObject().apply {
-                addProperty("userMessage", message)
-                addProperty("context", context)
-            }.toString()
+    /**
+     * 把 [ChatMessage] 转换为 OpenAI Chat Completions 的 messages 元素。
+     * 重点处理三种特殊情况:
+     * - assistant 消息携带 tool_calls(原生 function calling)
+     * - tool 消息携带 tool_call_id(回传给模型以关联结果)
+     * - 普通 user/assistant 消息保持原样
+     */
+    private fun ChatMessage.toOpenAiMessage(): JsonObject {
+        // tool result message
+        if (role == "tool" || (role == "user" && toolCallId != null)) {
+            return JsonObject().apply {
+                addProperty("role", "tool")
+                addProperty("tool_call_id", toolCallId.orEmpty())
+                addProperty("content", content)
+            }
+        }
+        // assistant message with tool calls (function calling)
+        if (role == "assistant" && toolCalls.isNotEmpty()) {
+            return JsonObject().apply {
+                addProperty("role", "assistant")
+                if (content.isNotEmpty()) {
+                    addProperty("content", content)
+                } else {
+                    addProperty("content", "")
+                }
+                add("tool_calls", JsonArray().apply {
+                    toolCalls.forEach { tc ->
+                        add(JsonObject().apply {
+                            addProperty("id", tc.id)
+                            addProperty("type", "function")
+                            add("function", JsonObject().apply {
+                                addProperty("name", tc.name)
+                                addProperty("arguments", tc.arguments)
+                            })
+                        })
+                    }
+                })
+            }
+        }
+        // plain text message
+        return JsonObject().apply {
+            addProperty("role", role)
+            addProperty("content", content)
+        }
+    }
+
+    /**
+     * 把 [ChatMessage] 转换为 Anthropic Messages API 的 messages 元素。
+     * - assistant 消息含 toolCalls 时用 content 数组(text + tool_use 块)
+     * - tool 结果统一用 user 角色的 tool_result 块
+     */
+    private fun ChatMessage.toAnthropicMessage(): JsonObject {
+        // tool result → user with tool_result block(s)
+        if (role == "tool" || (role == "user" && toolCallId != null)) {
+            return JsonObject().apply {
+                addProperty("role", "user")
+                add("content", JsonArray().apply {
+                    add(JsonObject().apply {
+                        addProperty("type", "tool_result")
+                        addProperty("tool_use_id", toolCallId.orEmpty())
+                        addProperty("content", content)
+                    })
+                })
+            }
+        }
+        if (role == "assistant") {
+            if (toolCalls.isNotEmpty()) {
+                return JsonObject().apply {
+                    addProperty("role", "assistant")
+                    add("content", JsonArray().apply {
+                        if (content.isNotEmpty()) {
+                            add(JsonObject().apply {
+                                addProperty("type", "text")
+                                addProperty("text", content)
+                            })
+                        }
+                        toolCalls.forEach { tc ->
+                            add(JsonObject().apply {
+                                addProperty("type", "tool_use")
+                                addProperty("id", tc.id)
+                                addProperty("name", tc.name)
+                                add("input", runCatching {
+                                    JsonParser.parseString(tc.arguments)
+                                }.getOrElse { JsonObject() })
+                            })
+                        }
+                    })
+                }
+            }
+            return JsonObject().apply {
+                addProperty("role", "assistant")
+                addProperty("content", content)
+            }
+        }
+        return JsonObject().apply {
+            addProperty("role", role)
+            addProperty("content", content)
         }
     }
 
     private fun parseAiReply(responseText: String): AiReply {
-        val root = extractJsonObject(responseText)
-        return try {
-            if (root == null) throw IllegalStateException("No JSON object found in AI reply")
-            val reply = root.get("reply")?.extractText().orEmpty()
-            val actions = root.getAsJsonArray("actions")?.mapNotNull { parseAction(it) } ?: emptyList()
-            AiReply(reply, actions)
-        } catch (e: Exception) {
-            AiReply(responseText, emptyList())
+        val root = runCatching { JsonParser.parseString(responseText).asJsonObject }.getOrNull()
+            ?: return AiReply(responseText, emptyList())
+        val text = extractAssistantText(root)
+        val toolCalls = extractToolCalls(root)
+        val actions = toolCalls.mapNotNull { call -> toolCallToAction(call) }
+        return AiReply(text, actions, toolCalls)
+    }
+
+    /**
+     * 从模型响应中提取助手文本内容。
+     * 兼容三种格式:OpenAI chat.completions / Anthropic messages / 退化到 JSON 文本(老协议)。
+     */
+    private fun extractAssistantText(root: JsonObject): String {
+        // OpenAI 格式
+        root.getAsJsonArray("choices")?.firstObject()?.getAsJsonObject("message")
+            ?.get("content")?.let { return it.extractText() }
+        // Anthropic 格式
+        root.getAsJsonArray("content")?.let { contentArray ->
+            if (contentArray.any { it.isJsonObject && it.asJsonObject.get("type")?.asString == "text" }) {
+                return contentArray.joinToString("") { element ->
+                    if (element.isJsonObject && element.asJsonObject.get("type")?.asString == "text") {
+                        element.asJsonObject.get("text")?.asString.orEmpty()
+                    } else ""
+                }
+            }
+        }
+        return ""
+    }
+
+    /**
+     * 从模型响应中提取 tool_calls(统一成内部 [ToolCall] 格式)。
+     */
+    private fun extractToolCalls(root: JsonObject): List<ToolCall> {
+        val result = mutableListOf<ToolCall>()
+        // OpenAI: choices[0].message.tool_calls
+        root.getAsJsonArray("choices")?.firstObject()?.getAsJsonObject("message")
+            ?.getAsJsonArray("tool_calls")?.forEach { element ->
+                if (!element.isJsonObject) return@forEach
+                val obj = element.asJsonObject
+                val id = obj.get("id")?.asString ?: return@forEach
+                val functionObj = obj.getAsJsonObject("function") ?: return@forEach
+                val name = functionObj.get("name")?.asString ?: return@forEach
+                val arguments = functionObj.get("arguments")?.asString ?: "{}"
+                result.add(ToolCall(id, name, arguments))
+            }
+        // Anthropic: content[].type=tool_use
+        root.getAsJsonArray("content")?.forEach { element ->
+            if (!element.isJsonObject) return@forEach
+            val obj = element.asJsonObject
+            if (obj.get("type")?.asString != "tool_use") return@forEach
+            val id = obj.get("id")?.asString ?: return@forEach
+            val name = obj.get("name")?.asString ?: return@forEach
+            val input = obj.get("input")
+            val arguments = input?.toString() ?: "{}"
+            result.add(ToolCall(id, name, arguments))
+        }
+        return result
+    }
+
+    /**
+     * 把单个 tool call 转换为 [AiAction]。
+     * 解析失败时返回 null,由调用方决定如何兜底(通常在 reply 中提示用户)。
+     */
+    private fun toolCallToAction(call: ToolCall): AiAction? {
+        val args: JsonObject = runCatching { JsonParser.parseString(call.arguments).asJsonObject }
+            .getOrNull() ?: return null
+        return when (call.name) {
+            ToolDefinitions.TOOL_INSERT_STRINGS -> {
+                val name = args.get("name")?.asString?.trim() ?: return null
+                val module = args.get("module")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val translationsObj = args.getAsJsonObject("translations") ?: return null
+                val translations = translationsObj.entrySet().associate { it.key to it.value.extractText() }
+                if (name.isNotEmpty() && translations.isNotEmpty()) {
+                    AiAction.InsertStrings(module, name, translations)
+                } else null
+            }
+            ToolDefinitions.TOOL_ASK_USER -> {
+                val question = args.get("question")?.asString ?: return null
+                val optionsArray = args.getAsJsonArray("options")
+                val options = optionsArray?.mapNotNull {
+                    it?.extractText()?.takeIf { o -> o.isNotEmpty() }
+                } ?: emptyList()
+                AiAction.AskUser(question, options)
+            }
+            ToolDefinitions.TOOL_LOAD_TOOL_DOC -> {
+                val tool = args.get("tool")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+                AiAction.LoadToolDoc(tool)
+            }
+            ToolDefinitions.TOOL_TASK_COMPLETE -> {
+                val summary = args.get("summary")?.asString?.trim().orEmpty()
+                val status = args.get("status")?.asString?.trim().orEmpty()
+                if (summary.isEmpty() || status.isEmpty()) return null
+                val notes = args.get("notes")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                AiAction.TaskComplete(summary, status, notes)
+            }
+            ToolDefinitions.TOOL_SHEETS_OPERATION -> {
+                val operationText = args.get("operation")?.asString ?: return null
+                val operation = runCatching {
+                    AiAction.SheetsOperation.Operation.valueOf(operationText.uppercase())
+                }.getOrNull() ?: return null
+                val spreadsheetId = args.get("spreadsheetId")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val sheetName = args.get("sheetName")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val range = args.get("range")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val key = args.get("key")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val rowNumber = args.get("rowNumber")?.let {
+                    runCatching { it.asInt }.getOrNull()
+                }?.takeIf { it != null && it > 0 }
+                val rowsArray = args.getAsJsonArray("rows")
+                val rows = rowsArray?.mapNotNull { rowElement ->
+                    if (!rowElement.isJsonArray) return@mapNotNull null
+                    rowElement.asJsonArray.map { it?.extractText().orEmpty() }
+                }
+                val columnIndex = args.get("columnIndex")?.let {
+                    runCatching { it.asInt }.getOrNull()
+                }?.takeIf { it != null && it > 0 }
+                val columnHeader = args.get("columnHeader")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val columnValuesArray = args.getAsJsonArray("columnValues")
+                val columnValues = columnValuesArray?.mapNotNull { el ->
+                    when {
+                        el.isJsonPrimitive -> el.asString
+                        el.isJsonNull -> null
+                        else -> el.extractText().ifEmpty { null }
+                    }
+                }
+                val freezeRowCount = args.get("freezeRowCount")?.let {
+                    runCatching { it.asInt }.getOrNull()
+                }?.takeIf { it != null && it >= 0 }
+                val freezeColumnCount = args.get("freezeColumnCount")?.let {
+                    runCatching { it.asInt }.getOrNull()
+                }?.takeIf { it != null && it >= 0 }
+                AiAction.SheetsOperation(
+                    operation,
+                    spreadsheetId,
+                    sheetName,
+                    range,
+                    key,
+                    rowNumber,
+                    rows,
+                    columnIndex,
+                    columnHeader,
+                    columnValues,
+                    freezeRowCount,
+                    freezeColumnCount
+                )
+            }
+            else -> null
         }
     }
 
@@ -774,84 +976,6 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             JsonParser.parseString(this).asJsonObject
         } catch (e: Exception) {
             null
-        }
-    }
-
-    private fun parseAction(element: JsonElement): AiAction? {
-        if (!element.isJsonObject) return null
-        val obj = element.asJsonObject
-        val type = obj.get("type")?.asString ?: return null
-        return when (type) {
-            "insert_strings" -> {
-                val name = obj.get("name")?.asString?.trim() ?: return null
-                val module = obj.get("module")?.asString?.trim()?.takeIf { it.isNotEmpty() }
-                val translationsObj = obj.getAsJsonObject("translations") ?: return null
-                val translations = translationsObj.entrySet().associate { it.key to it.value.extractText() }
-                if (name.isNotEmpty() && translations.isNotEmpty()) {
-                    AiAction.InsertStrings(module, name, translations)
-                } else null
-            }
-            "ask_user" -> {
-                val question = obj.get("question")?.asString ?: return null
-                val optionsArray = obj.getAsJsonArray("options")
-                val options = optionsArray?.mapNotNull { it?.extractText()?.takeIf { o -> o.isNotEmpty() } } ?: emptyList()
-                AiAction.AskUser(question, options)
-            }
-            "load_tool_doc" -> {
-                val tool = obj.get("tool")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-                AiAction.LoadToolDoc(tool)
-            }
-            "sheets_operation" -> {
-                val operationText = obj.get("operation")?.asString ?: return null
-                val operation = runCatching {
-                    AiAction.SheetsOperation.Operation.valueOf(operationText.uppercase())
-                }.getOrNull() ?: return null
-                val spreadsheetId = obj.get("spreadsheetId")?.asString?.trim()?.takeIf { it.isNotEmpty() }
-                val sheetName = obj.get("sheetName")?.asString?.trim()?.takeIf { it.isNotEmpty() }
-                val range = obj.get("range")?.asString?.trim()?.takeIf { it.isNotEmpty() }
-                val key = obj.get("key")?.asString?.trim()?.takeIf { it.isNotEmpty() }
-                val rowNumber = obj.get("rowNumber")?.let {
-                    runCatching { it.asInt }.getOrNull()
-                }?.takeIf { it != null && it > 0 }
-                val rowsArray = obj.getAsJsonArray("rows")
-                val rows = rowsArray?.mapNotNull { rowElement ->
-                    if (!rowElement.isJsonArray) return@mapNotNull null
-                    rowElement.asJsonArray.map { it?.extractText().orEmpty() }
-                }
-                val columnIndex = obj.get("columnIndex")?.let {
-                    runCatching { it.asInt }.getOrNull()
-                }?.takeIf { it != null && it > 0 }
-                val columnHeader = obj.get("columnHeader")?.asString?.trim()?.takeIf { it.isNotEmpty() }
-                val columnValuesArray = obj.getAsJsonArray("columnValues")
-                val columnValues = columnValuesArray?.mapNotNull { el ->
-                    when {
-                        el.isJsonPrimitive -> el.asString
-                        el.isJsonNull -> null
-                        else -> el.extractText().ifEmpty { null }
-                    }
-                }
-                val freezeRowCount = obj.get("freezeRowCount")?.let {
-                    runCatching { it.asInt }.getOrNull()
-                }?.takeIf { it != null && it >= 0 }
-                val freezeColumnCount = obj.get("freezeColumnCount")?.let {
-                    runCatching { it.asInt }.getOrNull()
-                }?.takeIf { it != null && it >= 0 }
-                AiAction.SheetsOperation(
-                    operation,
-                    spreadsheetId,
-                    sheetName,
-                    range,
-                    key,
-                    rowNumber,
-                    rows,
-                    columnIndex,
-                    columnHeader,
-                    columnValues,
-                    freezeRowCount,
-                    freezeColumnCount
-                )
-            }
-            else -> null
         }
     }
 

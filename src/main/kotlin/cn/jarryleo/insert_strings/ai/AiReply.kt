@@ -56,11 +56,31 @@ sealed class AiAction {
             FREEZE_COLUMNS
         }
     }
+
+    /**
+     * AI 声明任务完成。
+     * 采用 function calling 后,这是唯一的「合法终止」信号 ——
+     * 没有调用本动作就代表 AI 仍在执行,系统不会停止对话循环。
+     *
+     * @param summary 给用户看的最终总结
+     * @param status 任务状态: success 完全达成 / partial 部分达成(目标被中断) / failed 执行失败
+     * @param notes  可选的补充说明,例如「用户拒绝」或「缺少必要信息」
+     */
+    data class TaskComplete(
+        val summary: String,
+        val status: String,
+        val notes: String? = null
+    ) : AiAction()
 }
 
 data class AiReply(
     val reply: String,
-    val actions: List<AiAction>
+    val actions: List<AiAction>,
+    /**
+     * 模型返回的原始 tool_calls,与 [actions] 按下标对齐(parse 失败的位置会被丢弃)。
+     * UI 层在构造 tool result 消息时,需要用这里的 id 回传给 API。
+     */
+    val toolCalls: List<ToolCall> = emptyList()
 )
 
 /**

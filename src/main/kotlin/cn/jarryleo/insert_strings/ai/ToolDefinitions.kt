@@ -1,0 +1,279 @@
+package cn.jarryleo.insert_strings.ai
+
+import cn.jarryleo.insert_strings.ai.AiAction.SheetsOperation
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
+
+/**
+ * 工具定义集合:把 [AiAction] 类型映射为 OpenAI / Anthropic 的 function calling schema。
+ *
+ * 工具列表设计原则:
+ * 1. 每个 [AiAction] 子类对应一个 tool,模型通过原生 function calling 调用。
+ * 2. `task_complete` 是唯一的「合法终止」信号:模型不调用它,系统就持续驱动工具循环。
+ * 3. 复杂工具的详细用法(枚举值/约束/示例)由 `load_tool_doc` 按需注入,主 prompt 保持精简。
+ */
+object ToolDefinitions {
+
+    /** OpenAI / OpenAI 兼容协议的 tools 数组(放在 request body 的 `tools` 字段)。 */
+    val openAiTools: JsonArray = buildOpenAiTools()
+
+    /** Anthropic Messages API 的 tools 数组(放在 request body 的 `tools` 字段)。 */
+    val anthropicTools: JsonArray = buildAnthropicTools()
+
+    /** 工具名 → JSON Schema 的 properties 引用,供 driver 在解析 tool_call.arguments 时复用。 */
+    val toolNames: List<String> = listOf(
+        TOOL_INSERT_STRINGS,
+        TOOL_SHEETS_OPERATION,
+        TOOL_ASK_USER,
+        TOOL_LOAD_TOOL_DOC,
+        TOOL_TASK_COMPLETE,
+    )
+
+    const val TOOL_INSERT_STRINGS = "insert_strings"
+    const val TOOL_SHEETS_OPERATION = "sheets_operation"
+    const val TOOL_ASK_USER = "ask_user"
+    const val TOOL_LOAD_TOOL_DOC = "load_tool_doc"
+    const val TOOL_TASK_COMPLETE = "task_complete"
+
+    // region 工具描述文案(主 prompt 引用,这里集中维护)
+
+    private const val DESC_INSERT_STRINGS =
+        "向 Android strings.xml 插入或修改翻译字符串。" +
+            "可同时调用多次以插入多个字符串。" +
+            "translations 键必须覆盖上下文 availableLanguages 列出的所有语言。"
+
+    private const val DESC_SHEETS_OPERATION =
+        "执行 Google 表格操作。operation 决定具体动作类型。" +
+            "不确定用法时先调用 load_tool_doc(\"sheets_basic\"/\"sheets_row_ops\"/...) 获取详细文档。" +
+            "安全约束:修改/删除行前先用 search 定位行号;列操作需用户确认;全表检查/修正用 check_translations/fix_translations。"
+
+    private const val DESC_ASK_USER =
+        "向用户提问并等待回复。options 非空时显示按钮供用户点击;为空时只显示文本等待用户输入。" +
+            "使用场景:关键参数缺失、风险操作确认、目标不明确需要澄清。"
+
+    private const val DESC_LOAD_TOOL_DOC =
+        "按需加载工具的详细使用文档(枚举值、参数约束、示例)。" +
+            "返回的文档会作为工具结果回传给你,你据此继续返回实际执行动作,不要重复请求同一工具的文档。"
+
+    private const val DESC_TASK_COMPLETE =
+        "声明任务已完成,结束当前对话循环。" +
+            "这是唯一的「合法终止」信号 — 没有调用本工具 = 你仍在执行,系统会持续驱动你继续。" +
+            "status 取值: success(完全达成) / partial(部分达成,如用户拒绝) / failed(执行失败)。" +
+            "调用本工具后不要在同一次回复中再调用其他工具。"
+
+    // endregion
+
+    private fun buildOpenAiTools(): JsonArray {
+        return JsonArray().apply {
+            add(openAiTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
+            add(openAiTool(TOOL_SHEETS_OPERATION, DESC_SHEETS_OPERATION, openAiSheetsOperationParams()))
+            add(openAiTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
+            add(openAiTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
+            add(openAiTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
+        }
+    }
+
+    private fun buildAnthropicTools(): JsonArray {
+        return JsonArray().apply {
+            add(anthropicTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
+            add(anthropicTool(TOOL_SHEETS_OPERATION, DESC_SHEETS_OPERATION, openAiSheetsOperationParams()))
+            add(anthropicTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
+            add(anthropicTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
+            add(anthropicTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
+        }
+    }
+
+    private fun openAiTool(name: String, description: String, parameters: JsonObject): JsonObject {
+        return JsonObject().apply {
+            addProperty("type", "function")
+            add("function", JsonObject().apply {
+                addProperty("name", name)
+                addProperty("description", description)
+                add("parameters", parameters)
+            })
+        }
+    }
+
+    private fun anthropicTool(name: String, description: String, inputSchema: JsonObject): JsonObject {
+        return JsonObject().apply {
+            addProperty("name", name)
+            addProperty("description", description)
+            add("input_schema", inputSchema)
+        }
+    }
+
+    // region 各工具的 JSON Schema (OpenAI 风格,Anthropic 共用同一份 input_schema)
+
+    private fun openAiInsertStringsParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("module", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "目标模块名,必须是上下文 modules 中的 moduleName。省略时使用 currentModule。"
+                    )
+                })
+                add("name", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "字符串 key,使用 snake_case。")
+                })
+                add("translations", obj {
+                    addProperty("type", "object")
+                    addProperty(
+                        "description",
+                        "键为语言目录名(values / values-zh-rCN / values-fr 等)," +
+                            "值为对应翻译文本。必须覆盖上下文 availableLanguages 中的所有语言。"
+                    )
+                })
+            })
+            add("required", JsonArray().apply {
+                add("name")
+                add("translations")
+            })
+        }
+    }
+
+    private fun openAiSheetsOperationParams(): JsonObject {
+        val operationEnum = JsonArray().apply {
+            SheetsOperation.Operation.entries.forEach { add(it.name.lowercase()) }
+        }
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("operation", obj {
+                    addProperty("type", "string")
+                    add("enum", operationEnum)
+                    addProperty("description", "操作类型,决定后续字段的取值。")
+                })
+                add("spreadsheetId", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,默认使用上下文 googleSheets.defaultSpreadsheetId。")
+                })
+                add("sheetName", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,默认使用 defaultSheetName 或上下文 availableSheets 中的某个值。")
+                })
+                add("range", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "A1 表示法范围,如 \"Sheet1!A1:D10\"。read/write 时使用。")
+                })
+                add("key", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "search/read 时按 key 查找第一列匹配行。")
+                })
+                add("rowNumber", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "1-based 行号,insert_row / update_row / delete_row / clear_row 必填。")
+                })
+                add("rows", obj {
+                    addProperty("type", "array")
+                    add("items", obj {
+                        addProperty("type", "array")
+                        add("items", obj { addProperty("type", "string") })
+                    })
+                    addProperty("description", "二维数组,外层每项是一行数据(单元格字符串数组)。append/insert/update_row 取首元素。")
+                })
+                add("columnIndex", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "1-based 列号,insert_column / update_column / delete_column / clear_column 必填。")
+                })
+                add("columnHeader", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "新列的表头,append_column 建议填写。")
+                })
+                add("columnValues", obj {
+                    addProperty("type", "array")
+                    add("items", obj { addProperty("type", "string") })
+                    addProperty(
+                        "description",
+                        "一维数组,首元素为表头,其余为各行值。insert_column / append_column / update_column / clear_column 必填。"
+                    )
+                })
+                add("freezeRowCount", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", ">= 0,freeze_rows 必填。0 表示取消冻结。")
+                })
+                add("freezeColumnCount", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", ">= 0,freeze_columns 必填。0 表示取消冻结。")
+                })
+            })
+            add("required", JsonArray().apply { add("operation") })
+        }
+    }
+
+    private fun openAiAskUserParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("question", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "问题文本,会直接展示给用户。")
+                })
+                add("options", obj {
+                    addProperty("type", "array")
+                    add("items", obj { addProperty("type", "string") })
+                    addProperty("description", "可选的按钮选项,非空时显示为可点击按钮。")
+                })
+            })
+            add("required", JsonArray().apply { add("question") })
+        }
+    }
+
+    private fun openAiLoadToolDocParams(): JsonObject {
+        val availableTools = JsonArray().apply {
+            add("insert_strings")
+            add("sheets_basic")
+            add("sheets_row_ops")
+            add("sheets_column_ops")
+            add("sheets_freeze")
+            add("sheets_review")
+        }
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("tool", obj {
+                    addProperty("type", "string")
+                    add("enum", availableTools)
+                    addProperty("description", "要加载详细文档的工具名。")
+                })
+            })
+            add("required", JsonArray().apply { add("tool") })
+        }
+    }
+
+    private fun openAiTaskCompleteParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("summary", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "给用户看的最终总结,会直接展示。")
+                })
+                add("status", obj {
+                    addProperty("type", "string")
+                    add("enum", JsonArray().apply {
+                        add("success")
+                        add("partial")
+                        add("failed")
+                    })
+                    addProperty("description", "任务完成状态:success 完全达成 / partial 部分达成 / failed 执行失败。")
+                })
+                add("notes", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,补充说明(例如「用户拒绝」「缺少必要信息」)。")
+                })
+            })
+            add("required", JsonArray().apply {
+                add("summary")
+                add("status")
+            })
+        }
+    }
+
+    // endregion
+
+    private fun obj(builder: JsonObject.() -> Unit): JsonObject = JsonObject().apply(builder)
+}
