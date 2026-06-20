@@ -62,7 +62,7 @@ object AITranslator {
 - 主动发现流程:用户给的 key 不明确时,先用 query_keys 搜索;修改前先 read_string 确认原文;用 update_string 精准修改。看到一段翻译想反查 key,用 find_keys_by_text。
 
 ### Google 表格操作
-- sheets_operation: 详见工具参数(枚举)。列操作需用户确认;修改/删除行前先 search 定位行号;全表检查/修正优先用 check_translations/fix_translations。
+- sheets_operation: 详见工具参数(枚举)。列操作需用户确认;修改/删除行前先 search 定位行号;全表检查/修正优先用 check_translations/fix_translations;填充/清除背景色用 fill_color / clear_color,需提供 range(A1 表示法)与 color(hex 或命名色)。
 - find_rows_by_text: 反查 — 在表格中按文本搜索行(exact/contains/regex,可选 column 限定)。
 
 ### 通用
@@ -229,6 +229,24 @@ object AITranslator {
             示例：{"type":"sheets_operation","operation":"fix_translations"}
 
             重要：当用户要求检查/修正全部翻译时，优先用这两个操作，不要用 read 整表后逐行分析。
+        """.trimIndent(),
+
+        "sheets_color" to """
+            ## sheets_operation 背景色操作（fill_color / clear_color）
+            样式变更，非破坏性，执行前不弹用户确认。仅影响背景色，不动其他格式（字体/对齐/数字格式等）。
+            公共字段：spreadsheetId（可选）、sheetName（可选）。
+
+            ### fill_color
+            在 A1 范围上填充背景色。range 必填，color 必填。
+            字段：
+            - range（必填）：A1 表示法，支持 "Sheet1!A1:D10"、"A1:Z1"、"B2"。sheet 前缀可省略，省略时使用上下文 defaultSheetName。
+            - color（必填）：hex（例 "#FF0000"、"#f0a"，大小写不敏感）或命名色（red/green/blue/yellow/orange/purple/pink/gray/grey/white/black/light_gray/dark_gray/brown/cyan/magenta）。
+            场景：把表头行涂成浅灰、把缺翻译的单元格涂成红色、按 key 行号高亮一行。
+            示例：{"type":"sheets_operation","operation":"fill_color","range":"Sheet1!A1:Z1","color":"light_gray"}
+
+            ### clear_color
+            清除 A1 范围的背景色，恢复透明。range 必填，不需要 color。
+            示例：{"type":"sheets_operation","operation":"clear_color","range":"B2:D10"}
         """.trimIndent()
     )
 
@@ -964,6 +982,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val freezeColumnCount = args.get("freezeColumnCount")?.let {
                     runCatching { it.asInt }.getOrNull()
                 }?.takeIf { it != null && it >= 0 }
+                val color = args.get("color")?.asString?.trim()?.takeIf { it.isNotEmpty() }
                 AiAction.SheetsOperation(
                     operation,
                     spreadsheetId,
@@ -976,7 +995,8 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                     columnHeader,
                     columnValues,
                     freezeRowCount,
-                    freezeColumnCount
+                    freezeColumnCount,
+                    color
                 )
             }
             else -> null

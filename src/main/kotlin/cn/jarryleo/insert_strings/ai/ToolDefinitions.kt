@@ -407,6 +407,13 @@ object ToolDefinitions {
                     addProperty("type", "integer")
                     addProperty("description", ">= 0,freeze_columns 必填。0 表示取消冻结。")
                 })
+                add("color", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "可选,背景色。fill_color 必填。支持 hex(例 #FF0000、#f0a)或命名色(red/green/blue/yellow/orange/purple/pink/gray/grey/white/black/light_gray/dark_gray/brown/cyan/magenta)。"
+                    )
+                })
             })
             add("required", JsonArray().apply { add("operation") })
         }
@@ -438,6 +445,7 @@ object ToolDefinitions {
             add("sheets_column_ops")
             add("sheets_freeze")
             add("sheets_review")
+            add("sheets_color")
         }
         return obj {
             addProperty("type", "object")

@@ -11,11 +11,16 @@ import com.google.api.client.util.store.FileDataStoreFactory
 import com.google.api.services.sheets.v4.Sheets
 import com.google.api.services.sheets.v4.SheetsScopes
 import com.google.api.services.sheets.v4.model.BatchUpdateSpreadsheetRequest
+import com.google.api.services.sheets.v4.model.CellData
+import com.google.api.services.sheets.v4.model.CellFormat
 import com.google.api.services.sheets.v4.model.ClearValuesRequest
+import com.google.api.services.sheets.v4.model.Color
 import com.google.api.services.sheets.v4.model.DeleteDimensionRequest
 import com.google.api.services.sheets.v4.model.DimensionRange
 import com.google.api.services.sheets.v4.model.GridProperties
+import com.google.api.services.sheets.v4.model.GridRange
 import com.google.api.services.sheets.v4.model.InsertDimensionRequest
+import com.google.api.services.sheets.v4.model.RepeatCellRequest
 import com.google.api.services.sheets.v4.model.Request
 import com.google.api.services.sheets.v4.model.SheetProperties
 import com.google.api.services.sheets.v4.model.UpdateSheetPropertiesRequest
@@ -909,6 +914,75 @@ object SheetsManager {
         }
     }
 
+    // ==================== 填充/清除背景色 ====================
+
+    /**
+     * 在 A1 范围上填充背景色。color 支持 hex("#RGB"/"#RRGGBB",大小写不敏感)或命名色
+     * (red/green/blue/yellow/orange/purple/pink/gray/grey/white/black/light_gray/dark_gray/brown/cyan/magenta)。
+     * 仅修改背景色,不动其他格式。range 若不含 sheet 前缀则用 [defaultSheetName]。
+     */
+    fun fillColor(
+        project: Project,
+        spreadsheetId: String,
+        range: String,
+        color: String,
+        defaultSheetName: String? = null
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (range.isBlank()) return Result.failure(IllegalArgumentException("Range is empty."))
+        if (color.isBlank()) return Result.failure(IllegalArgumentException("Color is empty."))
+        val parsedColor = parseColor(color)
+            ?: return Result.failure(IllegalArgumentException("Invalid color '$color'. Use hex like #FF0000 or named (red/green/blue/...)."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val (sheetName, gridRange) = parseA1Range(service, spreadsheetId, range, defaultSheetName)
+                ?: throw IllegalArgumentException("Range '$range' refers to a sheet not found in spreadsheet.")
+            val request = Request().setRepeatCell(
+                RepeatCellRequest()
+                    .setRange(gridRange)
+                    .setCell(
+                        CellData().setUserEnteredFormat(
+                            CellFormat().setBackgroundColor(parsedColor)
+                        )
+                    )
+                    .setFields("userEnteredFormat.backgroundColor")
+            )
+            service.spreadsheets()
+                .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(listOf(request)))
+                .execute()
+            Unit
+        }
+    }
+
+    /**
+     * 清除 A1 范围的背景色,恢复默认(透明)。不影响其他格式。range 若不含 sheet 前缀则用 [defaultSheetName]。
+     */
+    fun clearColor(
+        project: Project,
+        spreadsheetId: String,
+        range: String,
+        defaultSheetName: String? = null
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (range.isBlank()) return Result.failure(IllegalArgumentException("Range is empty."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val (sheetName, gridRange) = parseA1Range(service, spreadsheetId, range, defaultSheetName)
+                ?: throw IllegalArgumentException("Range '$range' refers to a sheet not found in spreadsheet.")
+            // 用空 CellFormat 写入并限定 fields,只清背景色,其他格式保留
+            val request = Request().setRepeatCell(
+                RepeatCellRequest()
+                    .setRange(gridRange)
+                    .setCell(CellData().setUserEnteredFormat(CellFormat()))
+                    .setFields("userEnteredFormat.backgroundColor")
+            )
+            service.spreadsheets()
+                .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(listOf(request)))
+                .execute()
+            Unit
+        }
+    }
+
     // ==================== 列操作 ====================
 
     /**
@@ -1130,4 +1204,134 @@ object SheetsManager {
         }
         return sb.toString()
     }
+
+    /**
+     * 把 A1 表示的范围(支持 "Sheet1!A1:D10" / "A1" / "Sheet1!B2")解析为 (sheetName, GridRange)。
+     * GridRange 端点为半开区间(startIndex 含,endIndex 不含),行/列 0-based。
+     * 若 range 不含 sheet 前缀,且传入了 defaultSheetName,则用 defaultSheetName;否则仅靠 resolveSheetId 匹配。
+     * @return null 表示工作表找不到
+     */
+    private fun parseA1Range(
+        service: Sheets,
+        spreadsheetId: String,
+        range: String,
+        defaultSheetName: String? = null
+    ): Pair<String, GridRange>? {
+        val (rawSheet, a1) = splitSheetAndA1(range)
+        val targetSheet = rawSheet ?: defaultSheetName
+            ?: return null
+        val sheetId = resolveSheetId(service, spreadsheetId, targetSheet)
+            ?: return null
+        val (startRow, startCol, endRow, endCol) = parseA1Cells(a1)
+        val grid = GridRange()
+            .setSheetId(sheetId)
+            .setStartRowIndex(startRow)
+            .setEndRowIndex(endRow)
+            .setStartColumnIndex(startCol)
+            .setEndColumnIndex(endCol)
+        return targetSheet to grid
+    }
+
+    /**
+     * 拆分 "Sheet1!A1:D10" → ("Sheet1", "A1:D10")。sheet 名带单引号包裹时去壳。
+     * 找不到 '!' 时返回 (null, range)。对特殊 sheet 名("'1.0.3.0'!A1")也兼容。
+     */
+    private fun splitSheetAndA1(range: String): Pair<String?, String> {
+        val trimmed = range.trim()
+        val bangIdx = trimmed.indexOf('!')
+        if (bangIdx < 0) return null to trimmed
+        val rawSheet = trimmed.substring(0, bangIdx).trim()
+        val a1 = trimmed.substring(bangIdx + 1).trim()
+        val sheet = rawSheet.trim('\'')
+        return sheet to a1
+    }
+
+    /**
+     * 解析单元格引用字符串(如 "A1", "A1:D10", "B2")为 0-based 半开区间
+     * (startRow, startCol, endRow, endCol)。endRow/endCol 不含(GridRange 语义)。
+     * 单格 "A1" → (0,0,1,1);"A1:D10" → (0,0,10,4);"C5" → (4,2,5,3)。
+     * 起始可省略行号或列号(冒号单侧)时按另一端推断;解析失败则抛 IAE。
+     */
+    private fun parseA1Cells(a1: String): IntArray {
+        val s = a1.replace("$", "").trim()
+        if (s.isEmpty()) throw IllegalArgumentException("Empty A1 cell reference.")
+        val parts = s.split(':')
+        val (startRow, startCol) = parseA1Cell(parts[0])
+        val (endRow, endCol) = when (parts.size) {
+            1 -> startRow + 1 to startCol + 1
+            2 -> {
+                val (eR, eC) = parseA1Cell(parts[1])
+                // 单侧省略时,使用起始端的对应值
+                val resolvedEndRow = if (parts[1].any { it.isDigit() }) eR else startRow
+                val resolvedEndCol = if (parts[1].any { it.isLetter() }) eC else startCol
+                resolvedEndRow + 1 to resolvedEndCol + 1
+            }
+            else -> throw IllegalArgumentException("Invalid A1 range '$a1'.")
+        }
+        return intArrayOf(startRow, startCol, endRow, endCol)
+    }
+
+    /**
+     * 解析单格(如 "A1"、"AB12")为 (rowIndex0Based, colIndex0Based)。
+     */
+    private fun parseA1Cell(ref: String): Pair<Int, Int> {
+        val s = ref.trim()
+        var i = 0
+        var col = 0
+        while (i < s.length && s[i].isLetter()) {
+            col = col * 26 + (s[i].uppercaseChar() - 'A' + 1)
+            i++
+        }
+        if (i == 0 || i == s.length) {
+            throw IllegalArgumentException("Invalid A1 cell reference '$ref'.")
+        }
+        val row = s.substring(i).toInt()
+        if (row < 1) throw IllegalArgumentException("Row must be >= 1 in '$ref'.")
+        return (row - 1) to (col - 1)
+    }
+
+    /**
+     * 把颜色字符串解析为 Google Sheets [Color](R/G/B 0-1 浮点)。
+     * 支持 hex("#RGB"/"#RRGGBB",大小写不敏感)与命名色;不匹配返回 null。
+     */
+    private fun parseColor(raw: String): Color? {
+        val s = raw.trim()
+        if (s.startsWith("#")) {
+            val hex = s.substring(1)
+            if (hex.length != 3 && hex.length != 6) return null
+            if (!hex.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }) return null
+            val full = if (hex.length == 3) hex.map { "$it$it" }.joinToString("") else hex
+            val r = full.substring(0, 2).toInt(16) / 255f
+            val g = full.substring(2, 4).toInt(16) / 255f
+            val b = full.substring(4, 6).toInt(16) / 255f
+            return Color().setRed(r).setGreen(g).setBlue(b)
+        }
+        val named = NAMED_COLORS[s.lowercase()] ?: return null
+        val r = (named shr 16) and 0xFF
+        val g = (named shr 8) and 0xFF
+        val b = named and 0xFF
+        return Color().setRed(r / 255f).setGreen(g / 255f).setBlue(b / 255f)
+    }
+
+    // 常见命名色 RGB
+    private val NAMED_COLORS: Map<String, Int> = mapOf(
+        "red" to 0xFF0000.toInt(),
+        "green" to 0x00FF00,
+        "blue" to 0x0000FF,
+        "yellow" to 0xFFFF00,
+        "orange" to 0xFFA500.toInt(),
+        "purple" to 0x800080,
+        "pink" to 0xFFC0CB.toInt(),
+        "gray" to 0x808080,
+        "grey" to 0x808080,
+        "white" to 0xFFFFFF,
+        "black" to 0x000000,
+        "light_gray" to 0xD3D3D3.toInt(),
+        "light_grey" to 0xD3D3D3.toInt(),
+        "dark_gray" to 0x404040,
+        "dark_grey" to 0x404040,
+        "brown" to 0xA52A2A.toInt(),
+        "cyan" to 0x00FFFF,
+        "magenta" to 0xFF00FF
+    )
 }

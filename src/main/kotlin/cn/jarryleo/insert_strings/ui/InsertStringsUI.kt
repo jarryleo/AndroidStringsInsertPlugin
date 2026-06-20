@@ -836,6 +836,54 @@ class InsertStringsUI(
                     }
                 )
             }
+
+            // ==================== 填充/清除背景色 ====================
+
+            AiAction.SheetsOperation.Operation.FILL_COLOR -> {
+                val range = action.range
+                if (range.isNullOrBlank()) {
+                    return SheetsToolResult("填充颜色", false, "range 为空。")
+                }
+                val color = action.color
+                if (color.isNullOrBlank()) {
+                    return SheetsToolResult("填充颜色", false, "color 为空。")
+                }
+                val result = SheetsManager.fillColor(project, spreadsheetId, range, color, sheetName)
+                result.fold(
+                    onSuccess = {
+                        SwingUtilities.invokeLater { showToast("Filled $range with $color.") }
+                        SheetsToolResult(
+                            "填充颜色",
+                            true,
+                            "已在工作表 '$sheetName' 的范围 $range 填充背景色 $color"
+                        )
+                    },
+                    onFailure = {
+                        SheetsToolResult("填充颜色", false, it.message ?: "Sheets fill color failed.")
+                    }
+                )
+            }
+
+            AiAction.SheetsOperation.Operation.CLEAR_COLOR -> {
+                val range = action.range
+                if (range.isNullOrBlank()) {
+                    return SheetsToolResult("清除颜色", false, "range 为空。")
+                }
+                val result = SheetsManager.clearColor(project, spreadsheetId, range, sheetName)
+                result.fold(
+                    onSuccess = {
+                        SwingUtilities.invokeLater { showToast("Cleared color on $range.") }
+                        SheetsToolResult(
+                            "清除颜色",
+                            true,
+                            "已清除工作表 '$sheetName' 范围 $range 的背景色"
+                        )
+                    },
+                    onFailure = {
+                        SheetsToolResult("清除颜色", false, it.message ?: "Sheets clear color failed.")
+                    }
+                )
+            }
         }
     }
 
@@ -859,6 +907,8 @@ class InsertStringsUI(
             AiAction.SheetsOperation.Operation.FIX_TRANSLATIONS -> "修正全部翻译"
             AiAction.SheetsOperation.Operation.FREEZE_ROWS -> "冻结行"
             AiAction.SheetsOperation.Operation.FREEZE_COLUMNS -> "冻结列"
+            AiAction.SheetsOperation.Operation.FILL_COLOR -> "填充颜色"
+            AiAction.SheetsOperation.Operation.CLEAR_COLOR -> "清除颜色"
         }
     }
 

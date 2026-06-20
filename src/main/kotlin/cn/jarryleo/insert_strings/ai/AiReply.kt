@@ -33,7 +33,8 @@ sealed class AiAction {
         val columnHeader: String?,
         val columnValues: List<String>?,
         val freezeRowCount: Int? = null,
-        val freezeColumnCount: Int? = null
+        val freezeColumnCount: Int? = null,
+        val color: String? = null
     ) : AiAction() {
         enum class Operation {
             READ,
@@ -53,7 +54,9 @@ sealed class AiAction {
             CHECK_TRANSLATIONS,
             FIX_TRANSLATIONS,
             FREEZE_ROWS,
-            FREEZE_COLUMNS
+            FREEZE_COLUMNS,
+            FILL_COLOR,
+            CLEAR_COLOR
         }
     }
 
