@@ -45,6 +45,15 @@ class InsertStringsUI(
         private const val MAX_TOOL_ROUNDS = 3
         // 批量翻译审查时每批的行数。控制单次 AI 调用 token，避免溢出。
         private const val REVIEW_BATCH_SIZE = 80
+        // AI 声称要执行操作却未返回 actions 时，强制其重新给出动作的最大重试次数。
+        private const val MAX_REMEDIATION_ROUNDS = 2
+        // 监督提示：当 AI 只回复文字却未给出可执行 actions 时注入，强制其返回结构化动作。
+        private const val SUPERVISOR_PROMPT =
+            "[系统监督] 检测到你的回复中提到了要执行操作，但本次回复没有包含任何 actions，" +
+                "因此系统并未实际执行任何操作。请直接返回包含正确 actions 的 JSON：" +
+                "把要执行的操作放入 actions 数组。例如删除某 key 所在行需先 search 定位 rowNumber，" +
+                "再 delete_row 传入 rowNumber；可在一次回复中返回多个 actions 完成多步操作。" +
+                "不要只回复文字说明，必须给出 actions。"
     }
 
     private data class SheetsToolResult(
@@ -806,6 +815,50 @@ class InsertStringsUI(
     }
 
     /**
+     * 监督：判断 AI 回复文本是否暗示要执行工具操作（删除/插入/修改等）。
+     * 用于检测「AI 声称要做但未返回 actions」的情况，触发自动纠偏。
+     * 排除明显的拒绝/需配置话术，避免对「无法执行」的回复做无意义重试。
+     */
+    private fun replyImpliesToolIntent(reply: String): Boolean {
+        if (reply.isBlank()) return false
+        val text = reply.lowercase()
+        val refusalMarkers = listOf(
+            "无法", "不能", "请先配置", "请配置", "未配置", "没有配置",
+            "请先在设置", "失败", "error", "出错", "暂不支持", "无法执行",
+            "请先选择", "请提供", "需要你提供"
+        )
+        if (refusalMarkers.any { text.contains(it.lowercase()) }) return false
+        val intentKeywords = listOf(
+            "删除", "删掉", "去掉", "delete",
+            "插入", "新增", "添加", "insert", "add",
+            "修改", "更新", "改成", "改为", "替换", "update",
+            "追加", "append",
+            "清空", "清除", "clear",
+            "读取", "读一下", "read",
+            "搜索", "查找", "search",
+            "检查", "审查", "check",
+            "修正", "修复", "fix",
+            "写入", "write",
+            "列出", "list_sheets", "工作表列表"
+        )
+        return intentKeywords.any { text.contains(it) }
+    }
+
+    /**
+     * 面向用户的工具执行结果摘要（非给 AI 的工具消息格式）。
+     * 当后续 AI 回复为空或异常时，用它兜底展示，保证用户始终知道实际发生了什么。
+     */
+    private fun buildToolResultSummary(results: List<SheetsToolResult>): String {
+        if (results.isEmpty()) return ""
+        return buildString {
+            results.forEachIndexed { index, r ->
+                if (index > 0) appendLine()
+                append("${r.operation}：${if (r.success) "成功" else "失败"} - ${r.message}")
+            }
+        }
+    }
+
+    /**
      * 列结构变更操作的用户确认对话框（EDT 同步）。
      * executeSheetsOperationSync 运行在 pooled thread，故用 invokeAndWait 弹窗。
      */
@@ -991,10 +1044,48 @@ class InsertStringsUI(
         chatSending = true
         val context = buildChatContext()
         ApplicationManager.getApplication().executeOnPooledThread {
-            val reply = AITranslator.chat(chatMessages.toList(), context)
-            SwingUtilities.invokeLater {
-                chatMessages.add(ChatMessage(role = "assistant", content = reply.reply))
-                handleAiActions(reply.actions, 0)
+            try {
+                var reply = AITranslator.chat(chatMessages.toList(), context)
+                // 监督纠偏：AI 声称要执行操作却未返回任何 actions 时，注入监督提示强制其重新给出动作。
+                var remediation = 0
+                while (reply.actions.isEmpty() &&
+                    remediation < MAX_REMEDIATION_ROUNDS &&
+                    replyImpliesToolIntent(reply.reply)
+                ) {
+                    // 构造带监督提示的消息序列传给 AI（不依赖 EDT 时序，避免竞态）
+                    val supervised = chatMessages.toList() + listOf(
+                        ChatMessage(role = "assistant", content = reply.reply),
+                        ChatMessage(role = "tool", content = SUPERVISOR_PROMPT)
+                    )
+                    // 同步在 UI 展示 AI 的「空动作」回复与监督提示，保持对话可读
+                    SwingUtilities.invokeLater {
+                        chatMessages.add(ChatMessage(role = "assistant", content = reply.reply))
+                        chatMessages.add(ChatMessage(role = "tool", content = SUPERVISOR_PROMPT))
+                    }
+                    reply = AITranslator.chat(supervised, context)
+                    remediation++
+                }
+                val finalReply = reply
+                SwingUtilities.invokeLater {
+                    val display = if (finalReply.actions.isEmpty() && remediation > 0) {
+                        finalReply.reply +
+                            "\n\n（系统已提醒 AI 返回操作动作，但 AI 仍未给出可执行的动作，因此未执行任何操作。）"
+                    } else {
+                        finalReply.reply
+                    }
+                    chatMessages.add(ChatMessage(role = "assistant", content = display))
+                    handleAiActions(finalReply.actions, 0)
+                }
+            } catch (e: Exception) {
+                SwingUtilities.invokeLater {
+                    chatMessages.add(
+                        ChatMessage(
+                            role = "assistant",
+                            content = "发送请求时发生异常，操作未完成：${e.message ?: "unknown"}"
+                        )
+                    )
+                    chatSending = false
+                }
             }
         }
     }
@@ -1097,35 +1188,51 @@ class InsertStringsUI(
         }
 
         ApplicationManager.getApplication().executeOnPooledThread {
-            val toolResults = sheetsActions.map { executeSheetsOperationSync(it) }
-
-            // 若全部为终态报告（批量审查/修正），直接展示报告，不再发起后续 AI 调用（省 token）。
-            if (toolResults.isNotEmpty() && toolResults.all { it.terminal }) {
-                val reportText = toolResults.joinToString("\n\n") { it.message }
-                SwingUtilities.invokeLater {
-                    chatMessages.add(ChatMessage(role = "assistant", content = reportText))
-                    chatSending = false
-                }
-                return@executeOnPooledThread
-            }
-
-            val resultMessage = buildToolResultMessage(toolResults)
-
-            var context = ""
             try {
-                SwingUtilities.invokeAndWait {
-                    chatMessages.add(ChatMessage(role = "tool", content = resultMessage))
+                val toolResults = sheetsActions.map { executeSheetsOperationSync(it) }
+
+                // 若全部为终态报告（批量审查/修正），直接展示报告，不再发起后续 AI 调用（省 token）。
+                if (toolResults.isNotEmpty() && toolResults.all { it.terminal }) {
+                    val reportText = toolResults.joinToString("\n\n") { it.message }
+                    SwingUtilities.invokeLater {
+                        chatMessages.add(ChatMessage(role = "assistant", content = reportText))
+                        chatSending = false
+                    }
+                    return@executeOnPooledThread
+                }
+
+                val resultMessage = buildToolResultMessage(toolResults)
+
+                var context = ""
+                try {
+                    SwingUtilities.invokeAndWait {
+                        chatMessages.add(ChatMessage(role = "tool", content = resultMessage))
+                        context = buildChatContext()
+                    }
+                } catch (e: Exception) {
                     context = buildChatContext()
                 }
+
+                val followUp = AITranslator.chat(chatMessages.toList(), context)
+
+                SwingUtilities.invokeLater {
+                    // 结果回报兜底：后续 AI 回复为空时，直接把工具执行结果摘要展示给用户，
+                    // 保证用户始终知道实际执行了什么、成功与否。
+                    val displayReply = followUp.reply.ifBlank { buildToolResultSummary(toolResults) }
+                    chatMessages.add(ChatMessage(role = "assistant", content = displayReply))
+                    handleAiActions(followUp.actions, depth + 1)
+                }
             } catch (e: Exception) {
-                context = buildChatContext()
-            }
-
-            val followUp = AITranslator.chat(chatMessages.toList(), context)
-
-            SwingUtilities.invokeLater {
-                chatMessages.add(ChatMessage(role = "assistant", content = followUp.reply))
-                handleAiActions(followUp.actions, depth + 1)
+                // 异常兜底：pooled 线程任意异常都向用户报错并强制复位 chatSending，避免 UI 永久卡在「...」。
+                SwingUtilities.invokeLater {
+                    chatMessages.add(
+                        ChatMessage(
+                            role = "assistant",
+                            content = "操作执行过程中发生异常，未完成：${e.message ?: "unknown"}"
+                        )
+                    )
+                    chatSending = false
+                }
             }
         }
     }
