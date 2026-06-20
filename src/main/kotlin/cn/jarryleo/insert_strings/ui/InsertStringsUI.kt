@@ -567,7 +567,7 @@ class InsertStringsUI(
             AiAction.SheetsOperation.Operation.WRITE -> {
                 val rowsToWrite = action.rows ?: buildSheetRows()
                 val range = action.range ?: "$sheetName!A1:Z1000"
-                val result = SheetsManager.writeRange(project, spreadsheetId, range, rowsToWrite)
+                val result = SheetsManager.writeRange(project, spreadsheetId, range, rowsToWrite, action.rowTextColors)
                 result.fold(
                     onSuccess = {
                         SwingUtilities.invokeLater { showToast("Wrote to Google Sheets.") }
@@ -585,7 +585,8 @@ class InsertStringsUI(
                     return SheetsToolResult("追加行", false, "rows 为空。")
                 }
                 val row = rowsToAppend.first()
-                val result = SheetsManager.appendRow(project, spreadsheetId, sheetName, row)
+                val rowColors = action.rowTextColors?.firstOrNull()
+                val result = SheetsManager.appendRow(project, spreadsheetId, sheetName, row, rowColors)
                 result.fold(
                     onSuccess = {
                         SwingUtilities.invokeLater { showToast("Appended row to $sheetName.") }
@@ -607,7 +608,8 @@ class InsertStringsUI(
                     return SheetsToolResult("插入行", false, "rows 为空。")
                 }
                 val row = rowsToInsert.first()
-                val result = SheetsManager.insertRow(project, spreadsheetId, sheetName, rowNum, row)
+                val rowColors = action.rowTextColors?.firstOrNull()
+                val result = SheetsManager.insertRow(project, spreadsheetId, sheetName, rowNum, row, rowColors)
                 result.fold(
                     onSuccess = {
                         SwingUtilities.invokeLater { showToast("Inserted row at $rowNum in $sheetName.") }
@@ -629,7 +631,8 @@ class InsertStringsUI(
                     return SheetsToolResult("更新行", false, "rows 为空。")
                 }
                 val row = rowsToUpdate.first()
-                val result = SheetsManager.updateRow(project, spreadsheetId, sheetName, rowNum, row)
+                val rowColors = action.rowTextColors?.firstOrNull()
+                val result = SheetsManager.updateRow(project, spreadsheetId, sheetName, rowNum, row, rowColors)
                 result.fold(
                     onSuccess = {
                         SwingUtilities.invokeLater { showToast("Updated row $rowNum in $sheetName.") }
@@ -689,7 +692,7 @@ class InsertStringsUI(
                 if (!confirmColumnOperation("插入列", "将在工作表 '$sheetName' 第 $colIdx 列插入新列，原该列及之后整体右移。\n列头：${values.first()}\n是否允许？")) {
                     return SheetsToolResult("插入列", false, "用户已取消插入列操作。")
                 }
-                val result = SheetsManager.insertColumn(project, spreadsheetId, sheetName, colIdx, values)
+                val result = SheetsManager.insertColumn(project, spreadsheetId, sheetName, colIdx, values, action.columnTextColors)
                 result.fold(
                     onSuccess = {
                         SwingUtilities.invokeLater { showToast("Inserted column at $colIdx in $sheetName.") }
@@ -707,7 +710,7 @@ class InsertStringsUI(
                 if (!confirmColumnOperation("追加列", "将在工作表 '$sheetName' 末尾追加新列。\n列头：${values.first()}\n是否允许？")) {
                     return SheetsToolResult("追加列", false, "用户已取消追加列操作。")
                 }
-                val result = SheetsManager.appendColumn(project, spreadsheetId, sheetName, values)
+                val result = SheetsManager.appendColumn(project, spreadsheetId, sheetName, values, action.columnTextColors)
                 result.fold(
                     onSuccess = {
                         SwingUtilities.invokeLater { showToast("Appended column to $sheetName.") }
@@ -729,7 +732,7 @@ class InsertStringsUI(
                 if (!confirmColumnOperation("更新列", "将更新工作表 '$sheetName' 第 $colIdx 列内容，共 ${values.size} 个单元格。\n是否允许？")) {
                     return SheetsToolResult("更新列", false, "用户已取消更新列操作。")
                 }
-                val result = SheetsManager.updateColumn(project, spreadsheetId, sheetName, colIdx, values)
+                val result = SheetsManager.updateColumn(project, spreadsheetId, sheetName, colIdx, values, action.columnTextColors)
                 result.fold(
                     onSuccess = {
                         SwingUtilities.invokeLater { showToast("Updated column $colIdx in $sheetName.") }
@@ -884,6 +887,31 @@ class InsertStringsUI(
                     }
                 )
             }
+
+            AiAction.SheetsOperation.Operation.SET_TEXT_COLOR -> {
+                val range = action.range
+                if (range.isNullOrBlank()) {
+                    return SheetsToolResult("设置文字色", false, "range 为空。")
+                }
+                val textColor = action.textColor
+                if (textColor.isNullOrBlank()) {
+                    return SheetsToolResult("设置文字色", false, "textColor 为空。")
+                }
+                val result = SheetsManager.setTextColor(project, spreadsheetId, range, textColor, sheetName)
+                result.fold(
+                    onSuccess = {
+                        SwingUtilities.invokeLater { showToast("Set text color $textColor on $range.") }
+                        SheetsToolResult(
+                            "设置文字色",
+                            true,
+                            "已将工作表 '$sheetName' 范围 $range 的文字设为 $textColor"
+                        )
+                    },
+                    onFailure = {
+                        SheetsToolResult("设置文字色", false, it.message ?: "Sheets set text color failed.")
+                    }
+                )
+            }
         }
     }
 
@@ -909,6 +937,7 @@ class InsertStringsUI(
             AiAction.SheetsOperation.Operation.FREEZE_COLUMNS -> "冻结列"
             AiAction.SheetsOperation.Operation.FILL_COLOR -> "填充颜色"
             AiAction.SheetsOperation.Operation.CLEAR_COLOR -> "清除颜色"
+            AiAction.SheetsOperation.Operation.SET_TEXT_COLOR -> "设置文字色"
         }
     }
 

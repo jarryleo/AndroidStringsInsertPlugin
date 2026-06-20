@@ -23,6 +23,7 @@ import com.google.api.services.sheets.v4.model.InsertDimensionRequest
 import com.google.api.services.sheets.v4.model.RepeatCellRequest
 import com.google.api.services.sheets.v4.model.Request
 import com.google.api.services.sheets.v4.model.SheetProperties
+import com.google.api.services.sheets.v4.model.TextFormat
 import com.google.api.services.sheets.v4.model.UpdateSheetPropertiesRequest
 import com.google.api.services.sheets.v4.model.ValueRange
 import com.intellij.ide.BrowserUtil
@@ -430,7 +431,8 @@ object SheetsManager {
         project: Project,
         spreadsheetId: String,
         range: String,
-        values: List<List<String>>
+        values: List<List<String>>,
+        rowTextColors: List<List<String?>>? = null
     ): Result<Unit> {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         if (values.isEmpty()) return Result.failure(IllegalArgumentException("No values to write."))
@@ -441,6 +443,16 @@ object SheetsManager {
                 .update(spreadsheetId, range, body)
                 .setValueInputOption("USER_ENTERED")
                 .execute()
+            if (!rowTextColors.isNullOrEmpty()) {
+                val (_, grid) = parseA1Range(service, spreadsheetId, range)
+                    ?: throw IllegalArgumentException("Range '$range' refers to a sheet not found in spreadsheet.")
+                val cells = matrixColorsToCells(
+                    baseRow0 = grid.startRowIndex ?: 0,
+                    baseCol0 = grid.startColumnIndex ?: 0,
+                    matrix = rowTextColors
+                )
+                applyTextColors(service, spreadsheetId, grid.sheetId ?: 0, cells).getOrThrow()
+            }
         }
     }
 
@@ -677,7 +689,8 @@ object SheetsManager {
         spreadsheetId: String,
         sheetName: String,
         rowNumber: Int,
-        values: List<String>
+        values: List<String>,
+        rowTextColors: List<String?>? = null
     ): Result<Unit> {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
@@ -693,6 +706,17 @@ object SheetsManager {
                 .update(spreadsheetId, range, body)
                 .setValueInputOption("USER_ENTERED")
                 .execute()
+            if (!rowTextColors.isNullOrEmpty()) {
+                val sheetId = resolveSheetId(service, spreadsheetId, safeSheet)
+                    ?: throw IllegalStateException("Sheet '$safeSheet' not found in spreadsheet.")
+                val cells = linearColorsToCells(
+                    baseRow0 = rowNumber - 1,
+                    baseCol0 = 0,
+                    colors = rowTextColors,
+                    isRow = true
+                )
+                applyTextColors(service, spreadsheetId, sheetId, cells).getOrThrow()
+            }
         }
     }
 
@@ -705,7 +729,8 @@ object SheetsManager {
         spreadsheetId: String,
         sheetName: String,
         rowNumber: Int,
-        values: List<String>
+        values: List<String>,
+        rowTextColors: List<String?>? = null
     ): Result<Unit> {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
@@ -741,6 +766,15 @@ object SheetsManager {
                 .update(spreadsheetId, range, body)
                 .setValueInputOption("USER_ENTERED")
                 .execute()
+            if (!rowTextColors.isNullOrEmpty()) {
+                val cells = linearColorsToCells(
+                    baseRow0 = rowNumber - 1,
+                    baseCol0 = 0,
+                    colors = rowTextColors,
+                    isRow = true
+                )
+                applyTextColors(service, spreadsheetId, sheetId, cells).getOrThrow()
+            }
         }
     }
 
@@ -751,7 +785,8 @@ object SheetsManager {
         project: Project,
         spreadsheetId: String,
         sheetName: String,
-        values: List<String>
+        values: List<String>,
+        rowTextColors: List<String?>? = null
     ): Result<Unit> {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
@@ -760,11 +795,24 @@ object SheetsManager {
             val service = createSheetsService(project)
             val safeSheet = sanitizeSheetName(sheetName)
             val body = ValueRange().setValues(listOf(values))
-            service.spreadsheets().values()
+            val response = service.spreadsheets().values()
                 .append(spreadsheetId, "$safeSheet!A1", body)
                 .setValueInputOption("USER_ENTERED")
                 .setInsertDataOption("INSERT_ROWS")
                 .execute()
+            if (!rowTextColors.isNullOrEmpty()) {
+                val updatedRange = response.updates?.updatedRange
+                    ?: throw IllegalStateException("Append response missing updatedRange.")
+                val (sheetNameResolved, grid) = parseA1Range(service, spreadsheetId, updatedRange, safeSheet)
+                    ?: throw IllegalStateException("Cannot parse appended range '$updatedRange'.")
+                val cells = linearColorsToCells(
+                    baseRow0 = grid.startRowIndex ?: 0,
+                    baseCol0 = grid.startColumnIndex ?: 0,
+                    colors = rowTextColors,
+                    isRow = true
+                )
+                applyTextColors(service, spreadsheetId, grid.sheetId ?: 0, cells).getOrThrow()
+            }
         }
     }
 
@@ -983,6 +1031,45 @@ object SheetsManager {
         }
     }
 
+    /**
+     * 在 A1 范围上设置文字色(只改 userEnteredFormat.textFormat.foregroundColor,不动其他格式)。
+     * range 若不含 sheet 前缀则用 [defaultSheetName]。覆盖单格、行、列或任意矩形范围。
+     */
+    fun setTextColor(
+        project: Project,
+        spreadsheetId: String,
+        range: String,
+        textColor: String,
+        defaultSheetName: String? = null
+    ): Result<Unit> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (range.isBlank()) return Result.failure(IllegalArgumentException("Range is empty."))
+        if (textColor.isBlank()) return Result.failure(IllegalArgumentException("Text color is empty."))
+        val parsedColor = parseColor(textColor)
+            ?: return Result.failure(IllegalArgumentException("Invalid textColor '$textColor'. Use hex like #FF0000 or named (red/green/blue/...)."))
+        return runCatching {
+            val service = createSheetsService(project)
+            val (sheetName, gridRange) = parseA1Range(service, spreadsheetId, range, defaultSheetName)
+                ?: throw IllegalArgumentException("Range '$range' refers to a sheet not found in spreadsheet.")
+            val request = Request().setRepeatCell(
+                RepeatCellRequest()
+                    .setRange(gridRange)
+                    .setCell(
+                        CellData().setUserEnteredFormat(
+                            CellFormat().setTextFormat(
+                                TextFormat().setForegroundColor(parsedColor)
+                            )
+                        )
+                    )
+                    .setFields("userEnteredFormat.textFormat.foregroundColor")
+            )
+            service.spreadsheets()
+                .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(listOf(request)))
+                .execute()
+            Unit
+        }
+    }
+
     // ==================== 列操作 ====================
 
     /**
@@ -994,7 +1081,8 @@ object SheetsManager {
         spreadsheetId: String,
         sheetName: String,
         columnIndex: Int,
-        values: List<String>
+        values: List<String>,
+        columnTextColors: List<String?>? = null
     ): Result<Unit> {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
@@ -1022,6 +1110,15 @@ object SheetsManager {
                 .execute()
 
             writeColumnValues(service, spreadsheetId, safeSheet, columnIndex, values)
+            if (!columnTextColors.isNullOrEmpty()) {
+                val cells = linearColorsToCells(
+                    baseRow0 = 0,
+                    baseCol0 = columnIndex - 1,
+                    colors = columnTextColors,
+                    isRow = false
+                )
+                applyTextColors(service, spreadsheetId, sheetId, cells).getOrThrow()
+            }
         }
     }
 
@@ -1032,7 +1129,8 @@ object SheetsManager {
         project: Project,
         spreadsheetId: String,
         sheetName: String,
-        values: List<String>
+        values: List<String>,
+        columnTextColors: List<String?>? = null
     ): Result<Unit> {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
@@ -1063,6 +1161,15 @@ object SheetsManager {
                 .execute()
 
             writeColumnValues(service, spreadsheetId, safeSheet, newColumnIndex, values)
+            if (!columnTextColors.isNullOrEmpty()) {
+                val cells = linearColorsToCells(
+                    baseRow0 = 0,
+                    baseCol0 = newColumnIndex - 1,
+                    colors = columnTextColors,
+                    isRow = false
+                )
+                applyTextColors(service, spreadsheetId, sheetId, cells).getOrThrow()
+            }
         }
     }
 
@@ -1132,7 +1239,8 @@ object SheetsManager {
         spreadsheetId: String,
         sheetName: String,
         columnIndex: Int,
-        values: List<String>
+        values: List<String>,
+        columnTextColors: List<String?>? = null
     ): Result<Unit> {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
@@ -1142,6 +1250,17 @@ object SheetsManager {
             val service = createSheetsService(project)
             val safeSheet = sanitizeSheetName(sheetName)
             writeColumnValues(service, spreadsheetId, safeSheet, columnIndex, values)
+            if (!columnTextColors.isNullOrEmpty()) {
+                val sheetId = resolveSheetId(service, spreadsheetId, safeSheet)
+                    ?: throw IllegalStateException("Sheet '$safeSheet' not found in spreadsheet.")
+                val cells = linearColorsToCells(
+                    baseRow0 = 0,
+                    baseCol0 = columnIndex - 1,
+                    colors = columnTextColors,
+                    isRow = false
+                )
+                applyTextColors(service, spreadsheetId, sheetId, cells).getOrThrow()
+            }
         }
     }
 
@@ -1230,6 +1349,88 @@ object SheetsManager {
             .setStartColumnIndex(startCol)
             .setEndColumnIndex(endCol)
         return targetSheet to grid
+    }
+
+    /**
+     * 逐格上色:每个三元组为 (row0, col0, color),其中坐标是 0-based 半开区间的起点。
+     * 所有 cell 通过一次 batchUpdate 提交,每格一个 RepeatCellRequest 限定 fields=textFormat.foregroundColor。
+     * 颜色无效立刻返回 Failure,不再继续。
+     */
+    private fun applyTextColors(
+        service: Sheets,
+        spreadsheetId: String,
+        sheetId: Int,
+        cells: List<Triple<Int, Int, String>>
+    ): Result<Unit> {
+        val requests = mutableListOf<Request>()
+        for ((row0, col0, color) in cells) {
+            val parsed = parseColor(color)
+                ?: return Result.failure(IllegalArgumentException("Invalid color '$color' at row $row0 col $col0."))
+            val grid = GridRange()
+                .setSheetId(sheetId)
+                .setStartRowIndex(row0)
+                .setEndRowIndex(row0 + 1)
+                .setStartColumnIndex(col0)
+                .setEndColumnIndex(col0 + 1)
+            requests.add(
+                Request().setRepeatCell(
+                    RepeatCellRequest()
+                        .setRange(grid)
+                        .setCell(
+                            CellData().setUserEnteredFormat(
+                                CellFormat().setTextFormat(
+                                    TextFormat().setForegroundColor(parsed)
+                                )
+                            )
+                        )
+                        .setFields("userEnteredFormat.textFormat.foregroundColor")
+                )
+            )
+        }
+        if (requests.isEmpty()) return Result.success(Unit)
+        return runCatching {
+            service.spreadsheets()
+                .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(requests))
+                .execute()
+            Unit
+        }
+    }
+
+    /**
+     * 把行/列 op 的 1D 颜色列表展开为逐格三元组。
+     * 写操作完成后调用,baseRow0/baseCol0 是写入区域的 0-based 起点。
+     */
+    private fun linearColorsToCells(
+        baseRow0: Int,
+        baseCol0: Int,
+        colors: List<String?>,
+        isRow: Boolean
+    ): List<Triple<Int, Int, String>> {
+        val out = ArrayList<Triple<Int, Int, String>>(colors.size)
+        for ((idx, color) in colors.withIndex()) {
+            if (color.isNullOrBlank()) continue
+            val (r, c) = if (isRow) baseRow0 to (baseCol0 + idx) else (baseRow0 + idx) to baseCol0
+            out.add(Triple(r, c, color))
+        }
+        return out
+    }
+
+    /**
+     * 把 2D 颜色矩阵展开为逐格三元组(用于 write 操作的 rowTextColors)。
+     */
+    private fun matrixColorsToCells(
+        baseRow0: Int,
+        baseCol0: Int,
+        matrix: List<List<String?>>
+    ): List<Triple<Int, Int, String>> {
+        val out = ArrayList<Triple<Int, Int, String>>()
+        for ((r, row) in matrix.withIndex()) {
+            for ((c, color) in row.withIndex()) {
+                if (color.isNullOrBlank()) continue
+                out.add(Triple(baseRow0 + r, baseCol0 + c, color))
+            }
+        }
+        return out
     }
 
     /**

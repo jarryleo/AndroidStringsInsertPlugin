@@ -62,7 +62,7 @@ object AITranslator {
 - 主动发现流程:用户给的 key 不明确时,先用 query_keys 搜索;修改前先 read_string 确认原文;用 update_string 精准修改。看到一段翻译想反查 key,用 find_keys_by_text。
 
 ### Google 表格操作
-- sheets_operation: 详见工具参数(枚举)。列操作需用户确认;修改/删除行前先 search 定位行号;全表检查/修正优先用 check_translations/fix_translations;填充/清除背景色用 fill_color / clear_color,需提供 range(A1 表示法)与 color(hex 或命名色)。
+- sheets_operation: 详见工具参数(枚举)。列操作需用户确认;修改/删除行前先 search 定位行号;全表检查/修正优先用 check_translations/fix_translations;填充/清除背景色用 fill_color / clear_color,需提供 range(A1 表示法)与 color(hex 或命名色);设置/批量改文字色用 set_text_color,或在写值时随 rows/columnValues 并列传 rowTextColors/columnTextColors 逐格上色。
 - find_rows_by_text: 反查 — 在表格中按文本搜索行(exact/contains/regex,可选 column 限定)。
 
 ### 通用
@@ -247,6 +247,23 @@ object AITranslator {
             ### clear_color
             清除 A1 范围的背景色，恢复透明。range 必填，不需要 color。
             示例：{"type":"sheets_operation","operation":"clear_color","range":"B2:D10"}
+
+            ### set_text_color
+            设置 A1 范围上已有单元格的文字色，不改变内容。range 与 textColor 都必填。
+            字段：
+            - range（必填）：A1 表示法，传 "B2" 改单格，传 "A1:Z1" 改整行，传 "B1:B100" 改整列，传 "A1:D10" 改矩形。
+            - textColor（必填）：颜色字符串（同 fill_color 的 color 格式）。
+            场景：把某行标题涂成品牌色、把缺翻译的单元格文字涂红警示、整列文字加色便于阅读。
+            示例：{"type":"sheets_operation","operation":"set_text_color","range":"A1:Z1","textColor":"#0F766E"}
+
+            ## 写值时并行上色（per-cell）
+            任意写值类操作（write / append_row / insert_row / update_row / insert_column / append_column / update_column）可同时传颜色参数，颜色只对刚写入的单元格生效，不会影响同范围其他单元格。
+            颜色格式：hex（#RGB / #RRGGBB，大小写不敏感）或命名色（red/green/blue/yellow/orange/purple/pink/gray/grey/white/black/light_gray/dark_gray/brown/cyan/magenta）。
+            - rowTextColors：与 rows 同形（二维数组，null 元素 = 该格不上色）。例：write/update_row/insert_row/append_row 时与 rows 对齐。
+            - columnTextColors：与 columnValues 同形（一维数组，null 元素 = 该格不上色）。例：update_column/insert_column/append_column 时与 columnValues 对齐。
+            示例 1（行写入+按格上色）：{"operation":"update_row","rowNumber":5,"rows":[["a","b","c"]],"rowTextColors":[["#FF0000",null,"#00FF00"]]}
+            示例 2（列写入+按行上色）：{"operation":"update_column","columnIndex":3,"columnValues":["x","y","z"],"columnTextColors":[null,"#00FF00","#0000FF"]}
+            示例 3（write 范围+逐格上色）：{"operation":"write","range":"A1:C2","rows":[["a","b","c"],["d","e","f"]],"rowTextColors":[["#FF0000",null,null],[null,"#00FF00",null]]}
         """.trimIndent()
     )
 
@@ -864,6 +881,40 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
     }
 
     /**
+     * 把 rowTextColors 的 JSON 数组解析为 List<List<String?>>。
+     * 外层每项是一行,内层每项是单格颜色(null 表示不上色)。允许 null 内层项。
+     */
+    private fun parseRowColorMatrix(arr: com.google.gson.JsonArray): List<List<String?>>? {
+        if (arr.isEmpty()) return null
+        return arr.map { rowElement ->
+            if (rowElement.isJsonNull) emptyList()
+            else if (!rowElement.isJsonArray) emptyList()
+            else rowElement.asJsonArray.map { cellElement ->
+                when {
+                    cellElement.isJsonNull -> null
+                    cellElement.isJsonPrimitive -> cellElement.asString.trim().takeIf { it.isNotEmpty() }
+                    else -> null
+                }
+            }
+        }
+    }
+
+    /**
+     * 把 columnTextColors 的 JSON 数组解析为 List<String?>。
+     * 长度需与 columnValues 保持一致,由调用方在 SheetsManager 写入时按位置对应。
+     */
+    private fun parseColumnColorList(arr: com.google.gson.JsonArray): List<String?>? {
+        if (arr.isEmpty()) return null
+        return arr.map { el ->
+            when {
+                el.isJsonNull -> null
+                el.isJsonPrimitive -> el.asString.trim().takeIf { it.isNotEmpty() }
+                else -> null
+            }
+        }
+    }
+
+    /**
      * 把单个 tool call 转换为 [AiAction]。
      * 解析失败时返回 null,由调用方决定如何兜底(通常在 reply 中提示用户)。
      */
@@ -983,6 +1034,9 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                     runCatching { it.asInt }.getOrNull()
                 }?.takeIf { it != null && it >= 0 }
                 val color = args.get("color")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val textColor = args.get("textColor")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val rowTextColors = args.getAsJsonArray("rowTextColors")?.let { parseRowColorMatrix(it) }
+                val columnTextColors = args.getAsJsonArray("columnTextColors")?.let { parseColumnColorList(it) }
                 AiAction.SheetsOperation(
                     operation,
                     spreadsheetId,
@@ -996,7 +1050,10 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                     columnValues,
                     freezeRowCount,
                     freezeColumnCount,
-                    color
+                    color,
+                    textColor,
+                    rowTextColors,
+                    columnTextColors
                 )
             }
             else -> null

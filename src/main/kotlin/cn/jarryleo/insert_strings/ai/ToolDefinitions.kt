@@ -414,6 +414,41 @@ object ToolDefinitions {
                         "可选,背景色。fill_color 必填。支持 hex(例 #FF0000、#f0a)或命名色(red/green/blue/yellow/orange/purple/pink/gray/grey/white/black/light_gray/dark_gray/brown/cyan/magenta)。"
                     )
                 })
+                add("textColor", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "可选,文字色。set_text_color 必填。颜色格式同 color。"
+                    )
+                })
+                add("rowTextColors", obj {
+                    addProperty("type", "array")
+                    add("items", obj {
+                        addProperty("type", "array")
+                        add("items", obj {
+                            addProperty(
+                                "type",
+                                "string"
+                            )
+                            addProperty("description", "颜色字符串,或 null 表示该格不上色。")
+                        })
+                    })
+                    addProperty(
+                        "description",
+                        "可选,与 rows 同形(行操作为 [[c1,c2,...]],write 为 [[..],[..]])的二维数组。null 元素表示该格不上色。仅对当前写入的单元格生效。"
+                    )
+                })
+                add("columnTextColors", obj {
+                    addProperty("type", "array")
+                    add("items", obj {
+                        addProperty("type", "string")
+                        addProperty("description", "颜色字符串,或 null 表示该格不上色。")
+                    })
+                    addProperty(
+                        "description",
+                        "可选,与 columnValues 同形的一维数组,按行顺序逐个对应。null 元素表示该格不上色。"
+                    )
+                })
             })
             add("required", JsonArray().apply { add("operation") })
         }
