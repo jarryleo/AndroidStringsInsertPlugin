@@ -1019,8 +1019,33 @@ class InsertStringsUI(
             } else {
                 review.fixes.forEach { fix ->
                     if (fix.values.isEmpty()) return@forEach
+                    val expectedCols = header.size
+                    val adjustedValues: MutableList<String> = when {
+                        fix.values.size == expectedCols -> fix.values.toMutableList()
+                        fix.values.size == expectedCols + 1 -> {
+                            issues.add("行${fix.row}：AI 返回列数比表头多1，已自动去除首元素（疑似行号误入 values）")
+                            fix.values.drop(1).toMutableList()
+                        }
+                        fix.values.size > expectedCols + 1 -> {
+                            issues.add("行${fix.row}：AI 返回列数过多(${fix.values.size})，已截断为表头列数($expectedCols)")
+                            fix.values.take(expectedCols).toMutableList()
+                        }
+                        else -> {
+                            issues.add("行${fix.row}：AI 返回列数不足(${fix.values.size})，已补空至表头列数($expectedCols)")
+                            (fix.values + List(expectedCols - fix.values.size) { "" }).toMutableList()
+                        }
+                    }
+                    // 确保 key 列(第一列)与原值一致，AI 不应修改 key
+                    val batchIdx = fix.row - startRowNumber
+                    if (batchIdx in batch.indices) {
+                        val originalKey = batch[batchIdx].firstOrNull().orEmpty()
+                        if (originalKey.isNotBlank() && adjustedValues.isNotEmpty() && adjustedValues[0] != originalKey) {
+                            issues.add("行${fix.row}：AI 修改了 key 列，已恢复原值「$originalKey」")
+                            adjustedValues[0] = originalKey
+                        }
+                    }
                     val updateResult = SheetsManager.updateRow(
-                        project, spreadsheetId, sheetName, fix.row, fix.values
+                        project, spreadsheetId, sheetName, fix.row, adjustedValues
                     )
                     if (updateResult.isSuccess) fixApplied++ else fixFailed++
                 }
