@@ -76,7 +76,7 @@ object AITranslator {
 3. 收到工具结果后,如果目标尚未达成,必须继续调用工具推进。
 4. 区分 insert_strings 与 update_string:新增/全量覆盖用 insert_strings,部分语言修改用 update_string。
 5. 修改前若不确定当前翻译,先 read_string。
-6. module 必须是上下文 modules 中的 moduleName;若上下文有 currentModule 则默认用它。
+6. module 必须是 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName);若上下文有 currentModule 则默认用它。
 7. 【重要】同一 AI 回合内的所有 insert_strings / update_string 写入动作必须在同一模块:
    - 全部省略 module 参数(系统用 currentModule)
    - 或全部显式指定同一个 module
@@ -98,7 +98,7 @@ object AITranslator {
             ## insert_strings 详细用法
             向 Android strings.xml 插入或修改翻译字符串。
             字段：
-            - module（可选）：目标模块名，必须是上下文 modules 中的 moduleName。省略时用 currentModule。
+            - module（可选）：目标 Android 模块名，取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时用 currentModule.moduleName。
             - name（必填）：字符串 key，snake_case。
             - translations（必填）：键为语言目录名（如 values、values-zh-rCN、values-fr），值为对应翻译文本。
             规则：

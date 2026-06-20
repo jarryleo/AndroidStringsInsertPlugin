@@ -247,7 +247,8 @@ object StringsService {
     private fun parseKeysFromFile(file: VirtualFile): List<String> {
         val document = FileDocumentManager.getInstance().getDocument(file) ?: return emptyList()
         val xml = document.text
-        val regex = """<string\s+name\s*=\s*(['"])(.*?)\1""".toRegex()
+        // 用 <string\s 排除 <string-array>/<plurals>;用 [^>]*\bname 允许 name 前有其它属性
+        val regex = """<string\s[^>]*\bname\s*=\s*(['"])(.*?)\1""".toRegex()
         return regex.findAll(xml).map { it.groupValues[2] }
             .filter { it.isNotEmpty() }
             .toList()
@@ -260,8 +261,8 @@ object StringsService {
     private fun parseStringEntriesFromFile(file: VirtualFile): List<Pair<String, String>> {
         val document = FileDocumentManager.getInstance().getDocument(file) ?: return emptyList()
         val xml = document.text
-        // 一次匹配同时拿到 name 与 inner text(非贪婪)
-        val regex = """<string\s+name\s*=\s*(['"])(.*?)\1\s*>([\s\S]*?)</string>""".toRegex()
+        // 一次匹配同时拿到 name 与 inner text(非贪婪);[^>]* 允许 name 前有其它属性
+        val regex = """<string\s[^>]*\bname\s*=\s*(['"])(.*?)\1\s*>([\s\S]*?)</string>""".toRegex()
         return regex.findAll(xml).map { m ->
             val key = m.groupValues[2]
             val text = m.groupValues[3].trim()

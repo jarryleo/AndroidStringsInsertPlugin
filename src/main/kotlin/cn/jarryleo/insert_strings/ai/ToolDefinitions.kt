@@ -159,7 +159,7 @@ object ToolDefinitions {
                     addProperty("type", "string")
                     addProperty(
                         "description",
-                        "目标模块名,必须是上下文 modules 中的 moduleName。省略时使用 currentModule。"
+                        "目标 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时使用 currentModule.moduleName。"
                     )
                 })
                 add("name", obj {
@@ -188,7 +188,7 @@ object ToolDefinitions {
             add("properties", obj {
                 add("module", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,目标模块名,必须是上下文 modules 中的 moduleName。省略时用 currentModule。")
+                    addProperty("description", "可选,目标 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时用 currentModule.moduleName。")
                 })
                 add("pattern", obj {
                     addProperty("type", "string")
@@ -216,7 +216,7 @@ object ToolDefinitions {
             add("properties", obj {
                 add("module", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,目标模块名。省略时用 currentModule。")
+                    addProperty("description", "可选,目标 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时用 currentModule.moduleName。")
                 })
                 add("name", obj {
                     addProperty("type", "string")
@@ -233,7 +233,7 @@ object ToolDefinitions {
             add("properties", obj {
                 add("module", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,目标模块名。省略时用 currentModule。")
+                    addProperty("description", "可选,目标 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时用 currentModule.moduleName。")
                 })
                 add("name", obj {
                     addProperty("type", "string")
@@ -270,7 +270,7 @@ object ToolDefinitions {
                 })
                 add("module", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,限定模块名。省略时搜索项目中所有模块。")
+                    addProperty("description", "可选,限定 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时搜索项目中所有模块。")
                 })
                 add("language", obj {
                     addProperty("type", "string")

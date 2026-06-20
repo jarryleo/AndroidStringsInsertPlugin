@@ -1961,7 +1961,10 @@ class InsertStringsUI(
         val availableSheetNames = sheetsAvailableSheets.map { it.title }.takeIf { it.isNotEmpty() }
 
         val root = JsonObject().apply {
-            addProperty("projectName", contextInfo.projectName)
+            add("androidProject", JsonObject().apply {
+                addProperty("name", contextInfo.projectName)
+                addProperty("note", "Android 工程名,仅用于展示。module 参数必须用 modules[].moduleName,不要传这个 name。")
+            })
             add("currentModule", contextInfo.currentModule?.let { moduleToJson(it) })
             add("modules", JsonArray().apply {
                 contextInfo.modules.forEach { add(moduleToJson(it)) }
