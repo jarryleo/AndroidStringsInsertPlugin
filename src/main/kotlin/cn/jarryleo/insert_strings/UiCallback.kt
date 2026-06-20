@@ -1,7 +1,7 @@
 package cn.jarryleo.insert_strings
 
-import cn.jarryleo.insert_strings.xml.StringsInfo
+import cn.jarryleo.insert_strings.xml.KeyedStringsInfo
 
 fun interface UiCallback {
-    fun updateUI(nodeName: String, stringsList: List<StringsInfo>?)
+    fun updateUI(entries: List<KeyedStringsInfo>)
 }

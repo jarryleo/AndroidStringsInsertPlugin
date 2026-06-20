@@ -21,6 +21,7 @@ import cn.jarryleo.insert_strings.ai.ReviewResult
 import cn.jarryleo.insert_strings.sheets.SheetsManager
 import cn.jarryleo.insert_strings.sheets.SheetsSettingsService
 import cn.jarryleo.insert_strings.xml.ContextManager
+import cn.jarryleo.insert_strings.xml.KeyedStringsInfo
 import cn.jarryleo.insert_strings.xml.ModuleInfo
 import cn.jarryleo.insert_strings.xml.StringsInfo
 import com.google.gson.JsonArray
@@ -30,8 +31,6 @@ import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.wm.ToolWindow
-import org.jetbrains.annotations.NotNull
-import org.jetbrains.annotations.Nullable
 import javax.swing.JComponent
 import javax.swing.SwingUtilities
 import javax.swing.Timer
@@ -62,6 +61,8 @@ class InsertStringsUI(
 
     private var stringName by mutableStateOf("")
     private val rows = mutableStateListOf<StringRow>()
+    private val keyEntries = mutableStateListOf<KeyedStringsInfo>()
+    private var selectedKeyIndex by mutableStateOf(0)
     private var showSettings by mutableStateOf(false)
     private var aiUrl by mutableStateOf("")
     private var aiApiKey by mutableStateOf("")
@@ -91,6 +92,8 @@ class InsertStringsUI(
                 InsertStringsContent(
                     stringName = stringName,
                     rows = rows,
+                    keys = keyEntries.map { it.key },
+                    selectedKeyIndex = selectedKeyIndex,
                     onStringNameChange = { stringName = it },
                     onTextChange = ::updateRowText,
                     onClear = { row -> updateRowText(row, "") },
@@ -98,6 +101,7 @@ class InsertStringsUI(
                     onCopy = ::copy,
                     onPaste = ::paste,
                     onInsert = ::insert,
+                    onSelectKey = ::selectKey,
                     toastMessage = toastMessage,
                     showSettings = showSettings,
                     showChat = showChat,
@@ -155,8 +159,9 @@ class InsertStringsUI(
     fun getRootPanel(): JComponent = rootPanel
 
     private fun copy() {
+        saveCurrentEdits()
         insertStringsManager.copy()
-        showToast("Copied")
+        showToast("Copied ${keyEntries.size} key(s)")
     }
 
     private fun paste() {
@@ -188,21 +193,61 @@ class InsertStringsUI(
             return
         }
 
-        if (stringName.isEmpty()) {
+        saveCurrentEdits()
+        if (keyEntries.isEmpty()) {
             Messages.showMessageDialog(
-                "Name can't be empty!",
+                "No key to insert!",
                 "Error",
                 Messages.getInformationIcon()
             )
             return
         }
 
+        val translationsPerKey = keyEntries.associate { entry ->
+            entry.key to entry.stringsInfoList.associate { it.language to it.text }
+        }
         insertStringsManager.insert(
             project = project,
-            stringName = stringName,
-            stringsInfoList = rows.associate { it.language to it.text }
+            translationsPerKey = translationsPerKey
         )
-        showToast("Inserted")
+        showToast("Inserted ${keyEntries.size} key(s)")
+    }
+
+    private fun selectKey(index: Int) {
+        if (index == selectedKeyIndex) return
+        if (index !in keyEntries.indices) return
+        saveCurrentEdits()
+        selectedKeyIndex = index
+        updateRowsForSelectedKey()
+    }
+
+    private fun saveCurrentEdits() {
+        if (selectedKeyIndex !in keyEntries.indices) return
+        val entry = keyEntries[selectedKeyIndex]
+        val updatedTexts = rows.associate { it.language to it.text }
+        val updatedInfoList = entry.stringsInfoList.map { info ->
+            if (updatedTexts.containsKey(info.language)) {
+                StringsInfo(info.stringsFile, info.language, info.key, updatedTexts[info.language] ?: "")
+            } else {
+                info
+            }
+        }
+        keyEntries[selectedKeyIndex] = KeyedStringsInfo(
+            key = stringName,
+            anchorNodeName = entry.anchorNodeName,
+            stringsInfoList = updatedInfoList
+        )
+    }
+
+    private fun updateRowsForSelectedKey() {
+        val entry = keyEntries.getOrNull(selectedKeyIndex) ?: return
+        stringName = entry.key
+        val seen = mutableSetOf<String>()
+        val newRows = entry.stringsInfoList
+            .filter { it.language.isNotEmpty() && seen.add(it.language) }
+            .map { StringRow(language = it.language, text = it.text) }
+        rows.clear()
+        rows.addAll(newRows)
     }
 
     private fun updateRowText(rowIndex: Int, text: String) {
@@ -212,15 +257,40 @@ class InsertStringsUI(
 
     private fun translateRow(rowIndex: Int) {
         if (rowIndex !in rows.indices) return
-        val sourceText = rows.firstOrNull { it.text.isNotEmpty() }?.text.orEmpty()
-        val targetLanguage = rows[rowIndex].language.let {
+        saveCurrentEdits()
+        val targetLangRaw = rows[rowIndex].language
+        val targetLanguage = targetLangRaw.let {
             if (it.equals("values", ignoreCase = true)) "values-en" else it
         }
+        val currentKey = keyEntries.getOrNull(selectedKeyIndex)?.key ?: return
+        val items = keyEntries.mapNotNull { entry ->
+            val sourceText = entry.stringsInfoList.firstOrNull { it.text.isNotEmpty() }?.text
+                ?: return@mapNotNull null
+            entry.key to sourceText
+        }
+        if (items.isEmpty()) return
+
         updateRowText(rowIndex, "Translating...")
         ApplicationManager.getApplication().executeOnPooledThread {
-            val result = AITranslator.translate(targetLanguage, sourceText)
+            val result = AITranslator.translateBatch(targetLanguage, items)
             SwingUtilities.invokeLater {
-                updateRowText(rowIndex, result)
+                val nowKey = keyEntries.getOrNull(selectedKeyIndex)?.key
+                if (nowKey == currentKey && rowIndex in rows.indices) {
+                    updateRowText(rowIndex, result[currentKey] ?: "")
+                }
+                keyEntries.forEachIndexed { index, entry ->
+                    val translated = result[entry.key] ?: return@forEachIndexed
+                    val newInfoList = entry.stringsInfoList.map { info ->
+                        if (info.language == targetLangRaw) {
+                            StringsInfo(info.stringsFile, info.language, info.key, translated)
+                        } else {
+                            info
+                        }
+                    }
+                    keyEntries[index] = KeyedStringsInfo(
+                        entry.key, entry.anchorNodeName, newInfoList
+                    )
+                }
             }
         }
     }
@@ -313,10 +383,16 @@ class InsertStringsUI(
     }
 
     private fun buildSheetRows(): List<List<String>> {
-        val languages = rows.map { it.language }
+        saveCurrentEdits()
+        val languages = keyEntries.firstOrNull()?.stringsInfoList?.map { it.language }
+            ?: rows.map { it.language }
+        if (languages.isEmpty()) return emptyList()
         val header = listOf("key") + languages
-        val dataRow = listOf(stringName) + rows.map { it.text }
-        return listOf(header, dataRow)
+        val dataRows = keyEntries.map { entry ->
+            val translationsMap = entry.stringsInfoList.associate { it.language to it.text }
+            listOf(entry.key) + languages.map { translationsMap[it] ?: "" }
+        }
+        return listOf(header) + dataRows
     }
 
     private fun applySheetRowsToUi(sheetRows: List<List<String>>) {
@@ -324,6 +400,7 @@ class InsertStringsUI(
         val header = sheetRows.firstOrNull() ?: return
         val keyIndex = header.indexOfFirst { it.equals("key", ignoreCase = true) }
         val dataRows = if (keyIndex != -1) sheetRows.drop(1) else sheetRows
+        if (dataRows.isEmpty()) return
         val languages = if (keyIndex != -1) {
             header.filterIndexed { index, _ -> index != keyIndex }
         } else {
@@ -331,23 +408,45 @@ class InsertStringsUI(
         }
         val keyColumn = if (keyIndex != -1) keyIndex else 0
 
-        val firstRow = dataRows.firstOrNull() ?: return
-        val newKey = firstRow.getOrNull(keyColumn) ?: ""
-        if (newKey.isNotEmpty()) {
-            stringName = newKey
+        val newEntries = dataRows.map { row ->
+            val key = row.getOrNull(keyColumn) ?: ""
+            val infoList = languages.mapIndexed { langIndex, language ->
+                val originalIndex = if (keyIndex == -1) {
+                    langIndex + 1
+                } else {
+                    if (langIndex < keyIndex) langIndex else langIndex + 1
+                }
+                val value = row.getOrNull(originalIndex) ?: ""
+                StringRow(language = language, text = value)
+            }
+            KeyedStringsInfo(key, "", emptyList())
         }
 
-        val newRows = languages.mapIndexed { langIndex, language ->
-            val originalIndex = if (keyIndex == -1) {
-                langIndex + 1
-            } else {
-                if (langIndex < keyIndex) langIndex else langIndex + 1
+        val existingLanguages = keyEntries.firstOrNull()?.stringsInfoList?.map { it.language }
+        if (existingLanguages != null && existingLanguages.isNotEmpty()) {
+            val mergedEntries = newEntries.mapIndexed { idx, entry ->
+                val dataRow = dataRows[idx]
+                val translationsMap = existingLanguages.associateWith { lang ->
+                    val langIdx = languages.indexOf(lang)
+                    if (langIdx >= 0) {
+                        val originalIndex = if (keyIndex == -1) langIdx + 1
+                        else if (langIdx < keyIndex) langIdx else langIdx + 1
+                        dataRow.getOrNull(originalIndex) ?: ""
+                    } else ""
+                }
+                val infoList = keyEntries.firstOrNull()?.stringsInfoList?.map { info ->
+                    StringsInfo(info.stringsFile, info.language, entry.key, translationsMap[info.language] ?: "")
+                } ?: emptyList()
+                KeyedStringsInfo(entry.key, "", infoList)
             }
-            val value = firstRow.getOrNull(originalIndex) ?: ""
-            StringRow(language = language, text = value)
+            keyEntries.clear()
+            keyEntries.addAll(mergedEntries)
+        } else {
+            keyEntries.clear()
+            keyEntries.addAll(newEntries)
         }
-        rows.clear()
-        rows.addAll(newRows)
+        selectedKeyIndex = 0
+        updateRowsForSelectedKey()
     }
 
     private fun applySheetRowToUi(row: List<String>) {
@@ -911,7 +1010,7 @@ class InsertStringsUI(
         val availableLanguages = insertStringsManager.languages?.takeIf { it.isNotEmpty() }
             ?: contextInfo.currentModule?.xmlFiles?.map { it.language }
             ?: emptyList()
-        val currentTranslations = rows.filter { it.text.isNotEmpty() }.associate { it.language to it.text }
+        saveCurrentEdits()
         val sheetsSettings = SheetsSettingsService.getInstance(project).state
         val sheetsConfigured = SheetsManager.isConfigured(project)
         val availableSheetNames = sheetsAvailableSheets.map { it.title }.takeIf { it.isNotEmpty() }
@@ -926,9 +1025,17 @@ class InsertStringsUI(
             add("availableLanguages", JsonArray().apply {
                 availableLanguages.forEach { add(it) }
             })
-            addProperty("currentKey", stringName)
-            add("currentTranslations", JsonObject().apply {
-                currentTranslations.forEach { (k, v) -> addProperty(k, v) }
+            add("currentKeys", JsonArray().apply {
+                keyEntries.forEach { entry ->
+                    add(JsonObject().apply {
+                        addProperty("key", entry.key)
+                        add("translations", JsonObject().apply {
+                            entry.stringsInfoList.filter { it.text.isNotEmpty() }.forEach {
+                                addProperty(it.language, it.text)
+                            }
+                        })
+                    })
+                }
             })
             add("googleSheets", JsonObject().apply {
                 addProperty("configured", sheetsConfigured)
@@ -1040,7 +1147,8 @@ class InsertStringsUI(
                 return@forEach
             }
             val stringsInfoList = if (targetModule == currentModuleName) {
-                val existingTranslations = rows.associate { it.language to it.text }
+                val existingTranslations = keyEntries.firstOrNull()?.stringsInfoList
+                    ?.associate { it.language to it.text } ?: emptyMap()
                 val merged = existingTranslations.toMutableMap()
                 merged.putAll(action.translations)
                 merged
@@ -1058,9 +1166,9 @@ class InsertStringsUI(
             val useCurrentStringsList = targetModule == currentModuleName
                     && !insertStringsManager.languages.isNullOrEmpty()
             if (useCurrentStringsList) {
-                insertStringsManager.insert(project, action.name, stringsInfoList)
+                insertStringsManager.insert(project, mapOf(action.name to stringsInfoList))
             } else {
-                insertStringsManager.insertIntoModule(project, targetModule, action.name, stringsInfoList)
+                insertStringsManager.insertIntoModule(project, targetModule, mapOf(action.name to stringsInfoList))
             }
         }
 
@@ -1071,8 +1179,14 @@ class InsertStringsUI(
             moduleWithMostLines?.moduleName
         )
         if (targetModule != null) {
-            val updatedStringsList = ContextManager.scanModuleForKey(project, targetModule, lastAction.name)
-            insertStringsManager.updateUI(lastAction.name, "", updatedStringsList)
+            val allEntries = actions.map { action ->
+                KeyedStringsInfo(
+                    action.name,
+                    "",
+                    ContextManager.scanModuleForKey(project, targetModule, action.name)
+                )
+            }
+            insertStringsManager.updateUI(allEntries)
         }
         val names = actions.joinToString(", ") { it.name }
         showToast("Inserted: $names")
@@ -1090,20 +1204,15 @@ class InsertStringsUI(
     }
 
     override fun updateUI(
-        @NotNull nodeName: String,
-        @Nullable stringsList: List<StringsInfo>?
+        entries: List<KeyedStringsInfo>
     ) {
-        if (stringsList == null) return
-
-        val seen = mutableSetOf<String>()
-        val newRows = stringsList
-            .filter { it.language.isNotEmpty() && seen.add(it.language) }
-            .map { StringRow(language = it.language, text = it.text) }
+        if (entries.isEmpty()) return
 
         SwingUtilities.invokeLater {
-            stringName = nodeName
-            rows.clear()
-            rows.addAll(newRows)
+            keyEntries.clear()
+            keyEntries.addAll(entries)
+            if (selectedKeyIndex >= keyEntries.size) selectedKeyIndex = 0
+            updateRowsForSelectedKey()
             toolWindow.show()
         }
     }
@@ -1113,6 +1222,8 @@ class InsertStringsUI(
 private fun InsertStringsContent(
     stringName: String,
     rows: List<StringRow>,
+    keys: List<String>,
+    selectedKeyIndex: Int,
     onStringNameChange: (String) -> Unit,
     onTextChange: (Int, String) -> Unit,
     onClear: (Int) -> Unit,
@@ -1120,6 +1231,7 @@ private fun InsertStringsContent(
     onCopy: () -> Unit,
     onPaste: () -> Unit,
     onInsert: () -> Unit,
+    onSelectKey: (Int) -> Unit,
     toastMessage: String,
     showSettings: Boolean,
     showChat: Boolean,
@@ -1221,16 +1333,11 @@ private fun InsertStringsContent(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Text(
-                            text = "<string name=",
-                            color = colors.text,
-                            style = compactTextStyle(colors.text),
-                        )
-                        CompactTextField(
-                            value = stringName,
-                            onValueChange = onStringNameChange,
+                        KeySelectorDropdown(
+                            keys = keys,
+                            selectedIndex = selectedKeyIndex,
+                            onSelect = onSelectKey,
                             modifier = Modifier.weight(1f),
-                            singleLine = true,
                             colors = colors,
                         )
                         CompactButton(
@@ -1243,6 +1350,25 @@ private fun InsertStringsContent(
                             text = "Settings",
                             onClick = onOpenSettings,
                             modifier = Modifier.width(72.dp),
+                            colors = colors,
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "<string name=",
+                            color = colors.text,
+                            style = compactTextStyle(colors.text),
+                        )
+                        CompactTextField(
+                            value = stringName,
+                            onValueChange = onStringNameChange,
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
                             colors = colors,
                         )
                     }

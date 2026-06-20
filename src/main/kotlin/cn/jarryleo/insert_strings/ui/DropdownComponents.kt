@@ -223,3 +223,54 @@ fun DropdownOption(
         )
     }
 }
+
+/**
+ * 多 key 选择下拉框。展示当前选中的 key 及其在列表中的序号，
+ * 展开后列出全部选中的 key 供切换。仅当 keys 数量 > 1 时可展开。
+ */
+@Composable
+fun KeySelectorDropdown(
+    keys: List<String>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    colors: IdeColors,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val currentKey = keys.getOrNull(selectedIndex) ?: ""
+    val label = if (keys.size > 1) {
+        "$currentKey  (${selectedIndex + 1}/${keys.size})"
+    } else {
+        currentKey.ifEmpty { "No key selected" }
+    }
+    val canExpand = keys.size > 1
+    Box(modifier = modifier) {
+        DropdownFieldShell(
+            text = label,
+            expanded = expanded,
+            onClick = { if (canExpand) expanded = true },
+            modifier = Modifier.fillMaxWidth(),
+            colors = colors,
+        )
+        if (canExpand) {
+            StyledDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                colors = colors,
+                modifier = Modifier.fillMaxWidth(),
+                maxHeight = 260,
+            ) {
+                keys.forEachIndexed { index, key ->
+                    DropdownOption(
+                        text = if (index == selectedIndex) "▶  $key" else "     $key",
+                        onClick = {
+                            expanded = false
+                            onSelect(index)
+                        },
+                        colors = colors,
+                    )
+                }
+            }
+        }
+    }
+}

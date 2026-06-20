@@ -24,13 +24,11 @@ class InsertStringsAction : AnAction() {
         val stringsScanner = StringsScanner(e)
         val xml = stringsScanner.isXml()
         if (xml) {
-            val nodeName = stringsScanner.nodeName
-            val anchorNodeName = stringsScanner.anchorNodeName
-            val stringsList = stringsScanner.getStringsInfoList()
+            val entries = stringsScanner.getMultiKeyStringsInfoList()
             val currentFile = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: e.getData(CommonDataKeys.EDITOR)?.virtualFile
             ContextManager.ensureInitialized(project)
             ContextManager.updateCurrentModule(project, currentFile)
-            InsertStringsManager.updateUI(project, nodeName, anchorNodeName, stringsList)
+            InsertStringsManager.updateUI(project, entries)
             ToolWindowManager.getInstance(project)
                 .getToolWindow("InsertStrings")
                 ?.show()

@@ -1,6 +1,7 @@
 package cn.jarryleo.insert_strings
 
 import cn.jarryleo.insert_strings.xml.ContextManager
+import cn.jarryleo.insert_strings.xml.KeyedStringsInfo
 import cn.jarryleo.insert_strings.xml.StringsInfo
 import cn.jarryleo.insert_strings.xml.StringsScanner
 import cn.jarryleo.insert_strings.xml.StringsWriter
@@ -22,18 +23,15 @@ class InsertStringsManager(private val project: Project) {
         @JvmStatic
         fun updateUI(
             project: Project,
-            nodeName: String,
-            anchorNodeName: String,
-            stringsList: List<StringsInfo>?
+            entries: List<KeyedStringsInfo>
         ) {
-            getInstance(project).updateUI(nodeName, anchorNodeName, stringsList)
+            getInstance(project).updateUI(entries)
         }
     }
 
-    private var nodeName = ""
-    private var anchorNodeName = ""
-    private var stringsList: List<StringsInfo>? = emptyList()
-    val languages get() = stringsList?.map { it.language }
+    private var entries: List<KeyedStringsInfo> = emptyList()
+    val keys get() = entries.map { it.key }
+    val languages get() = entries.firstOrNull()?.stringsInfoList?.map { it.language }
     private var uiCallBack: UiCallback? = null
 
     init {
@@ -42,73 +40,76 @@ class InsertStringsManager(private val project: Project) {
 
     fun setUiCallBack(uiCallBack: UiCallback) {
         this.uiCallBack = uiCallBack
-        if (nodeName.isNotEmpty() || stringsList?.isNotEmpty() == true) {
-            uiCallBack.updateUI(nodeName, stringsList)
+        if (entries.isNotEmpty()) {
+            uiCallBack.updateUI(entries)
         }
     }
 
-    fun updateUI(nodeName: String, anchorNodeName: String, stringsList: List<StringsInfo>?) {
-        this.nodeName = nodeName
-        this.anchorNodeName = anchorNodeName
-        this.stringsList = stringsList
-        uiCallBack?.updateUI(nodeName, stringsList)
+    fun updateUI(entries: List<KeyedStringsInfo>) {
+        this.entries = entries
+        uiCallBack?.updateUI(entries)
     }
 
-    fun insert(project: Project, stringName: String, stringsInfoList: Map<String, String>) {
+    fun insert(project: Project, translationsPerKey: Map<String, Map<String, String>>) {
+        val languagesInfoList = entries.firstOrNull()?.stringsInfoList ?: emptyList()
+        val anchor = entries.firstOrNull()?.anchorNodeName ?: ""
         StringsWriter(
             project,
-            nodeName,
-            anchorNodeName,
-            stringName,
-            stringsInfoList,
-            stringsList ?: emptyList()
+            translationsPerKey.keys.toList(),
+            translationsPerKey,
+            languagesInfoList,
+            anchor
         ).write()
     }
 
     fun insertIntoModule(
         project: Project,
         moduleName: String,
-        stringName: String,
-        stringsInfoList: Map<String, String>
+        translationsPerKey: Map<String, Map<String, String>>
     ) {
         val moduleStringsInfo = ContextManager.getModuleStringsInfo(project, moduleName)
         StringsWriter(
             project,
-            nodeName = "",
-            anchorName = "",
-            stringName = stringName,
-            stringsInfoList = stringsInfoList,
-            languagesInfoList = moduleStringsInfo
+            translationsPerKey.keys.toList(),
+            translationsPerKey,
+            moduleStringsInfo,
+            ""
         ).write()
     }
 
     fun copy() {
-        val clipInfo = ClipInfo(
-            nodeName,
-            anchorNodeName,
-            stringsList?.associate { it.language to it.text } ?: emptyMap()
-        )
-        //CopyPasteManager.copyTextToClipboard(clipInfo.toXml())
-        ClipboardManager.setSysClipboardText(clipInfo.toJson())
+        val clipEntries = entries.map { entry ->
+            ClipEntry(
+                entry.key,
+                entry.stringsInfoList.associate { it.language to it.text }
+            )
+        }
+        val anchor = entries.firstOrNull()?.anchorNodeName ?: ""
+        ClipboardManager.setSysClipboardText(ClipInfo(clipEntries, anchor).toJson())
     }
 
     fun paste(file: VirtualFile): Boolean {
         val text = ClipboardManager.getSysClipboardText()
         val clipInfo = ClipInfo.fromJson(text) ?: return false
-        val nodeName = clipInfo.node
-        val anchor = clipInfo.anchor
-        val languages = clipInfo.value.keys.toList()
-        val scanner = StringsScanner(file, nodeName)
-        scanner.getStringsInfoList().filter {
-            it.language in languages
-        }.forEach {
-            it.text = clipInfo.value[it.language] ?: ""
+        val keys = clipInfo.entries.map { it.key }
+        if (keys.isEmpty()) return false
+        val scanner = StringsScanner(file, keys)
+        val newEntries = scanner.getMultiKeyStringsInfoList().map { entry ->
+            val clipEntry = clipInfo.entries.find { it.key == entry.key }
+            if (clipEntry != null) {
+                entry.stringsInfoList.forEach { info ->
+                    info.text = clipEntry.translations[info.language] ?: info.text
+                }
+            }
+            KeyedStringsInfo(
+                entry.key,
+                clipInfo.anchor,
+                entry.stringsInfoList
+            )
         }
-        updateUI(
-            nodeName,
-            anchor,
-            scanner.getStringsInfoList()
-        )
+        updateUI(newEntries)
         return true
     }
+
+    fun getEntries(): List<KeyedStringsInfo> = entries
 }
