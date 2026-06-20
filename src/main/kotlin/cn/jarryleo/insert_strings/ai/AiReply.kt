@@ -12,6 +12,15 @@ sealed class AiAction {
         val options: List<String> = emptyList()
     ) : AiAction()
 
+    /**
+     * AI 请求加载某个工具的详细使用文档（按需加载机制）。
+     * 系统会把 [tool] 对应的完整文档注入为 tool 消息，AI 据此继续返回实际执行动作。
+     * @param tool 工具名，对应 AITranslator.TOOL_DOCS 的 key
+     */
+    data class LoadToolDoc(
+        val tool: String
+    ) : AiAction()
+
     data class SheetsOperation(
         val operation: Operation,
         val spreadsheetId: String?,

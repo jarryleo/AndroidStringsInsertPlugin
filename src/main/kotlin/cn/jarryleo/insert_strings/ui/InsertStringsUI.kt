@@ -47,6 +47,8 @@ class InsertStringsUI(
         private const val REVIEW_BATCH_SIZE = 80
         // AI 声称要执行操作却未返回 actions 时，强制其重新给出动作的最大重试次数。
         private const val MAX_REMEDIATION_ROUNDS = 2
+        // load_tool_doc 按需加载工具文档的最大连续次数，防止 AI 反复加载文档不执行操作。
+        private const val MAX_TOOL_DOC_LOADS = 4
         // 监督提示：当 AI 只回复文字却未给出可执行 actions 时注入，强制其返回结构化动作。
         private const val SUPERVISOR_PROMPT =
             "[系统监督] 你上次的回复不包含可解析的 JSON actions，系统未执行任何操作。" +
@@ -89,6 +91,9 @@ class InsertStringsUI(
     private val chatMessages = mutableStateListOf<ChatMessage>()
     private var chatInput by mutableStateOf("")
     private var chatSending by mutableStateOf(false)
+    // 当前对话轮中已连续加载工具文档的次数，防止 AI 反复加载文档而不执行操作。
+    // 每次用户发新消息时重置为 0。
+    private var toolDocLoadCount: Int = 0
 
     // Google Sheets state
     private var sheetsDefaultSpreadsheetId by mutableStateOf("")
@@ -1131,6 +1136,7 @@ class InsertStringsUI(
 
     private fun sendChatMessage(text: String) {
         chatMessages.add(ChatMessage(role = "user", content = text))
+        toolDocLoadCount = 0
         continueChatWithAi()
     }
 
@@ -1207,6 +1213,7 @@ class InsertStringsUI(
         }
         // 普通 AskUser：将用户选择作为消息发回 AI 继续对话
         chatMessages.add(ChatMessage(role = "user", content = option))
+        toolDocLoadCount = 0
         continueChatWithAi()
     }
 
@@ -1281,6 +1288,15 @@ class InsertStringsUI(
     }
 
     private fun handleAiActions(actions: List<AiAction>, depth: Int) {
+        // 优先处理 load_tool_doc：按需加载工具文档并注入对话，AI 据此继续返回实际执行动作。
+        val loadDocActions = actions.filterIsInstance<AiAction.LoadToolDoc>()
+        if (loadDocActions.isNotEmpty()) {
+            handleLoadToolDoc(loadDocActions)
+            // load_tool_doc 通常单独返回；若混合返回则只处理文档加载后自动继续，
+            // 由 AI 在下一轮拿到文档后重新返回实际动作。
+            return
+        }
+
         val insertActions = actions.filterIsInstance<AiAction.InsertStrings>()
         if (insertActions.isNotEmpty()) {
             executeInsertActions(insertActions)
@@ -1322,6 +1338,51 @@ class InsertStringsUI(
         }
 
         executeSheetsActions(sheetsActions, depth)
+    }
+
+    /**
+     * 处理 load_tool_doc 动作：按需加载工具文档并注入为 tool 消息，自动继续对话。
+     * AI 请求文档 → 系统注入文档 → AI 拿到文档后重新返回实际执行动作，全程无需用户介入。
+     * 用 [toolDocLoadCount] 字段防止 AI 反复加载文档而不执行操作。
+     */
+    private fun handleLoadToolDoc(loadDocActions: List<AiAction.LoadToolDoc>) {
+        if (toolDocLoadCount >= MAX_TOOL_DOC_LOADS) {
+            chatMessages.add(
+                ChatMessage(
+                    role = "assistant",
+                    content = "工具文档加载次数已达上限（$MAX_TOOL_DOC_LOADS 次），请直接执行操作或向用户说明情况。"
+                )
+            )
+            chatSending = false
+            return
+        }
+        toolDocLoadCount++
+
+        // 汇总请求的工具文档（去重），拼成一条 tool 消息
+        val requestedTools = loadDocActions.map { it.tool }.distinct()
+        val docsToInject = requestedTools.mapNotNull { tool ->
+            AITranslator.getToolDoc(tool)?.let { doc -> tool to doc }
+        }
+
+        if (docsToInject.isEmpty()) {
+            // 请求的工具文档不存在，告知 AI 可用工具名
+            val available = AITranslator.availableToolDocs().joinToString(", ")
+            val msg = "[工具文档加载失败] 请求的工具名不存在。可用工具：$available。" +
+                "请用正确的工具名重新请求，或直接返回可执行的 actions。"
+            chatMessages.add(ChatMessage(role = "tool", content = msg))
+        } else {
+            val docText = buildString {
+                docsToInject.forEach { (tool, doc) ->
+                    appendLine(doc)
+                    appendLine()
+                }
+                appendLine("以上是你请求加载的工具文档。请据此直接返回包含正确 actions 的 JSON 执行操作，不要再请求加载文档。")
+            }
+            chatMessages.add(ChatMessage(role = "tool", content = docText))
+        }
+
+        // 自动继续对话：AI 拿到文档后重新回复
+        continueChatWithAi()
     }
 
     /**
