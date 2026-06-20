@@ -56,12 +56,14 @@ object AITranslator {
 ### strings.xml 操作
 - query_keys: 列出/搜索模块内的字符串 key(pattern 正则,可选 includeTranslations)。
 - read_string: 读取指定 key 在所有语言的当前翻译。
+- find_keys_by_text: 反查 — 通过翻译文本查找 key(exact/contains/regex,可选 module/language 限定)。
 - insert_strings: 插入/全量覆盖翻译(translations 需覆盖所有语言,适合新增 key)。
 - update_string: 精准修改指定 key 的部分语言翻译,只动提供的语言,其他保持原样(适合「修一个语言」「修个别语言」场景)。
-- 主动发现流程:用户给的 key 不明确时,先用 query_keys 搜索;修改前先 read_string 确认原文;用 update_string 精准修改。
+- 主动发现流程:用户给的 key 不明确时,先用 query_keys 搜索;修改前先 read_string 确认原文;用 update_string 精准修改。看到一段翻译想反查 key,用 find_keys_by_text。
 
 ### Google 表格操作
 - sheets_operation: 详见工具参数(枚举)。列操作需用户确认;修改/删除行前先 search 定位行号;全表检查/修正优先用 check_translations/fix_translations。
+- find_rows_by_text: 反查 — 在表格中按文本搜索行(exact/contains/regex,可选 column 限定)。
 
 ### 通用
 - ask_user: 向用户提问,options 非空时显示按钮。
@@ -829,6 +831,16 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
     }
 
     /**
+     * 解析 matchType 字符串(不区分大小写),失败回退 CONTAINS。
+     */
+    private fun parseMatchType(raw: String?): AiAction.TextMatchType {
+        if (raw.isNullOrBlank()) return AiAction.TextMatchType.CONTAINS
+        return runCatching {
+            AiAction.TextMatchType.valueOf(raw.trim().uppercase())
+        }.getOrDefault(AiAction.TextMatchType.CONTAINS)
+    }
+
+    /**
      * 把单个 tool call 转换为 [AiAction]。
      * 解析失败时返回 null,由调用方决定如何兜底(通常在 reply 中提示用户)。
      */
@@ -862,6 +874,27 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                     .filterValues { it.isNotEmpty() }
                 if (translations.isEmpty()) return null
                 AiAction.UpdateString(module, name, translations)
+            }
+            ToolDefinitions.TOOL_FIND_KEYS_BY_TEXT -> {
+                val text = args.get("text")?.asString?.trim() ?: return null
+                if (text.isEmpty()) return null
+                val module = args.get("module")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val language = args.get("language")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val matchType = parseMatchType(args.get("matchType")?.asString)
+                val caseSensitive = args.get("caseSensitive")?.let { runCatching { it.asBoolean }.getOrNull() } ?: false
+                val limit = args.get("limit")?.let { runCatching { it.asInt }.getOrNull() } ?: 30
+                AiAction.FindKeysByText(text, module, language, matchType, caseSensitive, limit)
+            }
+            ToolDefinitions.TOOL_FIND_ROWS_BY_TEXT -> {
+                val text = args.get("text")?.asString?.trim() ?: return null
+                if (text.isEmpty()) return null
+                val spreadsheetId = args.get("spreadsheetId")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val sheetName = args.get("sheetName")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val column = args.get("column")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val matchType = parseMatchType(args.get("matchType")?.asString)
+                val caseSensitive = args.get("caseSensitive")?.let { runCatching { it.asBoolean }.getOrNull() } ?: false
+                val limit = args.get("limit")?.let { runCatching { it.asInt }.getOrNull() } ?: 30
+                AiAction.FindRowsByText(text, spreadsheetId, sheetName, column, matchType, caseSensitive, limit)
             }
             ToolDefinitions.TOOL_INSERT_STRINGS -> {
                 val name = args.get("name")?.asString?.trim() ?: return null

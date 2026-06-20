@@ -24,6 +24,7 @@ import cn.jarryleo.insert_strings.xml.ContextManager
 import cn.jarryleo.insert_strings.xml.KeyedStringsInfo
 import cn.jarryleo.insert_strings.xml.KeyReadResult
 import cn.jarryleo.insert_strings.xml.KeySearchResult
+import cn.jarryleo.insert_strings.xml.KeyTextSearchResult
 import cn.jarryleo.insert_strings.xml.ModuleInfo
 import cn.jarryleo.insert_strings.xml.StringsInfo
 import cn.jarryleo.insert_strings.xml.StringsService
@@ -851,6 +852,68 @@ class InsertStringsUI(
         }
     }
 
+    private fun runFindRowsByText(action: AiAction.FindRowsByText): String {
+        val spreadsheetId = SheetsManager.resolveSpreadsheetId(project, action.spreadsheetId)
+        if (spreadsheetId.isBlank()) {
+            return "[工具执行结果] 类型:find_rows_by_text 状态:失败 信息:Spreadsheet ID 为空,请先在设置中配置"
+        }
+        val sheetName = action.sheetName ?: SheetsManager.defaultSheetName(project)
+        val matchType = mapToSheetsMatchType(action.matchType)
+        val result = SheetsManager.findRowsByText(
+            project = project,
+            spreadsheetId = spreadsheetId,
+            sheetName = sheetName,
+            text = action.text,
+            column = action.column,
+            matchType = matchType,
+            caseSensitive = action.caseSensitive,
+            limit = action.limit
+        )
+        return result.fold(
+            onSuccess = { rows ->
+                if (rows.isEmpty()) {
+                    val scope = buildString {
+                        append("text:\"").append(action.text).append("\"")
+                        append(" sheet:").append(sheetName)
+                        if (action.column != null) append(" column:").append(action.column)
+                        append(" match:").append(action.matchType.name.lowercase())
+                    }
+                    "[工具执行结果] 类型:find_rows_by_text 状态:成功 命中:0 范围:$scope 未找到匹配行"
+                } else {
+                    buildString {
+                        append("[工具执行结果] 类型:find_rows_by_text 状态:成功 命中:").append(rows.size)
+                        append(" sheet:").append(sheetName)
+                        append(" match:").append(action.matchType.name.lowercase())
+                        appendLine()
+                        rows.forEachIndexed { idx, r ->
+                            append(idx + 1).append(". 行").append(r.rowNumber)
+                            if (r.columnName.isNotEmpty()) {
+                                append(" 列=").append(r.columnName)
+                            }
+                            append(" 命中=\"").append(truncateForLog(r.matchedText, 50)).append("\"")
+                            append(" | ").append(r.row.joinToString(" | "))
+                            appendLine()
+                        }
+                        if (rows.size >= action.limit) {
+                            appendLine("… 已达返回上限,可能还有更多匹配。")
+                        }
+                    }
+                }
+            },
+            onFailure = { e ->
+                "[工具执行结果] 类型:find_rows_by_text 状态:失败 信息:${e.message ?: "unknown"}"
+            }
+        )
+    }
+
+    private fun mapToSheetsMatchType(type: AiAction.TextMatchType): SheetsManager.TextMatchType {
+        return when (type) {
+            AiAction.TextMatchType.EXACT -> SheetsManager.TextMatchType.EXACT
+            AiAction.TextMatchType.CONTAINS -> SheetsManager.TextMatchType.CONTAINS
+            AiAction.TextMatchType.REGEX -> SheetsManager.TextMatchType.REGEX
+        }
+    }
+
     /**
      * 面向用户的工具执行结果摘要（兜底用）。
      * 当前架构下,每个 tool result 都独立发给 AI,不再需要聚合的纯文本摘要;
@@ -1215,10 +1278,13 @@ class InsertStringsUI(
             return
         }
 
-        // Priority 4: query_keys / read_string / update_string(strings.xml 主动操作能力)
+        // Priority 4: query_keys / read_string / update_string / find_keys_by_text(strings.xml 主动操作能力)
         // 按 reply.actions 原序提取,保持与 actionToolCallIds 的下标对齐
         val stringsActions = reply.actions.filter {
-            it is AiAction.QueryKeys || it is AiAction.ReadString || it is AiAction.UpdateString
+            it is AiAction.QueryKeys ||
+                it is AiAction.ReadString ||
+                it is AiAction.UpdateString ||
+                it is AiAction.FindKeysByText
         }
         if (stringsActions.isNotEmpty()) {
             executeStringsOps(stringsActions, actionToolCallIds, context, iteration)
@@ -1232,8 +1298,10 @@ class InsertStringsUI(
             return
         }
 
-        // Priority 6: sheets_operation
-        val sheetsActions = reply.actions.filterIsInstance<AiAction.SheetsOperation>()
+        // Priority 6: sheets_operation / find_rows_by_text
+        val sheetsActions = reply.actions.filter {
+            it is AiAction.SheetsOperation || it is AiAction.FindRowsByText
+        }
         if (sheetsActions.isNotEmpty()) {
             executeSheetsActions(sheetsActions, actionToolCallIds, context, iteration)
             return
@@ -1319,7 +1387,7 @@ class InsertStringsUI(
     }
 
     /**
-     * 统一执行 query_keys / read_string / update_string 三类 strings.xml 操作。
+     * 统一执行 query_keys / read_string / update_string / find_keys_by_text 四类 strings.xml 操作。
      * actions 保持与 [actionToolCallIds] 同序(下标对齐),每个动作独立生成 tool result。
      */
     private fun executeStringsOps(
@@ -1339,6 +1407,7 @@ class InsertStringsUI(
                         is AiAction.QueryKeys -> runQueryKeys(action)
                         is AiAction.ReadString -> runReadString(action)
                         is AiAction.UpdateString -> runUpdateString(action)
+                        is AiAction.FindKeysByText -> runFindKeysByText(action)
                         else -> return@forEachIndexed
                     }
                     pendingResults.add(toolCallId to resultText)
@@ -1463,20 +1532,75 @@ class InsertStringsUI(
         }
     }
 
+    private fun runFindKeysByText(action: AiAction.FindKeysByText): String {
+        val matchType = mapToServiceMatchType(action.matchType)
+        val results: List<KeyTextSearchResult> = try {
+            StringsService.findKeysByText(
+                project = project,
+                text = action.text,
+                moduleName = action.module,
+                language = action.language,
+                matchType = matchType,
+                caseSensitive = action.caseSensitive,
+                limit = action.limit
+            )
+        } catch (e: Exception) {
+            return "[工具执行结果] 类型:find_keys_by_text 状态:失败 信息:${e.message ?: "unknown"}"
+        }
+        if (results.isEmpty()) {
+            val scope = buildString {
+                append("text:\"").append(action.text).append("\"")
+                if (action.module != null) append(" module:").append(action.module)
+                if (action.language != null) append(" language:").append(action.language)
+                append(" match:").append(action.matchType.name.lowercase())
+            }
+            return "[工具执行结果] 类型:find_keys_by_text 状态:成功 命中:0 范围:$scope 未找到匹配 key"
+        }
+        return buildString {
+            append("[工具执行结果] 类型:find_keys_by_text 状态:成功 命中:").append(results.size)
+            append(" match:").append(action.matchType.name.lowercase())
+            appendLine()
+            results.forEachIndexed { idx, r ->
+                append(idx + 1).append(". ")
+                append("module=").append(r.module)
+                append(" lang=").append(r.language)
+                append(" key=").append(r.key)
+                append(" text=\"").append(truncateForLog(r.text, 60)).append("\"")
+                appendLine()
+            }
+            if (results.size >= action.limit) {
+                appendLine("… 已达返回上限,可能还有更多匹配。")
+            }
+        }
+    }
+
+    private fun mapToServiceMatchType(type: AiAction.TextMatchType): StringsService.TextMatchType {
+        return when (type) {
+            AiAction.TextMatchType.EXACT -> StringsService.TextMatchType.EXACT
+            AiAction.TextMatchType.CONTAINS -> StringsService.TextMatchType.CONTAINS
+            AiAction.TextMatchType.REGEX -> StringsService.TextMatchType.REGEX
+        }
+    }
+
+    private fun truncateForLog(text: String, max: Int): String =
+        if (text.length <= max) text else text.take(max) + "…"
+
     /**
-     * 执行 sheets 操作并把每个结果作为 tool result 回传。
+     * 执行 sheets 域动作(SheetsOperation + FindRowsByText)并把每个结果作为 tool result 回传。
      * 在执行前自动检测 append_row 动作是否有重复 key,若有则暂停并询问用户。
+     * actions 与 [actionToolCallIds] 同序对齐。
      */
     private fun executeSheetsActions(
-        sheetsActions: List<AiAction.SheetsOperation>,
+        actions: List<AiAction>,
         actionToolCallIds: List<String>,
         context: String,
         iteration: Int
     ) {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
-                // 重复 key 检测
-                val appendActions = sheetsActions.filter {
+                // 仅 SheetsOperation 需要重复 key 检测;FindRowsByText 是只读操作
+                val sheetsOps = actions.filterIsInstance<AiAction.SheetsOperation>()
+                val appendActions = sheetsOps.filter {
                     it.operation == AiAction.SheetsOperation.Operation.APPEND_ROW
                 }
                 if (appendActions.isNotEmpty()) {
@@ -1498,7 +1622,7 @@ class InsertStringsUI(
                         val duplicates = newKeys.filter { it in existingKeys }.toSet()
                         if (duplicates.isNotEmpty()) {
                             val pending = PendingSheetsInsert(
-                                actions = sheetsActions,
+                                actions = sheetsOps,
                                 actionToolCallIds = actionToolCallIds,
                                 duplicateKeys = duplicates,
                                 spreadsheetId = spreadsheetId,
@@ -1527,46 +1651,57 @@ class InsertStringsUI(
                     }
                 }
 
-                // 执行所有 sheets 操作
-                val toolResults = sheetsActions.map { executeSheetsOperationSync(it) }
-
-                // 为每个 tool_call 添加对应的 tool result(一对一关联)
-                sheetsActions.forEachIndexed { i, _ ->
-                    val toolCallId = actionToolCallIds[i]
-                    val result = toolResults.getOrNull(i)
-                        ?: SheetsToolResult("sheets_operation", false, "未生成执行结果。")
-                    if (toolCallId.isNotEmpty()) {
-                        val content = buildString {
-                            append("[工具执行结果] 操作:${result.operation} 状态:${if (result.success) "成功" else "失败"} 信息:${result.message}")
-                            if (result.rowNumber != null) append(" 行号:${result.rowNumber}")
-                            if (!result.sheetNames.isNullOrEmpty()) {
-                                append(" 工作表列表:${result.sheetNames.joinToString(", ")}")
-                            }
-                            if (!result.data.isNullOrEmpty()) {
-                                append("\n数据:")
-                                result.data.forEachIndexed { idx, row ->
-                                    append("\n  行${idx + 1}: ").append(row.joinToString(" | "))
+                // 准备所有 toolCallId→结果 映射,统一回 EDT
+                val pendingResults = mutableListOf<Pair<String, String>>()
+                actions.forEachIndexed { i, action ->
+                    val toolCallId = actionToolCallIds.getOrNull(i).orEmpty()
+                    if (toolCallId.isEmpty()) return@forEachIndexed
+                    val content = when (action) {
+                        is AiAction.SheetsOperation -> {
+                            val result = executeSheetsOperationSync(action)
+                            buildString {
+                                append("[工具执行结果] 操作:${result.operation} 状态:${if (result.success) "成功" else "失败"} 信息:${result.message}")
+                                if (result.rowNumber != null) append(" 行号:${result.rowNumber}")
+                                if (!result.sheetNames.isNullOrEmpty()) {
+                                    append(" 工作表列表:${result.sheetNames.joinToString(", ")}")
+                                }
+                                if (!result.data.isNullOrEmpty()) {
+                                    append("\n数据:")
+                                    result.data.forEachIndexed { idx, row ->
+                                        append("\n  行${idx + 1}: ").append(row.joinToString(" | "))
+                                    }
                                 }
                             }
                         }
+                        is AiAction.FindRowsByText -> runFindRowsByText(action)
+                        else -> return@forEachIndexed
+                    }
+                    pendingResults.add(toolCallId to content)
+                }
+
+                SwingUtilities.invokeLater {
+                    pendingResults.forEach { (toolCallId, content) ->
                         chatMessages.add(
                             ChatMessage(role = "tool", content = content, toolCallId = toolCallId)
                         )
                     }
+                    continueToolLoopInBackground(context, iteration + 1)
                 }
-
-                // 继续 tool loop:把执行结果回传给 AI,让 AI 推进或调用 task_complete
-                continueToolLoopInBackground(context, iteration + 1)
             } catch (e: Exception) {
                 // 异常兜底:为所有未响应的 tool_call 添加错误 tool result,避免协议错位
                 SwingUtilities.invokeLater {
-                    sheetsActions.forEachIndexed { i, action ->
-                        val toolCallId = actionToolCallIds[i]
+                    actions.forEachIndexed { i, action ->
+                        val toolCallId = actionToolCallIds.getOrNull(i).orEmpty()
                         if (toolCallId.isNotEmpty()) {
+                            val typeLabel = when (action) {
+                                is AiAction.SheetsOperation -> action.operation.name
+                                is AiAction.FindRowsByText -> "find_rows_by_text"
+                                else -> "unknown"
+                            }
                             chatMessages.add(
                                 ChatMessage(
                                     role = "tool",
-                                    content = "[工具执行异常] ${action.operation} 失败:${e.message ?: "unknown"}",
+                                    content = "[工具执行异常] $typeLabel 失败:${e.message ?: "unknown"}",
                                     toolCallId = toolCallId
                                 )
                             )

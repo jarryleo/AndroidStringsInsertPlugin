@@ -112,6 +112,49 @@ sealed class AiAction {
         val name: String,
         val translations: Map<String, String>
     ) : AiAction()
+
+    /** 文本匹配模式(枚举值与 StringsService / SheetsManager 的 TextMatchType 对齐)。 */
+    enum class TextMatchType { EXACT, CONTAINS, REGEX }
+
+    /**
+     * strings.xml 反查:通过翻译文本查找 key。
+     *
+     * @param text           必填,要查找的翻译文本
+     * @param module         限定模块;为 null 时搜索项目中所有模块
+     * @param language       限定语言目录(例: values-zh-rTW);为 null 时搜索所有语言
+     * @param matchType      匹配模式(默认 CONTAINS)
+     * @param caseSensitive  是否区分大小写(默认 false)
+     * @param limit          最大返回条数(默认 30)
+     */
+    data class FindKeysByText(
+        val text: String,
+        val module: String?,
+        val language: String?,
+        val matchType: TextMatchType,
+        val caseSensitive: Boolean,
+        val limit: Int
+    ) : AiAction()
+
+    /**
+     * Google Sheets 反查:通过文本查找行。
+     *
+     * @param text            必填,要查找的文本
+     * @param spreadsheetId   可选,默认用上下文 googleSheets 配置
+     * @param sheetName       可选,默认用 defaultSheetName
+     * @param column          限定列名(例: values-zh-rTW);为 null 时搜索所有列
+     * @param matchType       匹配模式(默认 CONTAINS)
+     * @param caseSensitive   是否区分大小写(默认 false)
+     * @param limit           最大返回条数(默认 30)
+     */
+    data class FindRowsByText(
+        val text: String,
+        val spreadsheetId: String?,
+        val sheetName: String?,
+        val column: String?,
+        val matchType: TextMatchType,
+        val caseSensitive: Boolean,
+        val limit: Int
+    ) : AiAction()
 }
 
 data class AiReply(

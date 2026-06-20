@@ -26,7 +26,9 @@ object ToolDefinitions {
         TOOL_UPDATE_STRING,
         TOOL_QUERY_KEYS,
         TOOL_READ_STRING,
+        TOOL_FIND_KEYS_BY_TEXT,
         TOOL_SHEETS_OPERATION,
+        TOOL_FIND_ROWS_BY_TEXT,
         TOOL_ASK_USER,
         TOOL_LOAD_TOOL_DOC,
         TOOL_TASK_COMPLETE,
@@ -36,7 +38,9 @@ object ToolDefinitions {
     const val TOOL_UPDATE_STRING = "update_string"
     const val TOOL_QUERY_KEYS = "query_keys"
     const val TOOL_READ_STRING = "read_string"
+    const val TOOL_FIND_KEYS_BY_TEXT = "find_keys_by_text"
     const val TOOL_SHEETS_OPERATION = "sheets_operation"
+    const val TOOL_FIND_ROWS_BY_TEXT = "find_rows_by_text"
     const val TOOL_ASK_USER = "ask_user"
     const val TOOL_LOAD_TOOL_DOC = "load_tool_doc"
     const val TOOL_TASK_COMPLETE = "task_complete"
@@ -63,6 +67,17 @@ object ToolDefinitions {
     private const val DESC_READ_STRING =
         "读取指定 key 在模块所有语言的当前翻译,返回 key+各语言文本+文件路径。" +
             "适用场景:用户说「看看 X 现在怎么翻译的」,AI 在修改前先确认原文,避免覆盖已有正确翻译。"
+
+    private const val DESC_FIND_KEYS_BY_TEXT =
+        "strings.xml 反查:通过翻译文本查找对应的 key。" +
+            "支持 exact(完全相等)/ contains(子串,默认)/ regex(正则) 三种匹配模式。" +
+            "可选限定 module(只查该模块)和 language(只查该语言目录,例 values-zh-rTW)。" +
+            "适用场景:用户看到一段文字想反查是哪个 key,排查重复翻译,跨语言确认某文本对应哪个 key。"
+
+    private const val DESC_FIND_ROWS_BY_TEXT =
+        "Google Sheets 反查:在表格中按文本搜索行,返回行号+列名+整行内容。" +
+            "支持 exact/ contains(默认)/ regex 三种匹配模式,可选 column(只查指定列名)。" +
+            "适用场景:用户问「这个翻译对应表格里哪一行」,查重,定位某文案在 sheet 中的位置。"
 
     private const val DESC_SHEETS_OPERATION =
         "执行 Google 表格操作。operation 决定具体动作类型。" +
@@ -91,7 +106,9 @@ object ToolDefinitions {
             add(openAiTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
             add(openAiTool(TOOL_QUERY_KEYS, DESC_QUERY_KEYS, openAiQueryKeysParams()))
             add(openAiTool(TOOL_READ_STRING, DESC_READ_STRING, openAiReadStringParams()))
+            add(openAiTool(TOOL_FIND_KEYS_BY_TEXT, DESC_FIND_KEYS_BY_TEXT, openAiFindKeysByTextParams()))
             add(openAiTool(TOOL_SHEETS_OPERATION, DESC_SHEETS_OPERATION, openAiSheetsOperationParams()))
+            add(openAiTool(TOOL_FIND_ROWS_BY_TEXT, DESC_FIND_ROWS_BY_TEXT, openAiFindRowsByTextParams()))
             add(openAiTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(openAiTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(openAiTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
@@ -104,7 +121,9 @@ object ToolDefinitions {
             add(anthropicTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
             add(anthropicTool(TOOL_QUERY_KEYS, DESC_QUERY_KEYS, openAiQueryKeysParams()))
             add(anthropicTool(TOOL_READ_STRING, DESC_READ_STRING, openAiReadStringParams()))
+            add(anthropicTool(TOOL_FIND_KEYS_BY_TEXT, DESC_FIND_KEYS_BY_TEXT, openAiFindKeysByTextParams()))
             add(anthropicTool(TOOL_SHEETS_OPERATION, DESC_SHEETS_OPERATION, openAiSheetsOperationParams()))
+            add(anthropicTool(TOOL_FIND_ROWS_BY_TEXT, DESC_FIND_ROWS_BY_TEXT, openAiFindRowsByTextParams()))
             add(anthropicTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(anthropicTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(anthropicTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
@@ -233,6 +252,94 @@ object ToolDefinitions {
                 add("name")
                 add("translations")
             })
+        }
+    }
+
+    private fun openAiFindKeysByTextParams(): JsonObject {
+        val matchTypeEnum = JsonArray().apply {
+            add("exact")
+            add("contains")
+            add("regex")
+        }
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("text", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,要查找的翻译文本。")
+                })
+                add("module", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,限定模块名。省略时搜索项目中所有模块。")
+                })
+                add("language", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "可选,限定语言目录(如 values-zh-rTW)。省略时搜索所有语言。"
+                    )
+                })
+                add("matchType", obj {
+                    addProperty("type", "string")
+                    add("enum", matchTypeEnum)
+                    addProperty("description", "匹配模式,默认 contains(子串匹配)。")
+                })
+                add("caseSensitive", obj {
+                    addProperty("type", "boolean")
+                    addProperty("description", "是否区分大小写,默认 false。")
+                })
+                add("limit", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "最大返回条数,默认 30,最大 200。")
+                })
+            })
+            add("required", JsonArray().apply { add("text") })
+        }
+    }
+
+    private fun openAiFindRowsByTextParams(): JsonObject {
+        val matchTypeEnum = JsonArray().apply {
+            add("exact")
+            add("contains")
+            add("regex")
+        }
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("text", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,要查找的文本。")
+                })
+                add("spreadsheetId", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,默认用上下文 googleSheets 配置。")
+                })
+                add("sheetName", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,默认用 defaultSheetName。")
+                })
+                add("column", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "可选,限定列名(与表头精确匹配,忽略大小写)。例:values-zh-rTW。"
+                    )
+                })
+                add("matchType", obj {
+                    addProperty("type", "string")
+                    add("enum", matchTypeEnum)
+                    addProperty("description", "匹配模式,默认 contains(子串匹配)。")
+                })
+                add("caseSensitive", obj {
+                    addProperty("type", "boolean")
+                    addProperty("description", "是否区分大小写,默认 false。")
+                })
+                add("limit", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "最大返回条数,默认 30,最大 200。")
+                })
+            })
+            add("required", JsonArray().apply { add("text") })
         }
     }
 

@@ -35,6 +35,20 @@ object ContextManager {
     }
 
     /**
+     * 获取项目中所有模块的所有 strings.xml 文件(三元组: moduleName, valuesDir, stringsFile)。
+     * 用于 AI 工具的跨模块反查。
+     */
+    @JvmStatic
+    fun getAllModuleFiles(project: Project): List<Triple<String, VirtualFile, VirtualFile>> {
+        ensureInitialized(project)
+        return moduleFilesMap.flatMap { (moduleName, files) ->
+            files.map { (valuesDir, stringsFile) ->
+                Triple(moduleName, valuesDir, stringsFile)
+            }
+        }
+    }
+
+    /**
      * 初始化项目所有模块的 strings.xml 上下文信息
      */
     @JvmStatic

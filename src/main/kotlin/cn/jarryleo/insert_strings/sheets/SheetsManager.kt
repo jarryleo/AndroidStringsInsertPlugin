@@ -505,6 +505,129 @@ object SheetsManager {
     )
 
     /**
+     * 文本匹配模式(与 StringsService.TextMatchType 对应,反查 sheet/strings.xml 共用)。
+     */
+    enum class TextMatchType { EXACT, CONTAINS, REGEX }
+
+    /**
+     * [findRowsByText] 单条结果。
+     * @param rowNumber 命中行号(1-based,含表头偏移)
+     * @param columnIndex 命中所在列的 0-based 列号(整行匹配时为 -1)
+     * @param columnName 命中所在列的表头名(整行匹配时为空)
+     */
+    data class TextSearchResult(
+        val rowNumber: Int,
+        val columnIndex: Int,
+        val columnName: String,
+        val matchedText: String,
+        val row: List<String>
+    )
+
+    /**
+     * 反查:在 sheet 中按文本搜索行。
+     * 整表读一次,在内存中按 [matchType] 匹配,返回 [limit] 条结果。
+     * 适合单 sheet 几千行内的常见场景;更大表应配合 column 限定避免扫描所有单元格。
+     *
+     * @param column 限定列名(与表头精确匹配),为 null 时搜索所有列
+     */
+    fun findRowsByText(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        text: String,
+        column: String?,
+        matchType: TextMatchType,
+        caseSensitive: Boolean,
+        limit: Int
+    ): Result<List<TextSearchResult>> {
+        if (spreadsheetId.isBlank()) {
+            return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        }
+        if (sheetName.isBlank()) {
+            return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        }
+        if (text.isBlank()) {
+            return Result.failure(IllegalArgumentException("Search text is empty."))
+        }
+        return runCatching {
+            val readResult = readSheet(project, spreadsheetId, sheetName)
+            val rows = readResult.getOrThrow()
+            if (rows.isEmpty()) return@runCatching emptyList<TextSearchResult>()
+
+            val header = rows.first()
+            // 列筛选:匹配 column 名(忽略大小写)对应的列号
+            val targetColIndices: List<Int> = if (column.isNullOrBlank()) {
+                header.indices.toList()
+            } else {
+                val idx = header.indexOfFirst { it.equals(column, ignoreCase = true) }
+                if (idx < 0) {
+                    throw IllegalArgumentException("Column '$column' not found in sheet header.")
+                }
+                listOf(idx)
+            }
+
+            val needle = if (caseSensitive) text else text.lowercase()
+            val regex = if (matchType == TextMatchType.REGEX) {
+                runCatching { Regex(text) }.getOrNull()
+            } else null
+            val matches: (String) -> Boolean = buildRowMatcher(text, needle, matchType, caseSensitive, regex)
+
+            val results = mutableListOf<TextSearchResult>()
+            // 从第 2 行开始扫描(第 1 行为表头)
+            for (rowIdx in 1 until rows.size) {
+                val row = rows[rowIdx]
+                for (colIdx in targetColIndices) {
+                    val cell = row.getOrNull(colIdx).orEmpty()
+                    if (matches(cell)) {
+                        results.add(
+                            TextSearchResult(
+                                rowNumber = rowIdx + 1, // 1-based
+                                columnIndex = colIdx,
+                                columnName = header.getOrNull(colIdx).orEmpty(),
+                                matchedText = cell,
+                                row = row
+                            )
+                        )
+                        if (results.size >= limit) return@runCatching results
+                        break // 一行只记一次
+                    }
+                }
+            }
+            results
+        }
+    }
+
+    private fun buildRowMatcher(
+        rawText: String,
+        needle: String,
+        matchType: TextMatchType,
+        caseSensitive: Boolean,
+        regex: Regex?
+    ): (String) -> Boolean {
+        return when (matchType) {
+            TextMatchType.EXACT -> if (caseSensitive) {
+                fun m(v: String): Boolean = v == rawText
+                ::m
+            } else {
+                fun m(v: String): Boolean = v.lowercase() == needle
+                ::m
+            }
+            TextMatchType.CONTAINS -> if (caseSensitive) {
+                fun m(v: String): Boolean = v.contains(rawText)
+                ::m
+            } else {
+                fun m(v: String): Boolean = v.lowercase().contains(needle)
+                ::m
+            }
+            TextMatchType.REGEX -> {
+                val r = regex ?: throw IllegalArgumentException("Invalid regex: $rawText")
+                fun m(v: String): Boolean = r.containsMatchIn(v)
+                ::m
+            }
+        }
+    }
+
+    /**
      * 获取指定表格文件中所有工作表的名称及尺寸。
      */
     fun listSheetNames(project: Project, spreadsheetId: String): Result<List<SheetInfo>> {
