@@ -1708,35 +1708,79 @@ class InsertStringsUI(
      * 但 chatMessages 中没有对应 toolCallId 的 tool 消息),为它们补一条 tool_result
      * 以满足 Anthropic 协议要求(每个 tool_use 必须紧跟 tool_result,否则 HTTP 400)。
      *
+     * 关键:合成 tool_result 必须**插入到产生 tool_use 的 assistant 消息所在 block 内**,
+     * 而且要排在 block 内所有非 tool_result 消息之前,否则会被 user 文本消息"截胡"
+     * —— 那时 tool_result 落到 user 消息之后,Anthropic 仍会拒绝
+     * (tool_use blocks must be immediately followed by tool_result blocks in the next user message)。
+     *
+     * 插入位置算法:对每个含 tool_uses 的 assistant 消息,确定其 block(到下一个 assistant
+     * 或 chatMessages 末尾),在 block 内**第一个非 tool_result 消息之前**(若 block 全部是
+     * tool_result 则在 block 末尾)插入合成 tool_result;按 insertAt 降序插入以避免下标错位。
+     *
      * @param reason 写入 tool_result content 的说明,告诉 AI 为什么这个 action 没被执行
      */
     private fun fillMissingToolResults(reason: String) {
-        // 用 LinkedHashSet 保持 assistant 消息中 tool_use 的出现顺序
-        val pending = LinkedHashSet<String>()
-        chatMessages.forEach { msg ->
-            when (msg.role) {
-                "assistant" -> msg.toolCalls.forEach { tc -> pending.add(tc.id) }
-                "tool" -> msg.toolCallId?.let { id -> pending.remove(id) }
-                "user" -> msg.toolCallId?.let { id -> pending.remove(id) }
-            }
-        }
-        if (pending.isEmpty()) return
-        // 找最近一个 assistant 消息中对应 tool_use 的 name,用于工具结果描述
+        if (chatMessages.isEmpty()) return
+
+        // 1) 收集所有 (insertAt, toolResultMessage),稍后按 insertAt 降序插入
+        val toInsert = mutableListOf<Pair<Int, ChatMessage>>()
+
+        // 2) 助手查名字表(toolCallId -> 工具名),用于合成 tool_result 的内容描述
         val nameById = mutableMapOf<String, String>()
         chatMessages.forEach { msg ->
             if (msg.role == "assistant") {
                 msg.toolCalls.forEach { tc -> nameById.putIfAbsent(tc.id, tc.name) }
             }
         }
-        pending.forEach { id ->
-            val name = nameById[id] ?: "unknown"
-            chatMessages.add(
-                ChatMessage(
-                    role = "tool",
-                    content = "[工具执行结果] 类型:$name 状态:已取消 信息:$reason",
-                    toolCallId = id
+
+        // 3) 遍历每个含 tool_uses 的 assistant,计算其 block 与插入点
+        chatMessages.forEachIndexed { idx, msg ->
+            if (msg.role != "assistant" || msg.toolCalls.isEmpty()) return@forEachIndexed
+
+            // block = [idx+1, endOfBlock),endOfBlock 是下一个 assistant 或 chatMessages 末尾
+            var endOfBlock = idx + 1
+            while (endOfBlock < chatMessages.size && chatMessages[endOfBlock].role != "assistant") {
+                endOfBlock++
+            }
+
+            // 在 block 内找到所有已有的 tool_result(tool 消息 + user 带 toolCallId)
+            val pairedIds = mutableSetOf<String>()
+            for (i in (idx + 1) until endOfBlock) {
+                val m = chatMessages[i]
+                if (m.role == "tool" || (m.role == "user" && m.toolCallId != null)) {
+                    m.toolCallId?.let { pairedIds.add(it) }
+                }
+            }
+
+            // 找出本 assistant 的未配对 tool_use
+            val unpaired = msg.toolCalls.filter { it.id !in pairedIds }
+            if (unpaired.isEmpty()) return@forEachIndexed
+
+            // 在 block 内找第一个非 tool_result 的位置(没有则用 block 末尾)
+            var insertAt = endOfBlock
+            for (i in (idx + 1) until endOfBlock) {
+                val m = chatMessages[i]
+                val isToolResult = m.role == "tool" || (m.role == "user" && m.toolCallId != null)
+                if (!isToolResult) {
+                    insertAt = i
+                    break
+                }
+            }
+
+            unpaired.forEach { tc ->
+                toInsert.add(
+                    insertAt to ChatMessage(
+                        role = "tool",
+                        content = "[工具执行结果] 类型:${tc.name} 状态:已取消 信息:$reason",
+                        toolCallId = tc.id
+                    )
                 )
-            )
+            }
+        }
+
+        // 4) 按 insertAt 降序插入,避免下标位移影响后续插入位置
+        toInsert.sortedByDescending { it.first }.forEach { (insertAt, message) ->
+            chatMessages.add(insertAt, message)
         }
     }
 

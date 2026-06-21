@@ -780,8 +780,12 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
      * 因此本函数把连续的 tool 结果(role="tool" 或带 toolCallId 的 user)合并到
      * 同一个 user 消息里,让所有配对 tool_result 与上一条 assistant 的 tool_use
      * 在结构上"立即相邻"。
+     *
+     * 实际发送前会先调 [normalizeMessagesForAnthropic] 把每个 block 内的 tool_result
+     * 集中放到非 tool 消息之前,以兜底用户在工具执行中插入文本消息导致的历史乱序。
      */
     private fun buildAnthropicMessages(messages: List<ChatMessage>): List<JsonObject> {
+        val normalized = normalizeMessagesForAnthropic(messages)
         val result = mutableListOf<JsonObject>()
         val pendingToolResults = mutableListOf<JsonObject>()
 
@@ -796,7 +800,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             pendingToolResults.clear()
         }
 
-        messages.forEach { msg ->
+        normalized.forEach { msg ->
             if (msg.role == "tool" || (msg.role == "user" && msg.toolCallId != null)) {
                 pendingToolResults.add(
                     JsonObject().apply {
@@ -811,6 +815,86 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             }
         }
         flushToolResults()
+        return result
+    }
+
+    /**
+     * 把聊天消息重排为满足 Anthropic 协议约束的顺序。
+     *
+     * 协议要求:assistant 消息中每个 tool_use 块,必须在**紧接其后**的同一条 user 消息
+     * 中拥有对应的 tool_result 块;否则 HTTP 400。
+     *
+     * 这里"block"定义为:从某个含 tool_uses 的 assistant 消息开始,到下一个 assistant
+     * 消息(或消息列表末尾)为止。本函数对每个 block 做:
+     *   1) 找出未配对的 tool_use(没有对应 tool_result),合成一个占位 tool_result
+     *   2) 重排 block:assistant → 全部 tool_result → 其它消息
+     * 这样既补齐了缺失的 tool_result,又让 tool_result 不会被 block 内的 user 文本
+     * 消息"截胡"到后面,违反"immediately after"约束。
+     *
+     * 注意:本函数**只用于 Anthropic API 调用的消息列表**,不动 UI 上的 chatMessages。
+     */
+    private fun normalizeMessagesForAnthropic(messages: List<ChatMessage>): List<ChatMessage> {
+        fun isToolResult(msg: ChatMessage): Boolean =
+            msg.role == "tool" || (msg.role == "user" && msg.toolCallId != null)
+
+        val result = mutableListOf<ChatMessage>()
+        var pendingBlock: MutableList<ChatMessage>? = null
+
+        fun flushBlock() {
+            val block = pendingBlock ?: return
+            pendingBlock = null
+            if (block.isEmpty()) return
+            // 1) 补齐未配对的 tool_use
+            val assistant = block.firstOrNull { it.role == "assistant" }
+            if (assistant != null && assistant.toolCalls.isNotEmpty()) {
+                val pairedIds = block
+                    .asSequence()
+                    .filter { isToolResult(it) }
+                    .mapNotNull { it.toolCallId }
+                    .toSet()
+                assistant.toolCalls
+                    .filter { it.id !in pairedIds }
+                    .forEach { tc ->
+                        block.add(
+                            ChatMessage(
+                                role = "tool",
+                                content = "[自动补全] 类型:${tc.name} 状态:已取消 " +
+                                    "信息:协议要求每个 tool_use 必须有 tool_result,系统自动补齐以满足协议。",
+                                toolCallId = tc.id
+                            )
+                        )
+                    }
+            }
+            // 2) 重排:assistant → 全部 tool_result → 其它
+            val assistantMsg = block.first()
+            val tail = block.drop(1)
+            val toolResults = tail.filter { isToolResult(it) }
+            val others = tail.filter { !isToolResult(it) }
+            result.add(assistantMsg)
+            result.addAll(toolResults)
+            result.addAll(others)
+        }
+
+        messages.forEach { msg ->
+            if (msg.role == "assistant" && msg.toolCalls.isNotEmpty()) {
+                // 进入新 block
+                flushBlock()
+                pendingBlock = mutableListOf(msg)
+            } else if (msg.role == "assistant") {
+                // 普通 assistant:把当前 block 收尾,然后把这条直接送出
+                flushBlock()
+                result.add(msg)
+            } else {
+                // tool / user / 其它:并入当前 block(若没有活跃 block 则直接送出)
+                val block = pendingBlock
+                if (block != null) {
+                    block.add(msg)
+                } else {
+                    result.add(msg)
+                }
+            }
+        }
+        flushBlock()
         return result
     }
 
