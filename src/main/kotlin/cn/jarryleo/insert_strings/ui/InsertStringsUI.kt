@@ -89,6 +89,11 @@ class InsertStringsUI(
     private var toolDocLoadCount: Int = 0
     // 当前轮待响应的 ask_user 工具调用 ID。用户点击选项后,作为 tool result 回传给 AI。
     private var pendingAskUserToolCallId: String? = null
+    // 用户点击「停止」时置为 true。runToolLoop 在每轮开头与 AI 调用返回后检查该标志,
+    // 为 true 时立即终止 tool loop,不再继续驱动 AI。
+    // 下一轮用户发送新消息时(sendChatMessage / onChatOptionClick)会重置为 false。
+    @Volatile
+    private var stopRequested: Boolean = false
 
     // Google Sheets state
     private var sheetsDefaultSpreadsheetId by mutableStateOf("")
@@ -176,6 +181,7 @@ class InsertStringsUI(
                     onRefreshSheetsList = ::refreshSheetsList,
                     onChatInputChange = { chatInput = it },
                     onSendChat = ::sendChat,
+                    onStopChat = ::stopChat,
                     onQuickSend = ::quickSend,
                     onNewChat = ::newChat,
                     onOptionClick = ::onChatOptionClick,
@@ -1253,7 +1259,21 @@ class InsertStringsUI(
     private fun sendChatMessage(text: String) {
         chatMessages.add(ChatMessage(role = "user", content = text))
         toolDocLoadCount = 0
+        stopRequested = false
         continueChatWithAi()
+    }
+
+    /**
+     * 用户点击「停止」按钮:标记停止请求,让当前/下一轮 tool loop 检测到后立即终止。
+     * 由于 AI HTTP 请求是阻塞的,正在进行的网络请求会等其完成,但其返回的 tool_call 不会再驱动新轮次。
+     * 不可重复点击(无副作用但也无意义)。
+     */
+    private fun stopChat() {
+        if (!chatSending) return
+        stopRequested = true
+        chatSending = false
+        pendingAskUserToolCallId = null
+        showToast("已停止生成")
     }
 
     /**
@@ -1282,9 +1302,17 @@ class InsertStringsUI(
      * 3. processAiReply 处理 actions
      * 4. 若仍有未完成动作,继续循环
      *
-     * 终止条件:AI 调用 task_complete / 用户主动取消 / 达到 MAX_ITERATIONS。
+     * 终止条件:AI 调用 task_complete / 用户主动停止 / 达到 MAX_ITERATIONS。
+     * 停止请求检查:每轮开头与 AI 调用返回后各检查一次 stopRequested,
+     * 命中时立即结束(正在进行的网络请求会等其完成,但其返回结果会被丢弃)。
      */
     private fun runToolLoop(context: String, iteration: Int) {
+        if (stopRequested) {
+            // 在 AI 调用之前就已停止(用户在迭代间隙点击了 Stop),不发起任何请求
+            handleStoppedByUser()
+            return
+        }
+
         if (iteration >= MAX_ITERATIONS) {
             SwingUtilities.invokeLater {
                 chatMessages.add(
@@ -1311,6 +1339,13 @@ class InsertStringsUI(
                 )
                 chatSending = false
             }
+            return
+        }
+
+        // 用户在 AI 网络请求期间点击了 Stop:丢弃本次响应,不再处理 tool_calls,
+        // 避免已请求到的 tool_use 在下次发送时因缺少 tool_result 而触发 Anthropic 报错。
+        if (stopRequested) {
+            handleStoppedByUser()
             return
         }
 
@@ -1359,22 +1394,38 @@ class InsertStringsUI(
             val toolCallId = actionToolCallIds.getOrNull(i).orEmpty()
             if (toolCallId.isEmpty()) null else ActionWithToolCall(action, toolCallId)
         }
+        // 关键:跟踪本回合尚未被处理的 pairs。每个优先级处理完自己的子集后,
+        // 必须为剩余 pairs 补上「已跳过」tool_result。否则 Anthropic 协议下,
+        // assistant 消息中的 tool_use 在下一轮会因「缺少 tool_result」而 HTTP 400:
+        //   tool_use blocks must be immediately followed by tool_result blocks
+        //   in the next user message
+        // OpenAI 协议虽然容错,但同样会污染上下文;统一补 skipped 最稳妥。
+        val unprocessed = pairs.toMutableList()
 
         // Priority 1: task_complete 终止对话
-        pairs.firstOrNull { it.action is AiAction.TaskComplete }?.let { (complete, _) ->
-            handleTaskComplete(complete as AiAction.TaskComplete)
+        val taskEntry = unprocessed.firstOrNull { it.action is AiAction.TaskComplete }
+        if (taskEntry != null) {
+            unprocessed.remove(taskEntry)
+            handleTaskComplete(taskEntry.action as AiAction.TaskComplete)
+            // task_complete 与其它 tool_use 同时返回时,其它 tool_use 视为被取消
+            addSkippedToolResults(unprocessed, "因 task_complete 终止对话而跳过")
             return
         }
 
         // Priority 2: ask_user
-        val askUserEntry = pairs.firstOrNull { it.action is AiAction.AskUser }
+        val askUserEntry = unprocessed.firstOrNull { it.action is AiAction.AskUser }
         if (askUserEntry != null) {
+            unprocessed.remove(askUserEntry)
             val askAction = askUserEntry.action as AiAction.AskUser
             if (askAction.options.isNotEmpty()) {
                 // 带 options:挂到 assistant 消息渲染按钮,记录 toolCallId,等待用户点击
                 chatMessages[chatMessages.lastIndex] =
                     chatMessages.last().copy(options = askAction.options)
                 pendingAskUserToolCallId = askUserEntry.toolCallId.takeIf { it.isNotEmpty() }
+                addSkippedToolResults(
+                    unprocessed,
+                    "因 ask_user 等待用户选择而跳过(用户点击选项后 AI 可重新发起)"
+                )
                 chatSending = false
                 return
             }
@@ -1388,6 +1439,10 @@ class InsertStringsUI(
                         toolCallId = askUserEntry.toolCallId
                     )
                 )
+                addSkippedToolResults(
+                    unprocessed,
+                    "因 ask_user 提示用户而跳过(系统已自动以提示内容回传 tool_result)"
+                )
                 continueToolLoopInBackground(context, iteration + 1)
                 return
             }
@@ -1395,14 +1450,16 @@ class InsertStringsUI(
         }
 
         // Priority 3: load_tool_doc
-        val loadDocEntries = pairs.filter { it.action is AiAction.LoadToolDoc }
+        val loadDocEntries = unprocessed.filter { it.action is AiAction.LoadToolDoc }
         if (loadDocEntries.isNotEmpty()) {
+            unprocessed.removeAll(loadDocEntries)
             handleLoadToolDoc(loadDocEntries, context, iteration)
+            addSkippedToolResults(unprocessed, "因 load_tool_doc 加载文档而跳过")
             return
         }
 
         // Priority 4-5: strings.xml 写操作(insert_strings / update_string / delete_string)统一做模块一致性校验
-        val writeEntries = pairs.filter {
+        val writeEntries = unprocessed.filter {
             it.action is AiAction.InsertStrings ||
                 it.action is AiAction.UpdateString ||
                 it.action is AiAction.DeleteString
@@ -1410,46 +1467,94 @@ class InsertStringsUI(
         if (writeEntries.isNotEmpty()) {
             val conflict = detectWriteModuleConflict(writeEntries)
             if (conflict != null) {
+                unprocessed.removeAll(writeEntries)
                 // 跨模块冲突:整批拒绝,把错误回传给 AI 让其修正
                 rejectWriteModuleConflict(writeEntries, conflict, context, iteration)
+                addSkippedToolResults(
+                    unprocessed,
+                    "因 strings 写动作跨模块冲突被拒,本批其它 action 一起跳过"
+                )
                 return
             }
         }
 
         // Priority 4: query_keys / read_string / update_string / delete_string / find_keys_by_text(strings.xml 主动操作能力)
         // 注意:update_string / delete_string 已被上面的模块一致性校验拦截(若有问题就 reject),此处仅含合法动作
-        val stringReadEntries = pairs.filter {
+        val stringReadEntries = unprocessed.filter {
             it.action is AiAction.QueryKeys ||
                 it.action is AiAction.ReadString ||
                 it.action is AiAction.FindKeysByText
         }
-        val stringWriteEntries = pairs.filter {
+        val stringWriteEntries = unprocessed.filter {
             it.action is AiAction.UpdateString || it.action is AiAction.DeleteString
         }
         val stringsEntries = stringReadEntries + stringWriteEntries
         if (stringsEntries.isNotEmpty()) {
+            unprocessed.removeAll(stringsEntries)
             executeStringsOps(stringsEntries, context, iteration)
+            addSkippedToolResults(unprocessed, "因已执行 strings.xml 操作而跳过")
             return
         }
 
         // Priority 5: insert_strings
-        val insertEntries = pairs.filter { it.action is AiAction.InsertStrings }
+        val insertEntries = unprocessed.filter { it.action is AiAction.InsertStrings }
         if (insertEntries.isNotEmpty()) {
+            unprocessed.removeAll(insertEntries)
             executeInsertActions(insertEntries, context, iteration)
+            addSkippedToolResults(unprocessed, "因已执行 insert_strings 而跳过")
             return
         }
 
         // Priority 6: sheets_operation / find_rows_by_text
-        val sheetsEntries = pairs.filter {
+        val sheetsEntries = unprocessed.filter {
             it.action is AiAction.SheetsOperation || it.action is AiAction.FindRowsByText
         }
         if (sheetsEntries.isNotEmpty()) {
+            unprocessed.removeAll(sheetsEntries)
             executeSheetsActions(sheetsEntries, context, iteration)
+            addSkippedToolResults(unprocessed, "因已执行 sheets_operation 而跳过")
             return
         }
 
         // 没有任何可执行 tool call:AI 只是在说,等用户输入
+        addSkippedToolResults(unprocessed, "本轮 AI 未调用可识别的工具")
         chatSending = false
+    }
+
+    /**
+     * 为指定 [unprocessedPairs] 中的每个 action 添加一条「已跳过」的 tool_result,
+     * 用于在 Anthropic / OpenAI 协议下满足「每个 tool_use 必须紧跟一个 tool_result」的要求。
+     * 没有 tool_result 的 tool_use 会让下一轮 API 调用直接返回 HTTP 400。
+     *
+     * 调用方应仅在确认这些 action 不会在本轮被执行时调用;已经发了「成功/失败」tool_result 的不必重复。
+     */
+    private fun addSkippedToolResults(
+        unprocessedPairs: List<ActionWithToolCall>,
+        reason: String
+    ) {
+        unprocessedPairs.forEach { (action, toolCallId) ->
+            if (toolCallId.isEmpty()) return@forEach
+            val actionLabel = when (action) {
+                is AiAction.InsertStrings -> "insert_strings"
+                is AiAction.UpdateString -> "update_string"
+                is AiAction.DeleteString -> "delete_string"
+                is AiAction.QueryKeys -> "query_keys"
+                is AiAction.ReadString -> "read_string"
+                is AiAction.FindKeysByText -> "find_keys_by_text"
+                is AiAction.FindRowsByText -> "find_rows_by_text"
+                is AiAction.AskUser -> "ask_user"
+                is AiAction.LoadToolDoc -> "load_tool_doc"
+                is AiAction.SheetsOperation -> "sheets_operation(${action.operation.name.lowercase()})"
+                is AiAction.TaskComplete -> "task_complete"
+            }
+            chatMessages.add(
+                ChatMessage(
+                    role = "tool",
+                    content = "[工具执行结果] 类型:$actionLabel 状态:已跳过 信息:$reason。如需执行,请在下一轮重新调用。",
+                    toolCallId = toolCallId
+                )
+            )
+        }
     }
 
     /**
@@ -1523,6 +1628,19 @@ class InsertStringsUI(
         }
         chatMessages.add(ChatMessage(role = "assistant", content = text))
         chatSending = false
+    }
+
+    /**
+     * 用户在 tool loop 中点击「停止」后的统一收尾:
+     * - 追加一条 assistant 消息提示已停止
+     * - 重置 stopRequested,以便下一轮用户发送新消息时重新进入循环
+     * - chatSending 已由 stopChat() 设为 false,这里不再重复设置
+     */
+    private fun handleStoppedByUser() {
+        SwingUtilities.invokeLater {
+            chatMessages.add(ChatMessage(role = "assistant", content = "⏹ 已停止生成。"))
+            stopRequested = false
+        }
     }
 
     /**
@@ -2075,6 +2193,9 @@ class InsertStringsUI(
             chatMessages[messageIndex] = msg.copy(options = emptyList())
         }
 
+        // 重置停止标志:用户主动操作意味着继续对话
+        stopRequested = false
+
         // Priority 1:ask_user 工具调用 → 作为 tool result 回传给 AI
         val askToolCallId = pendingAskUserToolCallId
         if (askToolCallId != null) {
@@ -2102,6 +2223,8 @@ class InsertStringsUI(
     }
 
     private fun newChat() {
+        // 标记停止,防止正在运行的 tool loop 在清空后继续向 chatMessages 追加新消息
+        stopRequested = true
         chatMessages.clear()
         chatInput = ""
         chatSending = false
@@ -2416,6 +2539,7 @@ private fun InsertStringsContent(
     onRefreshSheetsList: () -> Unit,
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
+    onStopChat: () -> Unit,
     onQuickSend: (String) -> Unit,
     onNewChat: () -> Unit,
     onOptionClick: (Int, String) -> Unit,
@@ -2472,6 +2596,7 @@ private fun InsertStringsContent(
                         onNewChat = onNewChat,
                         onChatInputChange = onChatInputChange,
                         onSendChat = onSendChat,
+                        onStopChat = onStopChat,
                         onQuickSend = onQuickSend,
                         onOptionClick = onOptionClick,
                         modifier = Modifier.fillMaxSize(),

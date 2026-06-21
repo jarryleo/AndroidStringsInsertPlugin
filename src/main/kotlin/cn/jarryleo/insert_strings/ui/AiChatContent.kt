@@ -34,6 +34,7 @@ fun AiChatContent(
     onNewChat: () -> Unit,
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
+    onStopChat: () -> Unit,
     onQuickSend: (String) -> Unit,
     onOptionClick: (Int, String) -> Unit,
     modifier: Modifier = Modifier,
@@ -185,13 +186,23 @@ fun AiChatContent(
                 maxLines = 10,
                 colors = colors,
             )
-            CompactButton(
-                text = if (chatSending) "..." else "Send",
-                onClick = onSendChat,
-                modifier = Modifier.width(56.dp),
-                colors = colors,
-                primary = true,
-            )
+            if (chatSending) {
+                CompactButton(
+                    text = "Stop",
+                    onClick = onStopChat,
+                    modifier = Modifier.width(56.dp),
+                    colors = colors,
+                    primary = false,
+                )
+            } else {
+                CompactButton(
+                    text = "Send",
+                    onClick = onSendChat,
+                    modifier = Modifier.width(56.dp),
+                    colors = colors,
+                    primary = true,
+                )
+            }
         }
     }
 }
