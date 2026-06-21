@@ -1,0 +1,1186 @@
+package cn.jarryleo.insert_strings.ui
+
+import cn.jarryleo.insert_strings.ai.AITranslator
+import cn.jarryleo.insert_strings.ai.AiAction
+import cn.jarryleo.insert_strings.ai.AiReply
+import cn.jarryleo.insert_strings.ai.ChatMessage
+import cn.jarryleo.insert_strings.ai.ToolCall
+import cn.jarryleo.insert_strings.sheets.SheetsManager
+import cn.jarryleo.insert_strings.xml.ContextManager
+import cn.jarryleo.insert_strings.xml.KeyedStringsInfo
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.project.Project
+import javax.swing.SwingUtilities
+
+/**
+ * AI chat 域的总驱动器:
+ *  - 工具调用主循环(最多 MAX_ITERATIONS 轮,或 task_complete / 用户停止)
+ *  - action 分发(insert / sheets / strings / load_tool_doc / ask_user / task_complete)
+ *  - 用户/AI 之间的消息收发(stop / quick send / option click / new chat)
+ *  - Anthropic 协议所需的 tool_use/tool_result 配对补齐
+ *  - 重复 key 插入的二次确认流程
+ *
+ * 拆分理由:这是整个类里逻辑最复杂、最容易出 bug 的一段;独立成类后,
+ * InsertStringsUI 类本身只剩 state + 装配,主类体积会从 ~2900 行降到 ~300 行。
+ */
+internal class InsertStringsChatDriver(
+    private val ui: InsertStringsUI,
+    private val stringsOps: InsertStringsStringsOpsController,
+    private val sheetsOps: InsertStringsSheetsOpsController,
+    private val chatContextBuilder: InsertStringsChatContextBuilder,
+) {
+
+    private val project: Project get() = ui.project
+
+    companion object {
+        // 单次对话中 AI 调用工具的最大轮数。超过则强制结束,防止死循环。
+        // 设 30 足以覆盖现实中的多步操作(检查+修正等),又能及时止损。
+        private const val MAX_ITERATIONS = 30
+        // load_tool_doc 按需加载工具文档的最大连续次数,防止 AI 反复加载文档而不执行操作。
+        private const val MAX_TOOL_DOC_LOADS = 4
+        // 单轮对话中 ask_user 的最大连续调用次数,防止 AI 反复追问形成死循环。
+        // 每次用户实际回复(发送消息 / 点击选项)后重置为 0。
+        private const val MAX_ASK_USER_CALLS = 3
+        // 默认语言目录名(对应 values/ 目录,Android 默认英语资源)。
+        // 作为兜底确保插入翻译时一定包含 values 键,避免英语写空。
+        const val DEFAULT_LANGUAGE = "values"
+    }
+
+    /**
+     * action 与其对应的 tool_call_id 配对,用于 execute 方法的精确回传。
+     * 取代之前 `actions: List<T> + actionToolCallIds: List<String>` 的下标对齐模式,
+     * 避免过滤后下标错位的 bug。
+     */
+    data class ActionWithToolCall(
+        val action: AiAction,
+        val toolCallId: String
+    )
+
+    /**
+     * 系统发起的「重复 key 插入」询问,等待用户在气泡上选择覆盖/末尾追加/取消。
+     */
+    data class PendingSheetsInsert(
+        val actions: List<AiAction.SheetsOperation>,
+        /**
+         * 与 [actions] 平行对齐的 tool_call_id 列表。用户做出选择、执行后,
+         * 用这些 id 把 tool result 回传给 AI。
+         */
+        val actionToolCallIds: List<String>,
+        val duplicateKeys: Set<String>,
+        val spreadsheetId: String,
+        val sheetName: String,
+        val context: String,
+        val iteration: Int
+    )
+
+    fun sendChat() {
+        val text = ui.chatInput.trim()
+        if (text.isEmpty() || ui.chatSending) return
+        ui.chatInput = ""
+        sendChatMessage(text)
+    }
+
+    fun quickSend(text: String) {
+        if (text.isBlank() || ui.chatSending) return
+        sendChatMessage(text.trim())
+    }
+
+    fun sendChatMessage(text: String) {
+        val askToolCallId = ui.pendingAskUserToolCallId
+        if (askToolCallId != null) {
+            // 这是对 ask_user(无 options 场景)的回复,作为 tool_result 回传给 AI,
+            // 而非新增 user 消息,否则会破坏 tool_use/tool_result 的配对语义。
+            ui.pendingAskUserToolCallId = null
+            ui.chatMessages.add(ChatMessage(role = "tool", content = text, toolCallId = askToolCallId))
+        } else {
+            ui.chatMessages.add(ChatMessage(role = "user", content = text))
+        }
+        ui.toolDocLoadCount = 0
+        ui.askUserCallCount = 0
+        ui.stopRequested = false
+        continueChatWithAi()
+    }
+
+    /**
+     * 用户点击「停止」按钮:标记停止请求,让当前/下一轮 tool loop 检测到后立即终止。
+     * 由于 AI HTTP 请求是阻塞的,正在进行的网络请求会等其完成,但其返回的 tool_call 不会再驱动新轮次。
+     * 不可重复点击(无副作用但也无意义)。
+     *
+     * 同时也覆盖 ask_user 等待用户响应的场景:此时 chatSending=false 但 pendingAskUserToolCallId
+     * 非空,需要补全 tool_result 以满足 Anthropic 协议要求,否则下次发送新消息时会 HTTP 400。
+     */
+    fun stopChat() {
+        val hasPendingAsk = ui.pendingAskUserToolCallId != null
+        if (!ui.chatSending && !hasPendingAsk) return
+        ui.stopRequested = true
+        ui.chatSending = false
+        if (hasPendingAsk) {
+            fillMissingToolResults("[已取消] 用户点击了停止按钮")
+            ui.pendingAskUserToolCallId = null
+            ui.chatMessages.add(ChatMessage(role = "assistant", content = "⏹ 已停止生成。"))
+        }
+        ui.actionsController.showToast("已停止生成")
+    }
+
+    /**
+     * 打开「AI 上下文」弹窗:按需构造当前上下文(调用 buildChatContext),
+     * 并尝试 pretty-print 成多行 JSON,方便用户直接查看 AI 真实收到的字段。
+     */
+    fun openContextPopup() {
+        val raw = chatContextBuilder.build()
+        ui.chatContextText = runCatching {
+            val element = com.google.gson.JsonParser.parseString(raw)
+            com.google.gson.GsonBuilder().setPrettyPrinting().serializeNulls().create().toJson(element)
+        }.getOrElse { raw }
+        ui.showContextPopup = true
+    }
+
+    fun closeContextPopup() {
+        ui.showContextPopup = false
+    }
+
+    fun newChat() {
+        // 标记停止,防止正在运行的 tool loop 在清空后继续向 chatMessages 追加新消息
+        ui.stopRequested = true
+        ui.chatMessages.clear()
+        ui.chatInput = ""
+        ui.chatSending = false
+        ui.pendingAskUserToolCallId = null
+        ui.askUserCallCount = 0
+    }
+
+    /**
+     * 对话气泡选项按钮点击回调。
+     * 优先级:待响应的 ask_user 工具调用 > 系统发起的重复 key 询问 > 兜底普通消息。
+     */
+    fun onChatOptionClick(messageIndex: Int, option: String) {
+        // 清除该消息的 options 使按钮消失
+        if (messageIndex in ui.chatMessages.indices) {
+            val msg = ui.chatMessages[messageIndex]
+            ui.chatMessages[messageIndex] = msg.copy(options = emptyList())
+        }
+
+        // 重置停止标志:用户主动操作意味着继续对话
+        ui.stopRequested = false
+
+        // Priority 1:ask_user 工具调用 → 作为 tool result 回传给 AI
+        val askToolCallId = ui.pendingAskUserToolCallId
+        if (askToolCallId != null) {
+            ui.pendingAskUserToolCallId = null
+            ui.askUserCallCount = 0
+            ui.chatMessages.add(
+                ChatMessage(role = "tool", content = option, toolCallId = askToolCallId)
+            )
+            val context = chatContextBuilder.build()
+            continueToolLoopInBackground(context, iteration = 0)
+            return
+        }
+
+        // Priority 2:系统发起的重复 key 询问
+        val pending = ui.pendingSheetsInsert
+        if (pending != null) {
+            ui.pendingSheetsInsert = null
+            resolveDuplicateInsert(option, pending)
+            return
+        }
+
+        // 兜底:作为普通用户消息发回(保持旧逻辑兼容)
+        ui.chatMessages.add(ChatMessage(role = "user", content = option))
+        ui.toolDocLoadCount = 0
+        continueChatWithAi()
+    }
+
+    /**
+     * 公共 AI 调用入口。供 sendChatMessage 和 onChatOptionClick 共用。
+     * 调用前应已把用户消息(或 tool result)加入 chatMessages。
+     *
+     * 关键设计:采用原生 function calling 协议后,AI 必须调用 task_complete 才能终止。
+     * runToolLoop 在后台持续驱动 AI 调用工具,直到达成 task_complete 或达到 MAX_ITERATIONS。
+     */
+    private fun continueChatWithAi() {
+        ui.chatSending = true
+        val context = chatContextBuilder.build()
+        continueToolLoopInBackground(context, iteration = 0)
+    }
+
+    private fun continueToolLoopInBackground(context: String, iteration: Int) {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            runToolLoop(context, iteration)
+        }
+    }
+
+    /**
+     * 工具调用主循环。后台线程上执行:
+     * 1. 调一次 AI
+     * 2. 切回 EDT,记入 assistant 消息(含 tool_calls）
+     * 3. processAiReply 处理 actions
+     * 4. 若仍有未完成动作,继续循环
+     *
+     * 终止条件:AI 调用 task_complete / 用户主动停止 / 达到 MAX_ITERATIONS。
+     * 停止请求检查:每轮开头与 AI 调用返回后各检查一次 stopRequested,
+     * 命中时立即结束(正在进行的网络请求会等其完成,但其返回结果会被丢弃)。
+     */
+    private fun runToolLoop(context: String, iteration: Int) {
+        if (ui.stopRequested) {
+            // 在 AI 调用之前就已停止(用户在迭代间隙点击了 Stop),不发起任何请求
+            handleStoppedByUser()
+            return
+        }
+
+        if (iteration >= MAX_ITERATIONS) {
+            SwingUtilities.invokeLater {
+                ui.chatMessages.add(
+                    ChatMessage(
+                        role = "assistant",
+                        content = "已达到最大工具调用轮数($MAX_ITERATIONS),强制结束。请检查任务后重试。"
+                    )
+                )
+                ui.chatSending = false
+            }
+            return
+        }
+
+        // 兜底安全网:在 AI 调用前扫描 chatMessages,补齐所有尚未配对的 tool_result。
+        // 这一步能挡住所有前序流程(用户主动操作 / 后台线程竞态 / Stop 按钮等)
+        // 引入的悬挂 tool_use,确保每次 API 请求都满足 Anthropic 协议要求
+        // (tool_use 必须紧跟 tool_result,否则 HTTP 400)。
+        try {
+            SwingUtilities.invokeAndWait {
+                fillMissingToolResults("[自动补全] 上一轮未配对的工具调用")
+            }
+        } catch (e: Exception) {
+            // invokeAndWait 异常不应阻塞 AI 调用,继续走原流程
+        }
+
+        val reply: AiReply
+        try {
+            reply = AITranslator.chat(ui.chatMessages.toList(), context)
+        } catch (e: Exception) {
+            SwingUtilities.invokeLater {
+                ui.chatMessages.add(
+                    ChatMessage(
+                        role = "assistant",
+                        content = "AI 请求失败:${e.message ?: "unknown"}"
+                    )
+                )
+                ui.chatSending = false
+            }
+            return
+        }
+
+        // 用户在 AI 网络请求期间点击了 Stop:丢弃本次响应,不再处理 tool_calls,
+        // 避免已请求到的 tool_use 在下次发送时因缺少 tool_result 而触发 Anthropic 报错。
+        if (ui.stopRequested) {
+            handleStoppedByUser()
+            return
+        }
+
+        SwingUtilities.invokeLater {
+            // 1. 记入 assistant 消息,带 tool_calls(同时包含已解析与未解析的全部 tool_use)
+            //    若 AI 只返回 tool_calls 没文字,填充占位文案,避免空气泡
+            val assistantContent = when {
+                reply.reply.isNotBlank() -> reply.reply
+                reply.toolCalls.isNotEmpty() -> "执行操作: ${summarizeToolCalls(reply.toolCalls)}"
+                else -> ""
+            }
+            ui.chatMessages.add(
+                ChatMessage(
+                    role = "assistant",
+                    content = assistantContent,
+                    toolCalls = reply.toolCalls
+                )
+            )
+
+            // 2. 为「解析失败」的 tool_use 补 tool_result(防止 Anthropic 报
+            //    "tool_use.id 'xxx' was found without a corresponding tool_result
+            //    block immediately after")。这些 tool_use 占着 assistant 的位置,
+            //    但 actions 中没有对应项,会被 processAiReply 漏掉,必须在此处补齐。
+            reply.failedToolCalls.forEach { failed ->
+                ui.chatMessages.add(
+                    ChatMessage(
+                        role = "tool",
+                        content = "[工具执行结果] 类型:unknown(${failed.name}) 状态:解析失败 " +
+                            "信息:该工具调用的参数无法解析或工具名未注册。请检查调用格式后重试。",
+                        toolCallId = failed.id
+                    )
+                )
+            }
+
+            // 3. 建立 action → toolCallId 的下标映射。
+            //    parseAiReply 已保证 reply.actions 与 reply.toolCalls 严格 1:1 对齐,
+            //    这里的下标取 id 才是正确的(之前 mapNotNull 会丢项导致错位)。
+            val actionToolCallIds = reply.actions.indices.map { i ->
+                reply.toolCalls.getOrNull(i)?.id.orEmpty()
+            }
+
+            // 4. 分发处理
+            processAiReply(reply, actionToolCallIds, context, iteration)
+        }
+    }
+
+    /**
+     * 处理一次 AI 回复:按优先级分发到 task_complete / ask_user / load_tool_doc / insert / sheets 各分支。
+     * 各分支处理完后再决定是否继续 tool loop。
+     *
+     * 关键设计:统一用 [ActionWithToolCall] 配对列表传递 action 与其 tool_call_id,
+     * 杜绝「过滤后下标错位」的历史 bug。写操作(insert/update)还要先做模块一致性校验,
+     * 防止 AI 一次回合内把不同 strings 插入到不同模块。
+     */
+    private fun processAiReply(
+        reply: AiReply,
+        actionToolCallIds: List<String>,
+        context: String,
+        iteration: Int
+    ) {
+        // 构造精确配对:每个 action 携带自己的 tool_call_id,不再依赖下标
+        val pairs: List<ActionWithToolCall> = reply.actions.mapIndexedNotNull { i, action ->
+            val toolCallId = actionToolCallIds.getOrNull(i).orEmpty()
+            if (toolCallId.isEmpty()) null else ActionWithToolCall(action, toolCallId)
+        }
+        // 关键:跟踪本回合尚未被处理的 pairs。每个优先级处理完自己的子集后,
+        // 必须为剩余 pairs 补上「已跳过」tool_result。否则 Anthropic 协议下,
+        // assistant 消息中的 tool_use 在下一轮会因「缺少 tool_result」而 HTTP 400:
+        //   tool_use blocks must be immediately followed by tool_result blocks
+        //   in the next user message
+        // OpenAI 协议虽然容错,但同样会污染上下文;统一补 skipped 最稳妥。
+        val unprocessed = pairs.toMutableList()
+
+        // Priority 1: task_complete 终止对话
+        val taskEntry = unprocessed.firstOrNull { it.action is AiAction.TaskComplete }
+        if (taskEntry != null) {
+            unprocessed.remove(taskEntry)
+            handleTaskComplete(taskEntry.action as AiAction.TaskComplete)
+            // task_complete 与其它 tool_use 同时返回时,其它 tool_use 视为被取消
+            addSkippedToolResults(unprocessed, "因 task_complete 终止对话而跳过")
+            return
+        }
+
+        // Priority 2: ask_user
+        val askUserEntry = unprocessed.firstOrNull { it.action is AiAction.AskUser }
+        if (askUserEntry != null) {
+            unprocessed.remove(askUserEntry)
+            val askAction = askUserEntry.action as AiAction.AskUser
+            val askToolCallId = askUserEntry.toolCallId.takeIf { it.isNotEmpty() }
+
+            // 安全网:限制单轮内 ask_user 连续调用次数,防止 AI 反复追问形成死循环。
+            ui.askUserCallCount++
+            if (ui.askUserCallCount > MAX_ASK_USER_CALLS) {
+                if (askToolCallId != null) {
+                    ui.chatMessages.add(
+                        ChatMessage(
+                            role = "tool",
+                            content = "[已取消] ask_user 调用次数已达上限($MAX_ASK_USER_CALLS 次),系统为防止死循环自动终止。" +
+                                "请基于已有信息完成任务(task_complete),或直接采取合理操作。",
+                            toolCallId = askToolCallId
+                        )
+                    )
+                }
+                addSkippedToolResults(
+                    unprocessed,
+                    "因 ask_user 调用次数超限被强制终止"
+                )
+                ui.chatMessages.add(
+                    ChatMessage(
+                        role = "assistant",
+                        content = "⏹ ask_user 调用次数已达上限($MAX_ASK_USER_CALLS 次),已自动终止。请基于已有信息继续。"
+                    )
+                )
+                ui.chatSending = false
+                ui.pendingAskUserToolCallId = null
+                return
+            }
+
+            if (askAction.options.isNotEmpty()) {
+                // 带 options:挂到 assistant 消息渲染按钮,记录 toolCallId,等待用户点击
+                ui.chatMessages[ui.chatMessages.lastIndex] =
+                    ui.chatMessages.last().copy(options = askAction.options)
+            } else {
+                // 无 options:用 toast 通知用户问题内容,等待用户在输入框中回复
+                ui.actionsController.showToast(askAction.question)
+            }
+            // 无论是否带 options,都暂停 loop 等待用户响应。
+            // 修复:之前无 options 时自动回传「已向用户显示问题,无需回复」并继续 loop,
+            //      导致 AI 反复调用 ask_user 而用户根本没机会回复,形成死循环。
+            ui.pendingAskUserToolCallId = askToolCallId
+            addSkippedToolResults(
+                unprocessed,
+                "因 ask_user 等待用户响应而跳过(用户点击选项或发送消息后 AI 可继续)"
+            )
+            ui.chatSending = false
+            return
+        }
+
+        // Priority 3: load_tool_doc
+        val loadDocEntries = unprocessed.filter { it.action is AiAction.LoadToolDoc }
+        if (loadDocEntries.isNotEmpty()) {
+            unprocessed.removeAll(loadDocEntries)
+            handleLoadToolDoc(loadDocEntries, context, iteration)
+            addSkippedToolResults(unprocessed, "因 load_tool_doc 加载文档而跳过")
+            return
+        }
+
+        // Priority 4-5: strings.xml 写操作(insert_strings / update_string / delete_string)统一做模块一致性校验
+        val writeEntries = unprocessed.filter {
+            it.action is AiAction.InsertStrings ||
+                it.action is AiAction.UpdateString ||
+                it.action is AiAction.DeleteString
+        }
+        if (writeEntries.isNotEmpty()) {
+            val conflict = detectWriteModuleConflict(writeEntries)
+            if (conflict != null) {
+                unprocessed.removeAll(writeEntries)
+                // 跨模块冲突:整批拒绝,把错误回传给 AI 让其修正
+                rejectWriteModuleConflict(writeEntries, conflict, context, iteration)
+                addSkippedToolResults(
+                    unprocessed,
+                    "因 strings 写动作跨模块冲突被拒,本批其它 action 一起跳过"
+                )
+                return
+            }
+        }
+
+        // Priority 4: query_keys / read_string / update_string / delete_string / find_keys_by_text(strings.xml 主动操作能力)
+        // 注意:update_string / delete_string 已被上面的模块一致性校验拦截(若有问题就 reject),此处仅含合法动作
+        val stringReadEntries = unprocessed.filter {
+            it.action is AiAction.QueryKeys ||
+                it.action is AiAction.ReadString ||
+                it.action is AiAction.FindKeysByText
+        }
+        val stringWriteEntries = unprocessed.filter {
+            it.action is AiAction.UpdateString || it.action is AiAction.DeleteString
+        }
+        val stringsEntries = stringReadEntries + stringWriteEntries
+        if (stringsEntries.isNotEmpty()) {
+            unprocessed.removeAll(stringsEntries)
+            executeStringsOps(stringsEntries, context, iteration)
+            addSkippedToolResults(unprocessed, "因已执行 strings.xml 操作而跳过")
+            return
+        }
+
+        // Priority 5: insert_strings
+        val insertEntries = unprocessed.filter { it.action is AiAction.InsertStrings }
+        if (insertEntries.isNotEmpty()) {
+            unprocessed.removeAll(insertEntries)
+            executeInsertActions(insertEntries, context, iteration)
+            addSkippedToolResults(unprocessed, "因已执行 insert_strings 而跳过")
+            return
+        }
+
+        // Priority 6: sheets_operation / find_rows_by_text
+        val sheetsEntries = unprocessed.filter {
+            it.action is AiAction.SheetsOperation || it.action is AiAction.FindRowsByText
+        }
+        if (sheetsEntries.isNotEmpty()) {
+            unprocessed.removeAll(sheetsEntries)
+            executeSheetsActions(sheetsEntries, context, iteration)
+            addSkippedToolResults(unprocessed, "因已执行 sheets_operation 而跳过")
+            return
+        }
+
+        // 没有任何可执行 tool call:AI 只是在说,等用户输入
+        addSkippedToolResults(unprocessed, "本轮 AI 未调用可识别的工具")
+        ui.chatSending = false
+    }
+
+    /**
+     * 为指定 [unprocessedPairs] 中的每个 action 添加一条「已跳过」的 tool_result,
+     * 用于在 Anthropic / OpenAI 协议下满足「每个 tool_use 必须紧跟一个 tool_result」的要求。
+     * 没有 tool_result 的 tool_use 会让下一轮 API 调用直接返回 HTTP 400。
+     *
+     * 调用方应仅在确认这些 action 不会在本轮被执行时调用;已经发了「成功/失败」tool_result 的不必重复。
+     */
+    private fun addSkippedToolResults(
+        unprocessedPairs: List<ActionWithToolCall>,
+        reason: String
+    ) {
+        unprocessedPairs.forEach { (action, toolCallId) ->
+            if (toolCallId.isEmpty()) return@forEach
+            val actionLabel = when (action) {
+                is AiAction.InsertStrings -> "insert_strings"
+                is AiAction.UpdateString -> "update_string"
+                is AiAction.DeleteString -> "delete_string"
+                is AiAction.QueryKeys -> "query_keys"
+                is AiAction.ReadString -> "read_string"
+                is AiAction.FindKeysByText -> "find_keys_by_text"
+                is AiAction.FindRowsByText -> "find_rows_by_text"
+                is AiAction.AskUser -> "ask_user"
+                is AiAction.LoadToolDoc -> "load_tool_doc"
+                is AiAction.SheetsOperation -> "sheets_operation(${action.operation.name.lowercase()})"
+                is AiAction.TaskComplete -> "task_complete"
+            }
+            ui.chatMessages.add(
+                ChatMessage(
+                    role = "tool",
+                    content = "[工具执行结果] 类型:$actionLabel 状态:已跳过 信息:$reason。如需执行,请在下一轮重新调用。",
+                    toolCallId = toolCallId
+                )
+            )
+        }
+    }
+
+    /**
+     * 检测 write actions(insert_strings + update_string + delete_string)是否指定了不同模块。
+     * @return 冲突描述(列出所有显式指定的 module);若全部一致或仅有 0~1 个显式 module,返回 null
+     */
+    private fun detectWriteModuleConflict(
+        writeEntries: List<ActionWithToolCall>
+    ): String? {
+        val explicitModules = writeEntries
+            .mapNotNull { entry ->
+                val m = when (val action = entry.action) {
+                    is AiAction.InsertStrings -> action.module
+                    is AiAction.UpdateString -> action.module
+                    is AiAction.DeleteString -> action.module
+                    else -> null
+                }?.trim()?.takeIf { it.isNotEmpty() }
+                normalizeExplicitWriteModule(m)
+            }
+            .distinct()
+        return if (explicitModules.size > 1) explicitModules.joinToString(", ") else null
+    }
+
+    private fun normalizeExplicitWriteModule(moduleName: String?): String? {
+        val candidate = moduleName?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (candidate == ContextManager.contextInfo?.projectName) return null
+        return ContextManager.resolveDisplayModuleName(project, candidate) ?: candidate
+    }
+
+    /**
+     * 整批拒绝跨模块的 write actions,给每个 action 发错误 tool_result。
+     * AI 会在下一轮看到错误并修正(统一 module 或全部省略 module 让系统用 currentModule)。
+     */
+    private fun rejectWriteModuleConflict(
+        writeEntries: List<ActionWithToolCall>,
+        explicitModulesCsv: String,
+        context: String,
+        iteration: Int
+    ) {
+        val errorMsg = buildString {
+            append("[工具执行异常] 跨模块冲突:本轮内 insert_strings/update_string/delete_string 动作指定了多个不同 module(")
+            append(explicitModulesCsv)
+            append(")。同一 AI 回合内的所有字符串写入必须在同一模块。")
+            append("请重新组织 actions:全部省略 module 参数(系统使用 currentModule),")
+            append("或全部显式指定同一 module。若确实需要写入多个模块,请拆成多个 AI 回合。")
+        }
+        ui.chatMessages.add(
+            ChatMessage(role = "tool", content = errorMsg, toolCallId = writeEntries.first().toolCallId)
+        )
+        // 其余 action 同样发错误,避免协议错位
+        writeEntries.drop(1).forEach { entry ->
+            ui.chatMessages.add(
+                ChatMessage(role = "tool", content = errorMsg, toolCallId = entry.toolCallId)
+            )
+        }
+        continueToolLoopInBackground(context, iteration + 1)
+    }
+
+    private fun handleTaskComplete(complete: AiAction.TaskComplete) {
+        val icon = when (complete.status.lowercase()) {
+            "success" -> "✅"
+            "partial" -> "⚠️"
+            "failed" -> "❌"
+            else -> "ℹ️"
+        }
+        val text = buildString {
+            append(icon).append(' ').append(complete.summary)
+            if (!complete.notes.isNullOrBlank()) {
+                append("\n\n").append(complete.notes)
+            }
+        }
+        ui.chatMessages.add(ChatMessage(role = "assistant", content = text))
+        ui.chatSending = false
+    }
+
+    /**
+     * 用户在 tool loop 中点击「停止」后的统一收尾:
+     * - 追加一条 assistant 消息提示已停止
+     * - 重置 stopRequested,以便下一轮用户发送新消息时重新进入循环
+     * - chatSending 已由 stopChat() 设为 false,这里不再重复设置
+     */
+    private fun handleStoppedByUser() {
+        SwingUtilities.invokeLater {
+            // 防御性:在添加「已停止」消息前,先把对话历史中所有尚未配对的 tool_use
+            // 补上「已取消」tool_result,避免下一轮 AI 请求时 Anthropic 报:
+            //   tool_use.id 'xxx' was found without a corresponding tool_result
+            //   block immediately after
+            // 这覆盖了 ask_user 等待用户点选项、用户却点 Stop 等导致 tool_use 悬挂的场景。
+            fillMissingToolResults("[已取消] 用户点击了停止按钮,该工具调用未执行。如需执行,请在下一轮重新发起。")
+            ui.chatMessages.add(ChatMessage(role = "assistant", content = "⏹ 已停止生成。"))
+            ui.stopRequested = false
+        }
+    }
+
+    /**
+     * 扫描 chatMessages,找出所有尚未配对的 tool_use 块(assistant.toolCalls 中存在、
+     * 但 chatMessages 中没有对应 toolCallId 的 tool 消息),为它们补一条 tool_result
+     * 以满足 Anthropic 协议要求(每个 tool_use 必须紧跟 tool_result,否则 HTTP 400)。
+     *
+     * 关键:合成 tool_result 必须**插入到产生 tool_use 的 assistant 消息所在 block 内**,
+     * 而且要排在 block 内所有非 tool_result 消息之前,否则会被 user 文本消息"截胡"
+     * —— 那时 tool_result 落到 user 消息之后,Anthropic 仍会拒绝
+     * (tool_use blocks must be immediately followed by tool_result blocks in the next user message)。
+     *
+     * 插入位置算法:对每个含 tool_uses 的 assistant 消息,确定其 block(到下一个 assistant
+     * 或 chatMessages 末尾),在 block 内**第一个非 tool_result 消息之前**(若 block 全部是
+     * tool_result 则在 block 末尾)插入合成 tool_result;按 insertAt 降序插入以避免下标错位。
+     *
+     * @param reason 写入 tool_result content 的说明,告诉 AI 为什么这个 action 没被执行
+     */
+    private fun fillMissingToolResults(reason: String) {
+        if (ui.chatMessages.isEmpty()) return
+
+        // 1) 收集所有 (insertAt, toolResultMessage),稍后按 insertAt 降序插入
+        val toInsert = mutableListOf<Pair<Int, ChatMessage>>()
+
+        // 2) 助手查名字表(toolCallId -> 工具名),用于合成 tool_result 的内容描述
+        val nameById = mutableMapOf<String, String>()
+        ui.chatMessages.forEach { msg ->
+            if (msg.role == "assistant") {
+                msg.toolCalls.forEach { tc -> nameById.putIfAbsent(tc.id, tc.name) }
+            }
+        }
+
+        // 3) 遍历每个含 tool_uses 的 assistant,计算其 block 与插入点
+        ui.chatMessages.forEachIndexed { idx, msg ->
+            if (msg.role != "assistant" || msg.toolCalls.isEmpty()) return@forEachIndexed
+
+            // block = [idx+1, endOfBlock),endOfBlock 是下一个 assistant 或 chatMessages 末尾
+            var endOfBlock = idx + 1
+            while (endOfBlock < ui.chatMessages.size && ui.chatMessages[endOfBlock].role != "assistant") {
+                endOfBlock++
+            }
+
+            // 在 block 内找到所有已有的 tool_result(tool 消息 + user 带 toolCallId)
+            val pairedIds = mutableSetOf<String>()
+            for (i in (idx + 1) until endOfBlock) {
+                val m = ui.chatMessages[i]
+                if (m.role == "tool" || (m.role == "user" && m.toolCallId != null)) {
+                    m.toolCallId?.let { pairedIds.add(it) }
+                }
+            }
+
+            // 找出本 assistant 的未配对 tool_use
+            val unpaired = msg.toolCalls.filter { it.id !in pairedIds }
+            if (unpaired.isEmpty()) return@forEachIndexed
+
+            // 在 block 内找第一个非 tool_result 的位置(没有则用 block 末尾)
+            var insertAt = endOfBlock
+            for (i in (idx + 1) until endOfBlock) {
+                val m = ui.chatMessages[i]
+                val isToolResult = m.role == "tool" || (m.role == "user" && m.toolCallId != null)
+                if (!isToolResult) {
+                    insertAt = i
+                    break
+                }
+            }
+
+            unpaired.forEach { tc ->
+                toInsert.add(
+                    insertAt to ChatMessage(
+                        role = "tool",
+                        content = "[工具执行结果] 类型:${tc.name} 状态:已取消 信息:$reason",
+                        toolCallId = tc.id
+                    )
+                )
+            }
+        }
+
+        // 4) 按 insertAt 降序插入,避免下标位移影响后续插入位置
+        toInsert.sortedByDescending { it.first }.forEach { (insertAt, message) ->
+            ui.chatMessages.add(insertAt, message)
+        }
+    }
+
+    /**
+     * 处理 load_tool_doc:为每个 load_tool_doc 调用添加对应的 tool result 注入文档,
+     * 然后继续 tool loop 让 AI 返回实际执行动作。
+     */
+    private fun handleLoadToolDoc(
+        entries: List<ActionWithToolCall>,
+        context: String,
+        iteration: Int
+    ) {
+        if (ui.toolDocLoadCount >= MAX_TOOL_DOC_LOADS) {
+            ui.chatMessages.add(
+                ChatMessage(
+                    role = "assistant",
+                    content = "工具文档加载次数已达上限($MAX_TOOL_DOC_LOADS 次),请直接执行操作或向用户说明情况。"
+                )
+            )
+            ui.chatSending = false
+            return
+        }
+        ui.toolDocLoadCount++
+
+        val requestedTools = entries.mapNotNull { (action, _) ->
+            (action as? AiAction.LoadToolDoc)?.tool
+        }.distinct()
+        val docsToInject = requestedTools.mapNotNull { tool ->
+            AITranslator.getToolDoc(tool)?.let { doc -> tool to doc }
+        }
+
+        val summary = if (docsToInject.isEmpty()) {
+            val available = AITranslator.availableToolDocs().joinToString(", ")
+            "[工具文档加载失败] 请求的工具名不存在。可用工具:$available。" +
+                "请用正确的工具名重新请求,或直接返回可执行的工具调用。"
+        } else {
+            buildString {
+                docsToInject.forEach { (_, doc) ->
+                    appendLine(doc)
+                    appendLine()
+                }
+                appendLine("以上是你请求加载的工具文档。请据此直接返回正确的工具调用执行操作,不要再请求加载文档。")
+            }
+        }
+
+        // 为每个 load_tool_doc 调用添加对应的 tool result(一对一关联 toolCallId)
+        entries.forEach { (_, toolCallId) ->
+            if (toolCallId.isNotEmpty()) {
+                ui.chatMessages.add(
+                    ChatMessage(role = "tool", content = summary, toolCallId = toolCallId)
+                )
+            }
+        }
+
+        // 继续 tool loop:让 AI 拿到文档后返回实际工具调用
+        continueToolLoopInBackground(context, iteration + 1)
+    }
+
+    /**
+     * 统一执行 query_keys / read_string / update_string / delete_string / find_keys_by_text 五类 strings.xml 操作。
+     * 每个 entry 自带 toolCallId,内部按 entry 解构后独立生成 tool result。
+     * 模块一致性已在 processAiReply 校验,此处直接执行。
+     */
+    private fun executeStringsOps(
+        entries: List<ActionWithToolCall>,
+        context: String,
+        iteration: Int
+    ) {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val pendingResults = mutableListOf<Pair<String, String>>()
+                entries.forEach { (action, toolCallId) ->
+                    val resultText = when (action) {
+                        is AiAction.QueryKeys -> stringsOps.runQueryKeys(action)
+                        is AiAction.ReadString -> stringsOps.runReadString(action)
+                        is AiAction.UpdateString -> stringsOps.runUpdateString(action)
+                        is AiAction.DeleteString -> stringsOps.runDeleteString(action)
+                        is AiAction.FindKeysByText -> stringsOps.runFindKeysByText(action)
+                        else -> return@forEach
+                    }
+                    pendingResults.add(toolCallId to resultText)
+                }
+                SwingUtilities.invokeLater {
+                    pendingResults.forEach { (toolCallId, content) ->
+                        ui.chatMessages.add(
+                            ChatMessage(role = "tool", content = content, toolCallId = toolCallId)
+                        )
+                    }
+                    continueToolLoopInBackground(context, iteration + 1)
+                }
+            } catch (e: Exception) {
+                SwingUtilities.invokeLater {
+                    ui.chatMessages.add(
+                        ChatMessage(
+                            role = "assistant",
+                            content = "strings.xml 操作执行异常:${e.message ?: "unknown"}"
+                        )
+                    )
+                    ui.chatSending = false
+                }
+            }
+        }
+    }
+
+    /**
+     * 执行 sheets 域动作(SheetsOperation + FindRowsByText)并把每个结果作为 tool result 回传。
+     * 在执行前自动检测 append_row 动作是否有重复 key,若有则暂停并询问用户。
+     * 每个 entry 自带 toolCallId,内部按 entry 解构后独立生成 tool result。
+     */
+    private fun executeSheetsActions(
+        entries: List<ActionWithToolCall>,
+        context: String,
+        iteration: Int
+    ) {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val actions = entries.map { it.action }
+                // 仅 SheetsOperation 需要重复 key 检测;FindRowsByText 是只读操作
+                val sheetsOpsList = actions.filterIsInstance<AiAction.SheetsOperation>()
+                val appendActions = sheetsOpsList.filter {
+                    it.operation == AiAction.SheetsOperation.Operation.APPEND_ROW
+                }
+                if (appendActions.isNotEmpty()) {
+                    val spreadsheetId = SheetsManager.resolveSpreadsheetId(
+                        project, appendActions.first().spreadsheetId
+                    )
+                    val sheetName = appendActions.first().sheetName
+                        ?: SheetsManager.defaultSheetName(project)
+                    val newKeys = appendActions.mapNotNull {
+                        it.rows?.firstOrNull()?.firstOrNull()?.takeIf { k -> k.isNotBlank() }
+                    }
+                    if (spreadsheetId.isNotBlank() && newKeys.isNotEmpty()) {
+                        val existingKeys = SheetsManager.readSheet(project, spreadsheetId, sheetName)
+                            .getOrNull()
+                            ?.mapNotNull {
+                                it.firstOrNull()?.trim()?.takeIf { k -> k.isNotBlank() }
+                            }
+                            ?.toSet() ?: emptySet()
+                        val duplicates = newKeys.filter { it in existingKeys }.toSet()
+                        if (duplicates.isNotEmpty()) {
+                            // 重复 key 场景:把 entry 列表投影回 SheetsOperation + 对应 toolCallId
+                            val sheetsOpsWithIds = entries
+                                .mapNotNull { (action, toolCallId) ->
+                                    if (action is AiAction.SheetsOperation) action to toolCallId else null
+                                }
+                            val pending = PendingSheetsInsert(
+                                actions = sheetsOpsList,
+                                actionToolCallIds = sheetsOpsWithIds.map { it.second },
+                                duplicateKeys = duplicates,
+                                spreadsheetId = spreadsheetId,
+                                sheetName = sheetName,
+                                context = context,
+                                iteration = iteration
+                            )
+                            SwingUtilities.invokeLater {
+                                ui.pendingSheetsInsert = pending
+                                ui.chatMessages.add(
+                                    ChatMessage(
+                                        role = "assistant",
+                                        content = "检测到以下 key 已存在于表格中:" +
+                                            "${duplicates.joinToString(", ")}。请选择如何处理:",
+                                        options = listOf(
+                                            "覆盖相同key的内容",
+                                            "在列表末尾插入相同的key",
+                                            "取消操作"
+                                        )
+                                    )
+                                )
+                                ui.chatSending = false
+                            }
+                            return@executeOnPooledThread
+                        }
+                    }
+                }
+
+                // 准备所有 toolCallId→结果 映射,统一回 EDT
+                val pendingResults = mutableListOf<Pair<String, String>>()
+                entries.forEach { (action, toolCallId) ->
+                    val content = when (action) {
+                        is AiAction.SheetsOperation -> {
+                            val result = sheetsOps.executeSheetsOperationSync(action)
+                            buildString {
+                                append("[工具执行结果] 操作:${result.operation} 状态:${if (result.success) "成功" else "失败"} 信息:${result.message}")
+                                if (result.rowNumber != null) append(" 行号:${result.rowNumber}")
+                                if (!result.sheetNames.isNullOrEmpty()) {
+                                    append(" 工作表列表:${result.sheetNames.joinToString(", ")}")
+                                }
+                                if (!result.data.isNullOrEmpty()) {
+                                    append("\n数据:")
+                                    result.data.forEachIndexed { idx, row ->
+                                        append("\n  行${idx + 1}: ").append(row.joinToString(" | "))
+                                    }
+                                }
+                            }
+                        }
+                        is AiAction.FindRowsByText -> sheetsOps.runFindRowsByText(action)
+                        else -> return@forEach
+                    }
+                    pendingResults.add(toolCallId to content)
+                }
+
+                SwingUtilities.invokeLater {
+                    pendingResults.forEach { (toolCallId, content) ->
+                        ui.chatMessages.add(
+                            ChatMessage(role = "tool", content = content, toolCallId = toolCallId)
+                        )
+                    }
+                    continueToolLoopInBackground(context, iteration + 1)
+                }
+            } catch (e: Exception) {
+                // 异常兜底:为所有未响应的 tool_call 添加错误 tool result,避免协议错位
+                SwingUtilities.invokeLater {
+                    entries.forEach { (action, toolCallId) ->
+                        if (toolCallId.isNotEmpty()) {
+                            val typeLabel = when (action) {
+                                is AiAction.SheetsOperation -> action.operation.name
+                                is AiAction.FindRowsByText -> "find_rows_by_text"
+                                else -> "unknown"
+                            }
+                            ui.chatMessages.add(
+                                ChatMessage(
+                                    role = "tool",
+                                    content = "[工具执行异常] $typeLabel 失败:${e.message ?: "unknown"}",
+                                    toolCallId = toolCallId
+                                )
+                            )
+                        }
+                    }
+                    ui.chatMessages.add(
+                        ChatMessage(
+                            role = "assistant",
+                            content = "操作执行过程中发生异常,未完成:${e.message ?: "unknown"}"
+                        )
+                    )
+                    ui.chatSending = false
+                }
+            }
+        }
+    }
+
+    /**
+     * 重复 key 插入的用户选择处理(系统发起的询问,不是 AI 调用的 ask_user 工具)。
+     * - 覆盖:将重复 key 的 append_row 转为 update_row(用 search 定位行号),非重复的保持 append_row
+     * - 末尾插入:原样执行所有 append_row
+     * - 取消:不执行,为每个 pending tool_call 添加「用户已取消」的 tool result
+     */
+    private fun resolveDuplicateInsert(option: String, pending: PendingSheetsInsert) {
+        when {
+            option.contains("覆盖") -> {
+                ui.chatSending = true
+                ApplicationManager.getApplication().executeOnPooledThread {
+                    try {
+                        val resolvedActions = pending.actions.map { action ->
+                            if (action.operation == AiAction.SheetsOperation.Operation.APPEND_ROW) {
+                                val key = action.rows?.firstOrNull()?.firstOrNull()
+                                if (key != null && key in pending.duplicateKeys) {
+                                    val searchResult = SheetsManager.searchRowInSheet(
+                                        project, pending.spreadsheetId, pending.sheetName, key
+                                    )
+                                    searchResult.fold(
+                                        onSuccess = { (rowNum, _) ->
+                                            action.copy(
+                                                operation = AiAction.SheetsOperation.Operation.UPDATE_ROW,
+                                                rowNumber = rowNum
+                                            )
+                                        },
+                                        onFailure = { action }
+                                    )
+                                } else {
+                                    action
+                                }
+                            } else {
+                                action
+                            }
+                        }
+                        executeSheetsActions(
+                            buildSheetsActionEntries(resolvedActions, pending.actionToolCallIds),
+                            pending.context,
+                            pending.iteration
+                        )
+                    } catch (e: Exception) {
+                        SwingUtilities.invokeLater {
+                            ui.chatMessages.add(
+                                ChatMessage(
+                                    role = "assistant",
+                                    content = "覆盖操作执行异常:${e.message ?: "unknown"}"
+                                )
+                            )
+                            ui.chatSending = false
+                        }
+                    }
+                }
+            }
+            option.contains("末尾") -> {
+                ui.chatSending = true
+                ApplicationManager.getApplication().executeOnPooledThread {
+                    try {
+                        executeSheetsActions(
+                            buildSheetsActionEntries(pending.actions, pending.actionToolCallIds),
+                            pending.context,
+                            pending.iteration
+                        )
+                    } catch (e: Exception) {
+                        SwingUtilities.invokeLater {
+                            ui.chatMessages.add(
+                                ChatMessage(
+                                    role = "assistant",
+                                    content = "追加操作执行异常:${e.message ?: "unknown"}"
+                                )
+                            )
+                            ui.chatSending = false
+                        }
+                    }
+                }
+            }
+            else -> {
+                // 取消:为每个 pending tool_call 添加取消 tool result,继续 tool loop 让 AI 知道结果
+                SwingUtilities.invokeLater {
+                    pending.actions.forEachIndexed { i, action ->
+                        val toolCallId = pending.actionToolCallIds.getOrNull(i).orEmpty()
+                        if (toolCallId.isNotEmpty()) {
+                            ui.chatMessages.add(
+                                ChatMessage(
+                                    role = "tool",
+                                    content = "[用户取消] ${action.operation} 未执行。",
+                                    toolCallId = toolCallId
+                                )
+                            )
+                        }
+                    }
+                    ui.chatMessages.add(ChatMessage(role = "assistant", content = "已取消插入操作。"))
+                    continueToolLoopInBackground(pending.context, pending.iteration + 1)
+                }
+            }
+        }
+    }
+
+    /**
+     * 把 SheetsOperation 列表 + 平行的 toolCallId 列表打包成 [ActionWithToolCall] 列表,
+     * 供 executeSheetsActions 使用。
+     */
+    private fun buildSheetsActionEntries(
+        actions: List<AiAction.SheetsOperation>,
+        toolCallIds: List<String>
+    ): List<ActionWithToolCall> {
+        return actions.mapIndexed { i, action ->
+            ActionWithToolCall(action, toolCallIds.getOrNull(i).orEmpty())
+        }.filter { it.toolCallId.isNotEmpty() }
+    }
+
+    private fun executeInsertActions(
+        entries: List<ActionWithToolCall>,
+        context: String,
+        iteration: Int
+    ) {
+        val actions = entries.mapNotNull { it.action as? AiAction.InsertStrings }
+        if (actions.isEmpty()) {
+            continueToolLoopInBackground(context, iteration + 1)
+            return
+        }
+        val contextInfo = ContextManager.contextInfo
+        val currentModuleName = contextInfo?.currentModule?.moduleName
+        val moduleWithMostLines = contextInfo?.moduleWithMostLines
+        val moduleList = contextInfo?.modules?.map { it.moduleName }
+
+        // 决定本批次的统一目标模块(模块一致性已由 processAiReply 校验过,此处安全取第一个非空 module)
+        // 关键:排除项目名(与 normalizeExplicitWriteModule 同步),避免项目名被当作模块名
+        val projectName = contextInfo?.projectName
+        val batchModule = stringsOps.resolveTargetModule(
+            actions.firstNotNullOfOrNull { it.module?.takeIf { m -> m.isNotBlank() && m != projectName } },
+            currentModuleName,
+            moduleWithMostLines?.moduleName
+        )
+        if (batchModule == null) {
+            // 理论上不会走到这里(校验时已拦截),兜底
+            entries.forEach { (_, toolCallId) ->
+                if (toolCallId.isNotEmpty()) {
+                    ui.chatMessages.add(
+                        ChatMessage(
+                            role = "tool",
+                            content = "[工具执行异常] insert_strings 未指定目标模块且无 currentModule , moduleList = $moduleList",
+                            toolCallId = toolCallId
+                        )
+                    )
+                }
+            }
+            continueToolLoopInBackground(context, iteration + 1)
+            return
+        }
+
+        if (batchModule == projectName) {
+            // 理论上不会走到这里(校验时已拦截),兜底
+            entries.forEach { (_, toolCallId) ->
+                if (toolCallId.isNotEmpty()) {
+                    ui.chatMessages.add(
+                        ChatMessage(
+                            role = "tool",
+                            content = "[工具执行异常] insert_strings 模块名称 = 项目名称,请勿使用项目名插入翻译 , moduleList = $moduleList",
+                            toolCallId = toolCallId
+                        )
+                    )
+                }
+            }
+            continueToolLoopInBackground(context, iteration + 1)
+            return
+        }
+
+        // 逐个执行到 batchModule
+        // 关键改动:不再用 keyEntries 的 stringsInfoList(它的 filePath 是用户原来选中的模块,
+        // 跟 batchModule 可能是两个模块),改为:
+        //   1) 提前在 batchModule 下补齐所有需要的语言文件(缺哪个建哪个)
+        //   2) 总是走 insertIntoModule,以 batchModule 的 stringsInfoList 为准
+        //   3) merged 基础值用 batchModule 现有翻译(用 scanModuleForKey 读真实文件),
+        //      保留用户已存在的翻译不被 AI 漏写的语言「清空」
+
+        // 预聚合:本批所有 action 中要写入的语言并集,提前在 batchModule 下补齐缺失文件。
+        // 这是修复「values 写到别的模块」的关键 — targetModule 没有 values/ 时,直接建一个,
+        // 所有语言落在同一模块,不会再让用户看到 values 在 module A、其它语言在 module B。
+        val allLanguagesNeeded = (actions.flatMap { it.translations.keys } + DEFAULT_LANGUAGE).toSet()
+        allLanguagesNeeded.forEach { lang ->
+            if (!lang.startsWith("values")) return@forEach
+            ContextManager.ensureLanguageFile(project, batchModule, lang)
+        }
+
+        val results = actions.map { action ->
+            val targetModule = batchModule
+            val moduleStringsInfo = ContextManager.getModuleStringsInfo(project, targetModule)
+            if (moduleStringsInfo.isEmpty()) {
+                ui.actionsController.showToast("Module $targetModule has no strings.xml")
+                return@map "模块 $targetModule 没有 strings.xml 或缺少 res/ 目录" to false
+            }
+
+            // 以 batchModule 现有翻译为底,AI 没写的语言不覆盖(避免漏写时把已有翻译清空)。
+            // 注意:此处只对「已存在的 key」保留翻译;对新增 key 来说,scanModuleForKey 全部返回空串,
+            // 等价于空白底,行为与之前一致。
+            val existingInfo = ContextManager.scanModuleForKey(project, targetModule, action.name)
+            val existingTranslations = existingInfo.associate { it.language to it.text }
+            val merged = existingTranslations.toMutableMap()
+            merged.putAll(action.translations)
+            // 兜底:确保 values(默认英语)一定存在,避免漏写导致 values/strings.xml 被清空
+            if (DEFAULT_LANGUAGE !in merged) merged[DEFAULT_LANGUAGE] = ""
+
+            try {
+                ui.insertStringsManager.insertIntoModule(
+                    project, targetModule, mapOf(action.name to merged)
+                )
+                "成功" to true
+            } catch (e: Exception) {
+                "失败:${e.message ?: "unknown"}" to false
+            }
+        }
+
+        // 刷新 UI(全部用 batchModule,保证一致性)
+        val allEntries = actions.map { action ->
+            KeyedStringsInfo(
+                action.name,
+                "",
+                ContextManager.scanModuleForKey(project, batchModule, action.name)
+            )
+        }
+        ui.insertStringsManager.updateUI(allEntries)
+        val names = actions.joinToString(", ") { it.name }
+        ui.actionsController.showToast("Inserted: $names")
+        ui.showChat = false
+
+        // 为每个 insert_strings 调用添加对应的 tool result(使用 entry 自带的 toolCallId,避免下标错位)
+        entries.forEachIndexed { i, (_, toolCallId) ->
+            val action = actions.getOrNull(i)
+            val (msg, _) = results.getOrNull(i) ?: ("" to false)
+            if (action != null && toolCallId.isNotEmpty()) {
+                ui.chatMessages.add(
+                    ChatMessage(
+                        role = "tool",
+                        content = "[工具执行结果] insert_strings module=$batchModule name=${action.name} 状态:$msg",
+                        toolCallId = toolCallId
+                    )
+                )
+            }
+        }
+
+        // 继续 tool loop:让 AI 拿到结果后调用 task_complete 或继续下一步
+        continueToolLoopInBackground(context, iteration + 1)
+    }
+
+    /**
+     * 把一批 tool_call 折叠成一行简短描述,用于 assistant 消息占位文案。
+     * 重复同名工具会合并计数,避免长列表刷屏。
+     */
+    private fun summarizeToolCalls(toolCalls: List<ToolCall>): String {
+        if (toolCalls.isEmpty()) return ""
+        val grouped = toolCalls.groupingBy { it.name }.eachCount()
+        return grouped.entries.joinToString("、") { (name, count) ->
+            if (count > 1) "$name×$count" else name
+        }
+    }
+}
