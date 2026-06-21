@@ -94,6 +94,10 @@ class InsertStringsUI(
     // 下一轮用户发送新消息时(sendChatMessage / onChatOptionClick)会重置为 false。
     @Volatile
     private var stopRequested: Boolean = false
+    // AI 上下文气泡弹窗:用户点击右上角「Context」按钮时弹窗,展示当前 AI 所知的项目上下文。
+    // 文案在打开弹窗时按需构造(调用 buildChatContext),保证看到的是「最新」状态。
+    private var showContextPopup by mutableStateOf(false)
+    private var chatContextText by mutableStateOf("")
 
     // Google Sheets state
     private var sheetsDefaultSpreadsheetId by mutableStateOf("")
@@ -185,6 +189,10 @@ class InsertStringsUI(
                     onQuickSend = ::quickSend,
                     onNewChat = ::newChat,
                     onOptionClick = ::onChatOptionClick,
+                    onOpenContext = ::openContextPopup,
+                    onCloseContext = ::closeContextPopup,
+                    showContextPopup = showContextPopup,
+                    chatContextText = chatContextText,
                 )
             }
         }
@@ -1274,6 +1282,23 @@ class InsertStringsUI(
         chatSending = false
         pendingAskUserToolCallId = null
         showToast("已停止生成")
+    }
+
+    /**
+     * 打开「AI 上下文」弹窗:按需构造当前上下文(调用 buildChatContext),
+     * 并尝试 pretty-print 成多行 JSON,方便用户直接查看 AI 真实收到的字段。
+     */
+    private fun openContextPopup() {
+        val raw = buildChatContext()
+        chatContextText = runCatching {
+            val element = com.google.gson.JsonParser.parseString(raw)
+            com.google.gson.GsonBuilder().setPrettyPrinting().serializeNulls().create().toJson(element)
+        }.getOrElse { raw }
+        showContextPopup = true
+    }
+
+    private fun closeContextPopup() {
+        showContextPopup = false
     }
 
     /**
@@ -2615,6 +2640,10 @@ private fun InsertStringsContent(
     onQuickSend: (String) -> Unit,
     onNewChat: () -> Unit,
     onOptionClick: (Int, String) -> Unit,
+    onOpenContext: () -> Unit,
+    onCloseContext: () -> Unit,
+    showContextPopup: Boolean,
+    chatContextText: String,
 ) {
     val colors = rememberIdeColors()
 
@@ -2671,6 +2700,10 @@ private fun InsertStringsContent(
                         onStopChat = onStopChat,
                         onQuickSend = onQuickSend,
                         onOptionClick = onOptionClick,
+                        onOpenContext = onOpenContext,
+                        onCloseContext = onCloseContext,
+                        showContextPopup = showContextPopup,
+                        chatContextText = chatContextText,
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )

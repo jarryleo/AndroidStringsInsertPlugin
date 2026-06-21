@@ -9,8 +9,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -20,6 +22,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -37,7 +41,51 @@ fun AiChatContent(
     onStopChat: () -> Unit,
     onQuickSend: (String) -> Unit,
     onOptionClick: (Int, String) -> Unit,
+    onOpenContext: () -> Unit,
+    onCloseContext: () -> Unit,
+    showContextPopup: Boolean,
+    chatContextText: String,
     modifier: Modifier = Modifier,
+    colors: IdeColors,
+) {
+    Box(modifier = modifier) {
+        AiChatBody(
+            chatMessages = chatMessages,
+            chatInput = chatInput,
+            chatSending = chatSending,
+            onNewChat = onNewChat,
+            onOpenContext = onOpenContext,
+            onClose = onClose,
+            onChatInputChange = onChatInputChange,
+            onSendChat = onSendChat,
+            onStopChat = onStopChat,
+            onQuickSend = onQuickSend,
+            onOptionClick = onOptionClick,
+            colors = colors,
+        )
+        if (showContextPopup) {
+            ContextPopupOverlay(
+                contextText = chatContextText,
+                onClose = onCloseContext,
+                colors = colors,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AiChatBody(
+    chatMessages: List<ChatMessage>,
+    chatInput: String,
+    chatSending: Boolean,
+    onNewChat: () -> Unit,
+    onOpenContext: () -> Unit,
+    onClose: () -> Unit,
+    onChatInputChange: (String) -> Unit,
+    onSendChat: () -> Unit,
+    onStopChat: () -> Unit,
+    onQuickSend: (String) -> Unit,
+    onOptionClick: (Int, String) -> Unit,
     colors: IdeColors,
 ) {
     val listState = rememberLazyListState()
@@ -46,9 +94,8 @@ fun AiChatContent(
             listState.animateScrollToItem(chatMessages.size - 1)
         }
     }
-
     Column(
-        modifier = modifier,
+        modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Row(
@@ -68,6 +115,12 @@ fun AiChatContent(
                 color = colors.text,
                 style = compactTextStyle(colors.text),
                 fontWeight = FontWeight.Bold,
+            )
+            CompactButton(
+                text = "Context",
+                onClick = onOpenContext,
+                modifier = Modifier.width(68.dp),
+                colors = colors,
             )
             CompactButton(
                 text = "Back",
@@ -274,6 +327,99 @@ private fun ChatBubble(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * 弹出当前 AI 所知上下文的浮层。
+ * - 整页半透明遮罩,点击空白处关闭
+ * - 中央卡片承载 pretty-print 后的 JSON 内容,支持滚动
+ * - 卡片内右上角"X"按钮关闭浮层
+ */
+@Composable
+private fun ContextPopupOverlay(
+    contextText: String,
+    onClose: () -> Unit,
+    colors: IdeColors,
+) {
+    val scrollState = rememberScrollState()
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.55f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClose,
+            )
+    ) {
+        Column(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .widthIn(min = 320.dp, max = 640.dp)
+                .heightIn(min = 240.dp, max = 520.dp)
+                .background(colors.panel, RoundedCornerShape(8.dp))
+                .border(BorderStroke(1.dp, colors.border), RoundedCornerShape(8.dp))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {},
+                )
+                .padding(10.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "AI 上下文(每轮请求都会带上)",
+                    modifier = Modifier.weight(1f),
+                    color = colors.text,
+                    style = compactTextStyle(colors.text),
+                    fontWeight = FontWeight.Bold,
+                )
+                CompactButton(
+                    text = "X",
+                    onClick = onClose,
+                    modifier = Modifier.width(28.dp),
+                    colors = colors,
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            if (contextText.isBlank()) {
+                Text(
+                    text = "(当前无可用上下文:可能未打开 strings.xml 或未配置 Google Sheets)",
+                    color = colors.secondaryText,
+                    style = compactTextStyle(colors.secondaryText),
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .background(colors.tableBackground, RoundedCornerShape(4.dp))
+                        .border(BorderStroke(1.dp, colors.border), RoundedCornerShape(4.dp))
+                        .padding(8.dp)
+                        .verticalScroll(scrollState),
+                ) {
+                    SelectionContainer {
+                        Text(
+                            text = contextText,
+                            color = colors.text,
+                            style = compactTextStyle(colors.text).copy(
+                                fontFamily = FontFamily.Monospace
+                            ),
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "点击空白处或按 X 关闭",
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText),
+            )
         }
     }
 }
