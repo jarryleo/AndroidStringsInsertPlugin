@@ -8,6 +8,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -15,7 +16,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 
@@ -28,11 +37,36 @@ fun CompactTextField(
     maxLines: Int = 1,
     colors: IdeColors,
     visualTransformation: VisualTransformation = VisualTransformation.None,
+    /**
+     * 可选:按下 Enter(无 Alt/Shift)时触发的回调。
+     * - 设置后:Enter 调用此回调(用于"回车发送"),Alt+Enter / Shift+Enter 走原行为(插入换行)。
+     * - 不设置:保持原行为(Enter 由 singleLine / maxLines 决定是否换行)。
+     *
+     * 适用于聊天输入框等"回车即发"场景;其它纯文本输入框保持默认行为,不需要传此参数。
+     */
+    onSend: (() -> Unit)? = null,
 ) {
+    val sendModifier = if (onSend != null) {
+        Modifier.onPreviewKeyEvent { event ->
+            if (event.type == KeyEventType.KeyDown &&
+                event.key == Key.Enter &&
+                !event.isAltPressed &&
+                !event.isShiftPressed
+            ) {
+                onSend.invoke()
+                true
+            } else {
+                false
+            }
+        }
+    } else {
+        Modifier
+    }
     BasicTextField(
         value = value,
         onValueChange = onValueChange,
         modifier = modifier
+            .then(sendModifier)
             .heightIn(min = 26.dp)
             .background(colors.fieldBackground, RoundedCornerShape(3.dp))
             .border(BorderStroke(1.dp, colors.fieldBorder), RoundedCornerShape(3.dp))
@@ -42,6 +76,9 @@ fun CompactTextField(
         textStyle = compactTextStyle(colors.text),
         cursorBrush = SolidColor(colors.accent),
         visualTransformation = visualTransformation,
+        // 软键盘场景:把 IME action 设为 Send,使虚拟键盘的回车键显示"发送"图标。
+        // 桌面端由 [sendModifier] 处理硬件 Enter。
+        keyboardOptions = if (onSend != null) KeyboardOptions(imeAction = ImeAction.Send) else KeyboardOptions.Default,
     )
 }
 

@@ -238,6 +238,8 @@ private fun AiChatBody(
                 singleLine = false,
                 maxLines = 10,
                 colors = colors,
+                // 回车发送,Alt+回车 / Shift+回车 换行
+                onSend = onSendChat,
             )
             if (chatSending) {
                 CompactButton(
@@ -257,6 +259,12 @@ private fun AiChatBody(
                 )
             }
         }
+        Text(
+            text = "回车发送 · Alt+回车 / Shift+回车 换行",
+            color = colors.secondaryText,
+            style = compactTextStyle(colors.secondaryText),
+            modifier = Modifier.padding(start = 2.dp),
+        )
     }
 }
 
