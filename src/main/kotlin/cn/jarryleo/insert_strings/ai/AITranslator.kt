@@ -69,7 +69,8 @@ object AITranslator {
 - 主动发现流程:用户给的 key 不明确时,先用 query_keys 搜索,搜索模块优先为 currentModule,currentModule不存在时省略module参数,切勿使用项目名称作为模块参数;修改前先 read_string 确认原文;用 update_string 精准修改。看到一段翻译想反查 key,用 find_keys_by_text。
 
 ### Google 表格操作
-- sheets_operation: 详见工具参数(枚举)。列操作需用户确认;修改/删除行前先 search 定位行号;全表检查/修正优先用 check_translations/fix_translations;填充/清除背景色用 fill_color / clear_color,需提供 range(A1 表示法)与 color(hex 或命名色);设置/批量改文字色用 set_text_color,或在写值时随 rows/columnValues 并列传 rowTextColors/columnTextColors 逐格上色。
+- sheets_operation: 详见工具参数(枚举)。列操作需用户确认;修改/删除行前先 search 定位行号;全表检查/修正用 check_translations/fix_translations;填充/清除背景色用 fill_color / clear_color,需提供 range(A1 表示法)与 color(hex 或命名色);设置/批量改文字色用 set_text_color,或在写值时随 rows/columnValues 并列传 rowTextColors/columnTextColors 逐格上色。
+- **批量修改 (batch_modify)**:一次工具调用执行多种操作(改值/填色/改文字色/删行/清空行/插入行等),后端自动分组成最少的 Google API 请求。当用户要求**对大量单元格**做混合修改(例:"把表头改成红色,把 B5:B100 标黄,把缺失翻译的整行改红底,顺便删掉第 50/51 行,再追加 3 行新翻译"),**必须用 batch_modify 一次完成**,绝不要逐格/逐行循环调用 fill_color / update_row / append_row —— 那会瞬间用光工具调用次数预算。详细字段见 load_tool_doc("sheets_batch_modify")。
 - find_rows_by_text: 反查 — 在表格中按文本搜索行(exact/contains/regex,可选 column 限定)。
 
 ### 通用
@@ -243,7 +244,7 @@ object AITranslator {
         "sheets_color" to """
             ## sheets_operation 背景色操作（fill_color / clear_color）
             样式变更，非破坏性，执行前不弹用户确认。仅影响背景色，不动其他格式（字体/对齐/数字格式等）。
-            公共字段：spreadsheetId（可选）、sheetName（可选）。
+            公共字段：spreadsheetId（可选，默认用设置中的表格ID）、sheetName（可选，默认用设置中的 defaultSheetName）。
 
             ### fill_color
             在 A1 范围上填充背景色。range 必填，color 必填。
@@ -279,6 +280,83 @@ object AITranslator {
             示例 1（行写入+按格上色）：{"operation":"update_row","rowNumber":5,"rows":[["a","b","c"]],"rowTextColors":[["#FF0000",null,"#00FF00"]]}
             示例 2（列写入+按行上色）：{"operation":"update_column","columnIndex":3,"columnValues":["x","y","z"],"columnTextColors":[null,"#00FF00","#0000FF"]}
             示例 3（write 范围+逐格上色）：{"operation":"write","range":"A1:C2","rows":[["a","b","c"],["d","e","f"]],"rowTextColors":[["#FF0000",null,null],[null,"#00FF00",null]]}
+        """.trimIndent(),
+
+        "sheets_batch_modify" to """
+            ## sheets_operation 批量修改（batch_modify）
+            一次工具调用执行多种表格修改，后端自动分组成最少的 Google API 请求。
+            适用于：批量改值、批量填色、批量改文字色、批量删行/清空行/插入行、混合操作等。
+            优势：避免逐格调用 fill_color / set_text_color / update_row 等操作触发 AI 工具调用次数上限。
+
+            公共字段：spreadsheetId（可选，默认上下文 googleSheets 配置）、sheetName（可选，默认 defaultSheetName）。
+            主体字段：batchEdits — 动作项数组，每项一个子操作 type。
+
+            ### 子操作类型
+
+            #### set_values — 覆盖式写入任意矩形范围
+            字段：range（必填，A1 表示法，如 "Sheet1!A1:D10"）、rows（必填，二维数组）。
+            注意：会覆盖范围内所有单元格，谨慎使用，不要覆盖已有翻译。
+            示例：{"type":"set_values","range":"Sheet1!A1:D1","rows":[["key","values","values-zh","values-fr"]]}
+
+            #### fill_color — 填充背景色
+            字段：range（必填，A1 表示法，支持单元格/行/列/矩形）、color（必填，hex 或命名色）。
+            示例：{"type":"fill_color","range":"A1:Z1","color":"light_gray"}
+
+            #### clear_color — 清除背景色
+            字段：range（必填）。
+            示例：{"type":"clear_color","range":"B2:D10"}
+
+            #### set_text_color — 设置文字色
+            字段：range（必填）、color（必填，颜色格式同上）。
+            示例：{"type":"set_text_color","range":"A5:A100","color":"red"}
+
+            #### clear_text_color — 清除文字色
+            字段：range（必填）。
+            示例：{"type":"clear_text_color","range":"A1:Z1"}
+
+            #### update_rows — 连续更新多行
+            字段：rowNumber（必填，1-based 起始行号）、rows（必填，二维数组）。
+            可选：rowTextColors（二维矩阵，与 rows 同形，null 元素 = 该格不上文字色）、
+            rowBackgroundColors（二维矩阵，与 rows 同形，null 元素 = 该格不上背景色）。
+            示例：{"type":"update_rows","rowNumber":5,"rows":[["a","b","c"],["d","e","f"]],"rowTextColors":[["#FF0000",null,null],[null,"#00FF00",null]],"rowBackgroundColors":[[null,"#FFFF00",null],[null,null,null]]}
+
+            #### append_rows — 末尾追加多行
+            字段：rows（必填，二维数组）。
+            可选：rowTextColors、rowBackgroundColors（同 update_rows）。
+            示例：{"type":"append_rows","rows":[["k1","v1","v2"],["k2","v3","v4"]]}
+
+            #### insert_rows — 在指定位置插入多行
+            字段：rowNumber（必填，1-based，原行及之后下移）、rows（必填，二维数组）。
+            可选：rowTextColors、rowBackgroundColors。
+            示例：{"type":"insert_rows","rowNumber":3,"rows":[["a","b","c"],["d","e","f"]]}
+
+            #### delete_rows — 批量删除多行
+            字段：rowNumbers（必填，1-based 行号列表，会按降序删除以避免行号位移）。
+            示例：{"type":"delete_rows","rowNumbers":[10,12,15]}
+
+            #### clear_rows — 批量清空多行（保留行号）
+            字段：rowNumbers（必填，1-based 行号列表）。
+            示例：{"type":"clear_rows","rowNumbers":[10,12]}
+
+            ### 完整示例（混合操作）
+            一次调用把缺翻译的行涂红、修改 A1 表头、删除冗余行、追加新行：
+            {
+              "operation":"batch_modify",
+              "sheetName":"1.0.3.0",
+              "batchEdits":[
+                {"type":"fill_color","range":"B5:B100","color":"#FFE4B5"},
+                {"type":"set_text_color","range":"A1:Z1","color":"#0F766E"},
+                {"type":"update_rows","rowNumber":2,"rows":[["key","values","values-zh-rCN"]]},
+                {"type":"append_rows","rows":[["new_key","new value","新值"]]},
+                {"type":"delete_rows","rowNumbers":[50,51,52]}
+              ]
+            }
+
+            ### 行为约束
+            - 所有子操作按 type 分组，后端自动用最少的 Google API 请求完成（一组值写入 + 一组格式 + 一组结构变更）。
+            - 不会自动检测重复 key（与 append_row 不同）；append_rows 后由系统提示用户确认。
+            - 颜色格式同 fill_color / set_text_color（hex 或命名色）。
+            - 优先用 batch_modify 而不是循环调用 fill_color/set_text_color/update_row，避免工具调用次数累积。
         """.trimIndent()
     )
 
@@ -1074,6 +1152,54 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
     }
 
     /**
+     * 把 batchEdits 的 JSON 数组解析为 List<[AiAction.BatchEdit]>。
+     * 跳过无法识别 type 的项(记到上层由 AI 看到失败结果),保留其它字段尽量多。
+     * rowTextColors / rowBackgroundColors 复用 [parseRowColorMatrix]。
+     */
+    private fun parseBatchEdits(arr: com.google.gson.JsonArray): List<AiAction.BatchEdit>? {
+        if (arr.isEmpty()) return null
+        val edits = mutableListOf<AiAction.BatchEdit>()
+        for (element in arr) {
+            if (!element.isJsonObject) continue
+            val obj = element.asJsonObject
+            val typeText = obj.get("type")?.asString ?: continue
+            val type = runCatching {
+                AiAction.BatchEditType.valueOf(typeText.uppercase())
+            }.getOrNull() ?: continue
+            val range = obj.get("range")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+            val rowsArray = obj.getAsJsonArray("rows")
+            val rows = rowsArray?.mapNotNull { rowElement ->
+                if (!rowElement.isJsonArray) return@mapNotNull null
+                rowElement.asJsonArray.map { it?.extractText().orEmpty() }
+            }
+            val rowNumber = obj.get("rowNumber")?.let {
+                runCatching { it.asInt }.getOrNull()
+            }?.takeIf { it != null && it > 0 }
+            val rowNumbersArray = obj.getAsJsonArray("rowNumbers")
+            val rowNumbers = rowNumbersArray?.mapNotNull { el ->
+                if (el == null || el.isJsonNull) return@mapNotNull null
+                runCatching { el.asInt }.getOrNull()?.takeIf { it > 0 }
+            }
+            val color = obj.get("color")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+            val rowTextColors = obj.getAsJsonArray("rowTextColors")?.let { parseRowColorMatrix(it) }
+            val rowBackgroundColors = obj.getAsJsonArray("rowBackgroundColors")?.let { parseRowColorMatrix(it) }
+            edits.add(
+                AiAction.BatchEdit(
+                    type = type,
+                    range = range,
+                    rows = rows,
+                    rowNumber = rowNumber,
+                    rowNumbers = rowNumbers,
+                    color = color,
+                    rowTextColors = rowTextColors,
+                    rowBackgroundColors = rowBackgroundColors
+                )
+            )
+        }
+        return edits.takeIf { it.isNotEmpty() }
+    }
+
+    /**
      * 把单个 tool call 转换为 [AiAction]。
      * 解析失败时返回 null,由调用方决定如何兜底(通常在 reply 中提示用户)。
      */
@@ -1206,6 +1332,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val textColor = args.get("textColor")?.asString?.trim()?.takeIf { it.isNotEmpty() }
                 val rowTextColors = args.getAsJsonArray("rowTextColors")?.let { parseRowColorMatrix(it) }
                 val columnTextColors = args.getAsJsonArray("columnTextColors")?.let { parseColumnColorList(it) }
+                val batchEdits = args.getAsJsonArray("batchEdits")?.let { parseBatchEdits(it) }
                 AiAction.SheetsOperation(
                     operation,
                     spreadsheetId,
@@ -1222,7 +1349,8 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                     color,
                     textColor,
                     rowTextColors,
-                    columnTextColors
+                    columnTextColors,
+                    batchEdits
                 )
             }
             else -> null

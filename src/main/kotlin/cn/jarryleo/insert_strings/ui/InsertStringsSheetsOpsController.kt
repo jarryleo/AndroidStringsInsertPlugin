@@ -575,6 +575,39 @@ internal class InsertStringsSheetsOpsController(
                     }
                 )
             }
+
+            // ==================== 批量修改(把多种操作合并到一次工具调用) ====================
+
+            AiAction.SheetsOperation.Operation.BATCH_MODIFY -> {
+                val edits = action.batchEdits
+                if (edits.isNullOrEmpty()) {
+                    return SheetsToolResult("批量修改", false, "batchEdits 为空。请提供至少一个子操作。")
+                }
+                val result = SheetsManager.batchModify(project, spreadsheetId, sheetName, edits)
+                result.fold(
+                    onSuccess = { report ->
+                        SwingUtilities.invokeLater {
+                            ui.actionsController.showToast("Batch modify done: ${report.apiCallCount} API calls")
+                        }
+                        val fullMessage = buildString {
+                            append("[工具执行结果] 操作:批量修改 工作表:").append(sheetName)
+                            append(" 状态:成功 信息:").append(report.summary)
+                            if (report.warnings.isNotEmpty()) {
+                                appendLine()
+                                append("跳过项:").append(report.warnings.size)
+                                report.warnings.take(10).forEach { append("\n  - ").append(it) }
+                                if (report.warnings.size > 10) {
+                                    append("\n  …(共 ").append(report.warnings.size).append(" 条,已省略)")
+                                }
+                            }
+                        }
+                        SheetsToolResult("批量修改", true, fullMessage)
+                    },
+                    onFailure = {
+                        SheetsToolResult("批量修改", false, it.message ?: "Sheets batch modify failed.")
+                    }
+                )
+            }
         }
     }
 
@@ -602,6 +635,7 @@ internal class InsertStringsSheetsOpsController(
             AiAction.SheetsOperation.Operation.CLEAR_COLOR -> "清除颜色"
             AiAction.SheetsOperation.Operation.SET_TEXT_COLOR -> "设置文字色"
             AiAction.SheetsOperation.Operation.CLEAR_TEXT_COLOR -> "清除文字色"
+            AiAction.SheetsOperation.Operation.BATCH_MODIFY -> "批量修改"
         }
     }
 

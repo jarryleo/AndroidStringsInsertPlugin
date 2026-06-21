@@ -37,7 +37,12 @@ sealed class AiAction {
         val color: String? = null,
         val textColor: String? = null,
         val rowTextColors: List<List<String?>>? = null,
-        val columnTextColors: List<String?>? = null
+        val columnTextColors: List<String?>? = null,
+        /**
+         * 批量修改:仅当 [operation] == BATCH_MODIFY 时使用。
+         * 一次工具调用执行多种修改(改值、填色、删行等),内部尽量合并为最少的 Google API 请求。
+         */
+        val batchEdits: List<BatchEdit>? = null
     ) : AiAction() {
         enum class Operation {
             READ,
@@ -61,8 +66,56 @@ sealed class AiAction {
             FILL_COLOR,
             CLEAR_COLOR,
             SET_TEXT_COLOR,
-            CLEAR_TEXT_COLOR
+            CLEAR_TEXT_COLOR,
+            /**
+             * 批量修改:把多种操作(改值、填色、删行…)合并在一次工具调用里,
+             * 后端会自动分组成最少的 Google API 请求,避免逐格操作触发工具调用次数上限。
+             */
+            BATCH_MODIFY
         }
+    }
+
+    /**
+     * 批量修改的单个动作项,见 [SheetsOperation.Operation.BATCH_MODIFY]。
+     *
+     * 所有字段均按需使用(每个 type 只用其中一部分)。
+     *
+     * - [SET_VALUES]:    覆盖式写入任意矩形范围。 [range] + [rows](二维) 必填。
+     * - [FILL_COLOR]:    在 [range] 上填充背景色, [color] 必填(hex 或命名色)。
+     * - [CLEAR_COLOR]:   清除 [range] 的背景色。
+     * - [SET_TEXT_COLOR]:在 [range] 上设置文字色, [color] 必填(hex 或命名色)。
+     * - [CLEAR_TEXT_COLOR]:清除 [range] 的文字色。
+     * - [UPDATE_ROWS]:   连续更新多行(从 [rowNumber] 起的 [rows] 行, 起点 1-based)。
+     *                    [rowTextColors] / [rowBackgroundColors] 是与 [rows] 同形的二维矩阵,
+     *                    null 元素表示该格不上色。
+     * - [APPEND_ROWS]:   在工作表末尾追加多行, [rows] 二维数组, [rowTextColors] / [rowBackgroundColors] 可选。
+     * - [INSERT_ROWS]:   在 [rowNumber] 位置插入多行(原行及之后下移), [rows] 二维数组。
+     * - [DELETE_ROWS]:   删除 [rowNumbers] 指定的多个行(1-based 列表)。
+     * - [CLEAR_ROWS]:    清空 [rowNumbers] 指定的多个行(保留行)。
+     */
+    data class BatchEdit(
+        val type: BatchEditType,
+        val range: String? = null,
+        val rows: List<List<String>>? = null,
+        val rowNumber: Int? = null,
+        val rowNumbers: List<Int>? = null,
+        val color: String? = null,
+        val rowTextColors: List<List<String?>>? = null,
+        val rowBackgroundColors: List<List<String?>>? = null
+    )
+
+    /** 批量修改的子操作类型。 */
+    enum class BatchEditType {
+        SET_VALUES,
+        FILL_COLOR,
+        CLEAR_COLOR,
+        SET_TEXT_COLOR,
+        CLEAR_TEXT_COLOR,
+        UPDATE_ROWS,
+        APPEND_ROWS,
+        INSERT_ROWS,
+        DELETE_ROWS,
+        CLEAR_ROWS
     }
 
     /**

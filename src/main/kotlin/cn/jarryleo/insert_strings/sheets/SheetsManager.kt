@@ -10,7 +10,9 @@ import com.google.api.client.json.gson.GsonFactory
 import com.google.api.client.util.store.FileDataStoreFactory
 import com.google.api.services.sheets.v4.Sheets
 import com.google.api.services.sheets.v4.SheetsScopes
+import com.google.api.services.sheets.v4.model.BatchClearValuesRequest
 import com.google.api.services.sheets.v4.model.BatchUpdateSpreadsheetRequest
+import com.google.api.services.sheets.v4.model.BatchUpdateValuesRequest
 import com.google.api.services.sheets.v4.model.CellData
 import com.google.api.services.sheets.v4.model.CellFormat
 import com.google.api.services.sheets.v4.model.ClearValuesRequest
@@ -30,6 +32,7 @@ import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.sun.net.httpserver.HttpServer
+import cn.jarryleo.insert_strings.ai.AiAction
 import java.io.File
 import java.io.InputStream
 import java.io.InputStreamReader
@@ -52,6 +55,16 @@ object SheetsManager {
     private const val LOOPBACK_HOST = "127.0.0.1"
     private const val CONNECT_TIMEOUT_MS = 60_000
     private const val READ_TIMEOUT_MS = 60_000
+    /**
+     * 一次 spreadsheets.batchUpdate 的最大子请求数。Google API 实际没有硬上限,
+     * 但分块能让失败重试更精细,也能避免单次响应体过大。500 是个保守安全值。
+     */
+    private const val MAX_BATCH_REQUESTS = 500
+    /**
+     * clear_rows 时清空行的列数上限(超过此列视作清空整行的可见范围)。
+     * 与现有 clearRow 的默认 columnCount=26 对齐。
+     */
+    private const val CLEAR_ROW_MAX_COL = "Z"
     private val JSON_FACTORY = GsonFactory.getDefaultInstance()
     private val SCOPES = listOf(SheetsScopes.SPREADSHEETS)
 
@@ -541,6 +554,39 @@ object SheetsManager {
     )
 
     /**
+     * 批量修改 (BATCH_MODIFY) 的执行报告。
+     * @param apiCallCount 实际下发的 Google API 请求数(values.batchUpdate + values.batchClear
+     *                     + spreadsheets.batchUpdate 之和)。一个用户调用产生的 API 次数越少,
+     *                     AI 的工具调用次数预算越节省。
+     * @param warnings     跳过的项/解析失败信息(供工具执行结果显示)。
+     */
+    data class BatchModifyReport(
+        val success: Boolean,
+        val summary: String,
+        val apiCallCount: Int,
+        val stats: BatchModifyStats,
+        val warnings: List<String> = emptyList()
+    )
+
+    /**
+     * 批量修改的影响统计。
+     */
+    data class BatchModifyStats(
+        var setValueEdits: Int = 0,
+        var insertedRows: Int = 0,
+        var appendedRows: Int = 0,
+        var updatedRows: Int = 0,
+        var deletedRows: Int = 0,
+        var clearedRows: Int = 0,
+        var fillColorRanges: Int = 0,
+        var clearColorRanges: Int = 0,
+        var textColorRanges: Int = 0,
+        var clearTextColorRanges: Int = 0,
+        var singleCellTextColors: Int = 0,
+        var singleCellBgColors: Int = 0
+    )
+
+    /**
      * 反查:在 sheet 中按文本搜索行。
      * 整表读一次,在内存中按 [matchType] 匹配,返回 [limit] 条结果。
      * 适合单 sheet 几千行内的常见场景;更大表应配合 column 限定避免扫描所有单元格。
@@ -690,7 +736,8 @@ object SheetsManager {
         sheetName: String,
         rowNumber: Int,
         values: List<String>,
-        rowTextColors: List<String?>? = null
+        rowTextColors: List<String?>? = null,
+        rowBackgroundColors: List<String?>? = null
     ): Result<Unit> {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
@@ -706,16 +753,29 @@ object SheetsManager {
                 .update(spreadsheetId, range, body)
                 .setValueInputOption("USER_ENTERED")
                 .execute()
-            if (!rowTextColors.isNullOrEmpty()) {
+            val hasText = !rowTextColors.isNullOrEmpty()
+            val hasBg = !rowBackgroundColors.isNullOrEmpty()
+            if (hasText || hasBg) {
                 val sheetId = resolveSheetId(service, spreadsheetId, safeSheet)
                     ?: throw IllegalStateException("Sheet '$safeSheet' not found in spreadsheet.")
-                val cells = linearColorsToCells(
-                    baseRow0 = rowNumber - 1,
-                    baseCol0 = 0,
-                    colors = rowTextColors,
-                    isRow = true
-                )
-                applyTextColors(service, spreadsheetId, sheetId, cells).getOrThrow()
+                if (hasText) {
+                    val cells = linearColorsToCells(
+                        baseRow0 = rowNumber - 1,
+                        baseCol0 = 0,
+                        colors = rowTextColors,
+                        isRow = true
+                    )
+                    applyTextColors(service, spreadsheetId, sheetId, cells).getOrThrow()
+                }
+                if (hasBg) {
+                    val cells = linearColorsToCells(
+                        baseRow0 = rowNumber - 1,
+                        baseCol0 = 0,
+                        colors = rowBackgroundColors,
+                        isRow = true
+                    )
+                    applyBackgroundColors(service, spreadsheetId, sheetId, cells).getOrThrow()
+                }
             }
         }
     }
@@ -730,7 +790,8 @@ object SheetsManager {
         sheetName: String,
         rowNumber: Int,
         values: List<String>,
-        rowTextColors: List<String?>? = null
+        rowTextColors: List<String?>? = null,
+        rowBackgroundColors: List<String?>? = null
     ): Result<Unit> {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
@@ -766,7 +827,9 @@ object SheetsManager {
                 .update(spreadsheetId, range, body)
                 .setValueInputOption("USER_ENTERED")
                 .execute()
-            if (!rowTextColors.isNullOrEmpty()) {
+            val hasText = !rowTextColors.isNullOrEmpty()
+            val hasBg = !rowBackgroundColors.isNullOrEmpty()
+            if (hasText) {
                 val cells = linearColorsToCells(
                     baseRow0 = rowNumber - 1,
                     baseCol0 = 0,
@@ -774,6 +837,15 @@ object SheetsManager {
                     isRow = true
                 )
                 applyTextColors(service, spreadsheetId, sheetId, cells).getOrThrow()
+            }
+            if (hasBg) {
+                val cells = linearColorsToCells(
+                    baseRow0 = rowNumber - 1,
+                    baseCol0 = 0,
+                    colors = rowBackgroundColors,
+                    isRow = true
+                )
+                applyBackgroundColors(service, spreadsheetId, sheetId, cells).getOrThrow()
             }
         }
     }
@@ -786,7 +858,8 @@ object SheetsManager {
         spreadsheetId: String,
         sheetName: String,
         values: List<String>,
-        rowTextColors: List<String?>? = null
+        rowTextColors: List<String?>? = null,
+        rowBackgroundColors: List<String?>? = null
     ): Result<Unit> {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
@@ -800,18 +873,34 @@ object SheetsManager {
                 .setValueInputOption("USER_ENTERED")
                 .setInsertDataOption("INSERT_ROWS")
                 .execute()
-            if (!rowTextColors.isNullOrEmpty()) {
+            val hasText = !rowTextColors.isNullOrEmpty()
+            val hasBg = !rowBackgroundColors.isNullOrEmpty()
+            if (hasText || hasBg) {
                 val updatedRange = response.updates?.updatedRange
                     ?: throw IllegalStateException("Append response missing updatedRange.")
                 val (sheetNameResolved, grid) = parseA1Range(service, spreadsheetId, updatedRange, safeSheet)
                     ?: throw IllegalStateException("Cannot parse appended range '$updatedRange'.")
-                val cells = linearColorsToCells(
-                    baseRow0 = grid.startRowIndex ?: 0,
-                    baseCol0 = grid.startColumnIndex ?: 0,
-                    colors = rowTextColors,
-                    isRow = true
-                )
-                applyTextColors(service, spreadsheetId, grid.sheetId ?: 0, cells).getOrThrow()
+                val baseRow0 = grid.startRowIndex ?: 0
+                val baseCol0 = grid.startColumnIndex ?: 0
+                val sheetId = grid.sheetId ?: 0
+                if (hasText) {
+                    val cells = linearColorsToCells(
+                        baseRow0 = baseRow0,
+                        baseCol0 = baseCol0,
+                        colors = rowTextColors,
+                        isRow = true
+                    )
+                    applyTextColors(service, spreadsheetId, sheetId, cells).getOrThrow()
+                }
+                if (hasBg) {
+                    val cells = linearColorsToCells(
+                        baseRow0 = baseRow0,
+                        baseCol0 = baseCol0,
+                        colors = rowBackgroundColors,
+                        isRow = true
+                    )
+                    applyBackgroundColors(service, spreadsheetId, sheetId, cells).getOrThrow()
+                }
             }
         }
     }
@@ -1316,6 +1405,481 @@ object SheetsManager {
         }
     }
 
+    // ==================== 批量修改(BATCH_MODIFY) ====================
+
+    /**
+     * 一次工具调用执行多种表格修改,后端自动分组到最少的 Google API 请求。
+     * 适用场景:AI 一次性批量改值、填色、改文字色、删行、清空行、插入行 ——
+     * 替代逐格调用 fill_color/set_text_color/update_row 等操作,大幅节省 AI 工具调用次数预算。
+     *
+     * 处理顺序(在用户声明的数组顺序之上):
+     *   1) INSERT_ROWS  (内部按 rowNumber 升序)
+     *   2) SET_VALUES / UPDATE_ROWS(并入同一次 values.batchUpdate)
+     *   3) APPEND_ROWS  (一次 values.append,之后基于返回的 updatedRange 追写逐格颜色)
+     *   4) 颜色变更:范围 + 逐格(并入 1~2 次 spreadsheets.batchUpdate,按 MAX_BATCH_REQUESTS 分块)
+     *   5) CLEAR_ROWS   (一次 values.batchClear)
+     *   6) DELETE_ROWS  (内部按 rowNumber 降序,避免行号位移)
+     *
+     * 最坏情况下大约 6 个 Google API 请求,可处理 100+ 行的批量修改,比逐格调用节省 1~2 个数量级。
+     *
+     * 行号语义:所有 rowNumber / rowNumbers 都指**最终状态**下的位置。
+     * 也就是说,如果有 insert_rows 在前面,后续的 update_rows / delete_rows 都应按插入后的新行号来写。
+     */
+    fun batchModify(
+        project: Project,
+        spreadsheetId: String,
+        sheetName: String,
+        edits: List<AiAction.BatchEdit>
+    ): Result<BatchModifyReport> {
+        if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
+        if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
+        if (edits.isEmpty()) return Result.failure(IllegalArgumentException("No edits to apply."))
+
+        return runCatching {
+            val service = createSheetsService(project)
+            val safeSheet = sanitizeSheetName(sheetName)
+            val sheetId = resolveSheetId(service, spreadsheetId, safeSheet)
+                ?: throw IllegalStateException("Sheet '$safeSheet' not found in spreadsheet.")
+
+            var apiCallCount = 0
+            val stats = BatchModifyStats()
+            val warnings = mutableListOf<String>()
+
+            // 1) 第一遍:解析 edits, 按类型归类
+            val valueWrites = mutableListOf<ValueRange>()
+            val appendRows = mutableListOf<List<String>>()
+            val insertOps = mutableListOf<Pair<Int, List<List<String>>>>() // (rowNumber, rows)
+            val deleteRowNumbers = mutableListOf<Int>()
+            val clearRowNumbers = mutableListOf<Int>()
+            val fillColorRanges = mutableListOf<Pair<String, Color>>()
+            val clearColorRanges = mutableListOf<String>()
+            val textColorRanges = mutableListOf<Pair<String, Color>>()
+            val clearTextColorRanges = mutableListOf<String>()
+            // 随 update_rows/insert_rows 携带的逐格颜色,在写入后再统一上色
+            val inlineTextColors = mutableListOf<Triple<Int, Int, String>>()
+            val inlineBgColors = mutableListOf<Triple<Int, Int, String>>()
+            // 随 append_rows 携带的逐格颜色,append 后再补;先记到 placeholder
+            data class PendingAppendColors(
+                val startRow: Int, // 0-based; append 返回后填入
+                val rowTextColors: List<List<String?>>,
+                val rowBackgroundColors: List<List<String?>>
+            )
+            val pendingAppendColors = mutableListOf<PendingAppendColors>()
+
+            edits.forEachIndexed { idx, edit ->
+                val label = "edit#$idx(${edit.type.name.lowercase()})"
+                fun skip(msg: String) {
+                    warnings.add("$label: $msg")
+                }
+                when (edit.type) {
+                    AiAction.BatchEditType.SET_VALUES -> {
+                        val range = edit.range
+                        val rows = edit.rows
+                        if (range.isNullOrBlank()) { skip("缺少 range"); return@forEachIndexed }
+                        if (rows.isNullOrEmpty()) { skip("缺少 rows"); return@forEachIndexed }
+                        val safeRange = if (range.contains('!')) range else "$safeSheet!$range"
+                        valueWrites.add(ValueRange().setRange(safeRange).setValues(rows))
+                        stats.setValueEdits++
+                    }
+                    AiAction.BatchEditType.FILL_COLOR -> {
+                        val range = edit.range
+                        val color = edit.color
+                        if (range.isNullOrBlank()) { skip("缺少 range"); return@forEachIndexed }
+                        if (color.isNullOrBlank()) { skip("缺少 color"); return@forEachIndexed }
+                        val parsed = parseColor(color)
+                        if (parsed == null) { skip("颜色 '$color' 无效"); return@forEachIndexed }
+                        fillColorRanges.add(range to parsed)
+                        stats.fillColorRanges++
+                    }
+                    AiAction.BatchEditType.CLEAR_COLOR -> {
+                        val range = edit.range
+                        if (range.isNullOrBlank()) { skip("缺少 range"); return@forEachIndexed }
+                        clearColorRanges.add(range)
+                        stats.clearColorRanges++
+                    }
+                    AiAction.BatchEditType.SET_TEXT_COLOR -> {
+                        val range = edit.range
+                        val color = edit.color
+                        if (range.isNullOrBlank()) { skip("缺少 range"); return@forEachIndexed }
+                        if (color.isNullOrBlank()) { skip("缺少 color"); return@forEachIndexed }
+                        val parsed = parseColor(color)
+                        if (parsed == null) { skip("颜色 '$color' 无效"); return@forEachIndexed }
+                        textColorRanges.add(range to parsed)
+                        stats.textColorRanges++
+                    }
+                    AiAction.BatchEditType.CLEAR_TEXT_COLOR -> {
+                        val range = edit.range
+                        if (range.isNullOrBlank()) { skip("缺少 range"); return@forEachIndexed }
+                        clearTextColorRanges.add(range)
+                        stats.clearTextColorRanges++
+                    }
+                    AiAction.BatchEditType.UPDATE_ROWS -> {
+                        val rowNum = edit.rowNumber
+                        val rows = edit.rows
+                        if (rowNum == null || rowNum < 1) { skip("缺少 rowNumber 或 rowNumber<1"); return@forEachIndexed }
+                        if (rows.isNullOrEmpty()) { skip("缺少 rows"); return@forEachIndexed }
+                        val maxCol = (rows.maxOfOrNull { it.size } ?: 1)
+                        val endCol = columnIndexToLetter(maxOf(0, maxCol - 1))
+                        val safeRange = "$safeSheet!A$rowNum:$endCol${rowNum + rows.size - 1}"
+                        valueWrites.add(ValueRange().setRange(safeRange).setValues(rows))
+                        stats.updatedRows += rows.size
+                        // 逐格文字色
+                        edit.rowTextColors?.forEachIndexed { rIdx, colorRow ->
+                            colorRow.forEachIndexed { cIdx, color ->
+                                if (!color.isNullOrBlank()) {
+                                    inlineTextColors.add(Triple(rowNum - 1 + rIdx, cIdx, color))
+                                }
+                            }
+                        }
+                        // 逐格背景色
+                        edit.rowBackgroundColors?.forEachIndexed { rIdx, colorRow ->
+                            colorRow.forEachIndexed { cIdx, color ->
+                                if (!color.isNullOrBlank()) {
+                                    inlineBgColors.add(Triple(rowNum - 1 + rIdx, cIdx, color))
+                                }
+                            }
+                        }
+                    }
+                    AiAction.BatchEditType.APPEND_ROWS -> {
+                        val rows = edit.rows
+                        if (rows.isNullOrEmpty()) { skip("缺少 rows"); return@forEachIndexed }
+                        appendRows.addAll(rows)
+                        stats.appendedRows += rows.size
+                        val hasText = !edit.rowTextColors.isNullOrEmpty()
+                        val hasBg = !edit.rowBackgroundColors.isNullOrEmpty()
+                        if (hasText || hasBg) {
+                            pendingAppendColors.add(
+                                PendingAppendColors(
+                                    startRow = -1,
+                                    rowTextColors = edit.rowTextColors ?: emptyList(),
+                                    rowBackgroundColors = edit.rowBackgroundColors ?: emptyList()
+                                )
+                            )
+                        }
+                    }
+                    AiAction.BatchEditType.INSERT_ROWS -> {
+                        val rowNum = edit.rowNumber
+                        val rows = edit.rows
+                        if (rowNum == null || rowNum < 1) { skip("缺少 rowNumber 或 rowNumber<1"); return@forEachIndexed }
+                        if (rows.isNullOrEmpty()) { skip("缺少 rows"); return@forEachIndexed }
+                        // 一个 INSERT_ROWS = 在 rowNum 处连续插入 rows.size 行, 然后写入 rows
+                        insertOps.add(rowNum to rows)
+                        // 逐格颜色:相对 rowNum 起点 1-based
+                        edit.rowTextColors?.forEachIndexed { rIdx, colorRow ->
+                            colorRow.forEachIndexed { cIdx, color ->
+                                if (!color.isNullOrBlank()) {
+                                    inlineTextColors.add(Triple(rowNum - 1 + rIdx, cIdx, color))
+                                }
+                            }
+                        }
+                        edit.rowBackgroundColors?.forEachIndexed { rIdx, colorRow ->
+                            colorRow.forEachIndexed { cIdx, color ->
+                                if (!color.isNullOrBlank()) {
+                                    inlineBgColors.add(Triple(rowNum - 1 + rIdx, cIdx, color))
+                                }
+                            }
+                        }
+                    }
+                    AiAction.BatchEditType.DELETE_ROWS -> {
+                        val numbers = edit.rowNumbers
+                        if (numbers.isNullOrEmpty()) { skip("缺少 rowNumbers"); return@forEachIndexed }
+                        deleteRowNumbers.addAll(numbers)
+                        stats.deletedRows += numbers.size
+                    }
+                    AiAction.BatchEditType.CLEAR_ROWS -> {
+                        val numbers = edit.rowNumbers
+                        if (numbers.isNullOrEmpty()) { skip("缺少 rowNumbers"); return@forEachIndexed }
+                        clearRowNumbers.addAll(numbers)
+                        stats.clearedRows += numbers.size
+                    }
+                }
+            }
+
+            // 2) 第二遍:执行,按固定顺序
+            // a) 插入行 — 升序处理,累加位移
+            if (insertOps.isNotEmpty()) {
+                // 同一个 rowNumber 不应出现两次;若有冲突,按 input 顺序保留先出现的
+                val sorted = insertOps.sortedBy { it.first }
+                var cumulativeShift = 0
+                val insertRequests = mutableListOf<Request>()
+                val insertValueWrites = mutableListOf<ValueRange>()
+                sorted.forEach { (origRowNum, rows) ->
+                    val effectiveRow = origRowNum + cumulativeShift
+                    val insertReq = Request().setInsertDimension(
+                        InsertDimensionRequest()
+                            .setRange(
+                                DimensionRange()
+                                    .setSheetId(sheetId)
+                                    .setDimension("ROWS")
+                                    .setStartIndex(effectiveRow - 1)
+                                    .setEndIndex(effectiveRow - 1 + rows.size)
+                            )
+                            .setInheritFromBefore(effectiveRow > 1)
+                    )
+                    insertRequests.add(insertReq)
+                    val maxCol = (rows.maxOfOrNull { it.size } ?: 1)
+                    val endCol = columnIndexToLetter(maxOf(0, maxCol - 1))
+                    val range = "$safeSheet!A$effectiveRow:$endCol${effectiveRow + rows.size - 1}"
+                    @Suppress("UNCHECKED_CAST")
+                    insertValueWrites.add(
+                        ValueRange().setRange(range).setValues(rows as List<List<Any>>)
+                    )
+                    cumulativeShift += rows.size
+                    stats.insertedRows += rows.size
+                }
+                if (insertRequests.isNotEmpty()) {
+                    service.spreadsheets()
+                        .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(insertRequests))
+                        .execute()
+                    apiCallCount++
+                }
+                if (insertValueWrites.isNotEmpty()) {
+                    val body = BatchUpdateValuesRequest()
+                        .setValueInputOption("USER_ENTERED")
+                        .setData(insertValueWrites)
+                    service.spreadsheets().values().batchUpdate(spreadsheetId, body).execute()
+                    apiCallCount++
+                }
+            }
+
+            // b) set_values + update_rows — 一次 values.batchUpdate
+            if (valueWrites.isNotEmpty()) {
+                val body = BatchUpdateValuesRequest()
+                    .setValueInputOption("USER_ENTERED")
+                    .setData(valueWrites)
+                service.spreadsheets().values().batchUpdate(spreadsheetId, body).execute()
+                apiCallCount++
+            }
+
+            // c) append_rows — 一次 values.append,记录返回的起始行以便补逐格颜色
+            var appendedStartRow: Int = -1
+            if (appendRows.isNotEmpty()) {
+                @Suppress("UNCHECKED_CAST")
+                val body = ValueRange().setValues(appendRows as List<List<Any>>)
+                val response = service.spreadsheets().values()
+                    .append(spreadsheetId, "$safeSheet!A1", body)
+                    .setValueInputOption("USER_ENTERED")
+                    .setInsertDataOption("INSERT_ROWS")
+                    .execute()
+                apiCallCount++
+                appendedStartRow = parseStartRowFromRange(response.updates?.updatedRange)
+                // 把 append 的逐格颜色就位
+                if (appendedStartRow > 0 && pendingAppendColors.isNotEmpty()) {
+                    var offsetRow = appendedStartRow
+                    pendingAppendColors.forEach { pending ->
+                        pending.rowTextColors.forEachIndexed { rIdx, colorRow ->
+                            colorRow.forEachIndexed { cIdx, color ->
+                                if (!color.isNullOrBlank()) {
+                                    inlineTextColors.add(Triple(offsetRow - 1 + rIdx, cIdx, color))
+                                }
+                            }
+                        }
+                        pending.rowBackgroundColors.forEachIndexed { rIdx, colorRow ->
+                            colorRow.forEachIndexed { cIdx, color ->
+                                if (!color.isNullOrBlank()) {
+                                    inlineBgColors.add(Triple(offsetRow - 1 + rIdx, cIdx, color))
+                                }
+                            }
+                        }
+                        // 累加:这个 append 的行数 = max(两个颜色矩阵的行数, 默认 1)
+                        val consumedRows = maxOf(
+                            pending.rowTextColors.size,
+                            pending.rowBackgroundColors.size
+                        ).coerceAtLeast(1)
+                        offsetRow += consumedRows
+                    }
+                }
+            }
+
+            // d) 颜色变更 + 逐格颜色 — 合并成 1~N 个 batchUpdate
+            val allFormatRequests = mutableListOf<Request>()
+            // 范围:fill_color
+            fillColorRanges.forEach { (range, color) ->
+                val parsed = parseA1Range(service, spreadsheetId, range, safeSheet) ?: return@forEach
+                allFormatRequests.add(
+                    Request().setRepeatCell(
+                        RepeatCellRequest()
+                            .setRange(parsed.second)
+                            .setCell(CellData().setUserEnteredFormat(CellFormat().setBackgroundColor(color)))
+                            .setFields("userEnteredFormat.backgroundColor")
+                    )
+                )
+            }
+            // 范围:clear_color
+            clearColorRanges.forEach { range ->
+                val parsed = parseA1Range(service, spreadsheetId, range, safeSheet) ?: return@forEach
+                allFormatRequests.add(
+                    Request().setRepeatCell(
+                        RepeatCellRequest()
+                            .setRange(parsed.second)
+                            .setCell(CellData().setUserEnteredFormat(CellFormat()))
+                            .setFields("userEnteredFormat.backgroundColor")
+                    )
+                )
+            }
+            // 范围:set_text_color
+            textColorRanges.forEach { (range, color) ->
+                val parsed = parseA1Range(service, spreadsheetId, range, safeSheet) ?: return@forEach
+                allFormatRequests.add(
+                    Request().setRepeatCell(
+                        RepeatCellRequest()
+                            .setRange(parsed.second)
+                            .setCell(
+                                CellData().setUserEnteredFormat(
+                                    CellFormat().setTextFormat(TextFormat().setForegroundColor(color))
+                                )
+                            )
+                            .setFields("userEnteredFormat.textFormat.foregroundColor")
+                    )
+                )
+            }
+            // 范围:clear_text_color
+            clearTextColorRanges.forEach { range ->
+                val parsed = parseA1Range(service, spreadsheetId, range, safeSheet) ?: return@forEach
+                allFormatRequests.add(
+                    Request().setRepeatCell(
+                        RepeatCellRequest()
+                            .setRange(parsed.second)
+                            .setCell(
+                                CellData().setUserEnteredFormat(
+                                    CellFormat().setTextFormat(TextFormat())
+                                )
+                            )
+                            .setFields("userEnteredFormat.textFormat.foregroundColor")
+                    )
+                )
+            }
+            // 逐格文字色(inline)
+            inlineTextColors.forEach { (row0, col0, color) ->
+                val parsed = parseColor(color) ?: return@forEach
+                val grid = GridRange()
+                    .setSheetId(sheetId)
+                    .setStartRowIndex(row0)
+                    .setEndRowIndex(row0 + 1)
+                    .setStartColumnIndex(col0)
+                    .setEndColumnIndex(col0 + 1)
+                allFormatRequests.add(
+                    Request().setRepeatCell(
+                        RepeatCellRequest()
+                            .setRange(grid)
+                            .setCell(
+                                CellData().setUserEnteredFormat(
+                                    CellFormat().setTextFormat(TextFormat().setForegroundColor(parsed))
+                                )
+                            )
+                            .setFields("userEnteredFormat.textFormat.foregroundColor")
+                    )
+                )
+                stats.singleCellTextColors++
+            }
+            // 逐格背景色(inline)
+            inlineBgColors.forEach { (row0, col0, color) ->
+                val parsed = parseColor(color) ?: return@forEach
+                val grid = GridRange()
+                    .setSheetId(sheetId)
+                    .setStartRowIndex(row0)
+                    .setEndRowIndex(row0 + 1)
+                    .setStartColumnIndex(col0)
+                    .setEndColumnIndex(col0 + 1)
+                allFormatRequests.add(
+                    Request().setRepeatCell(
+                        RepeatCellRequest()
+                            .setRange(grid)
+                            .setCell(
+                                CellData().setUserEnteredFormat(
+                                    CellFormat().setBackgroundColor(parsed)
+                                )
+                            )
+                            .setFields("userEnteredFormat.backgroundColor")
+                    )
+                )
+                stats.singleCellBgColors++
+            }
+            if (allFormatRequests.isNotEmpty()) {
+                allFormatRequests.chunked(MAX_BATCH_REQUESTS).forEach { chunk ->
+                    service.spreadsheets()
+                        .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(chunk))
+                        .execute()
+                    apiCallCount++
+                }
+            }
+
+            // e) 清空行 — 一次 values.batchClear
+            if (clearRowNumbers.isNotEmpty()) {
+                val unique = clearRowNumbers.distinct().sorted()
+                val ranges = unique.map { rowNum ->
+                    "$safeSheet!A$rowNum:$CLEAR_ROW_MAX_COL$rowNum"
+                }
+                val body = BatchClearValuesRequest().setRanges(ranges)
+                service.spreadsheets().values().batchClear(spreadsheetId, body).execute()
+                apiCallCount++
+            }
+
+            // f) 删除行 — 降序,避免行号位移
+            if (deleteRowNumbers.isNotEmpty()) {
+                val unique = deleteRowNumbers.distinct().sortedDescending()
+                val requests = unique.map { rowNum ->
+                    Request().setDeleteDimension(
+                        DeleteDimensionRequest()
+                            .setRange(
+                                DimensionRange()
+                                    .setSheetId(sheetId)
+                                    .setDimension("ROWS")
+                                    .setStartIndex(rowNum - 1)
+                                    .setEndIndex(rowNum)
+                            )
+                    )
+                }
+                requests.chunked(MAX_BATCH_REQUESTS).forEach { chunk ->
+                    service.spreadsheets()
+                        .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(chunk))
+                        .execute()
+                    apiCallCount++
+                }
+            }
+
+            val summary = buildString {
+                append("批量修改完成:")
+                if (stats.setValueEdits > 0) append(" set_values=${stats.setValueEdits} 处")
+                if (stats.updatedRows > 0) append(" 更新行=${stats.updatedRows}")
+                if (stats.insertedRows > 0) append(" 插入行=${stats.insertedRows}")
+                if (stats.appendedRows > 0) append(" 追加行=${stats.appendedRows}")
+                if (stats.deletedRows > 0) append(" 删除行=${stats.deletedRows}")
+                if (stats.clearedRows > 0) append(" 清空行=${stats.clearedRows}")
+                if (stats.fillColorRanges > 0) append(" 填色范围=${stats.fillColorRanges}")
+                if (stats.clearColorRanges > 0) append(" 清色范围=${stats.clearColorRanges}")
+                if (stats.textColorRanges > 0) append(" 文字色范围=${stats.textColorRanges}")
+                if (stats.clearTextColorRanges > 0) append(" 清文字色范围=${stats.clearTextColorRanges}")
+                if (stats.singleCellTextColors > 0) append(" 逐格文字色=${stats.singleCellTextColors}")
+                if (stats.singleCellBgColors > 0) append(" 逐格背景色=${stats.singleCellBgColors}")
+                append(",Google API 请求数=$apiCallCount")
+                if (warnings.isNotEmpty()) {
+                    append(";跳过 ${warnings.size} 项")
+                }
+            }
+            BatchModifyReport(true, summary, apiCallCount, stats, warnings.toList())
+        }
+    }
+
+    /**
+     * 从 append 返回的 updatedRange(如 "'Sheet1'!A5:D7")中提取起始行号(1-based)。
+     * 解析失败时返回 -1。
+     */
+    private fun parseStartRowFromRange(updatedRange: String?): Int {
+        if (updatedRange.isNullOrBlank()) return -1
+        return try {
+            // 取最后一个 '!' 之后的 A1 部分
+            val bangIdx = updatedRange.lastIndexOf('!')
+            val a1 = if (bangIdx >= 0) updatedRange.substring(bangIdx + 1) else updatedRange
+            // 解析 A1:C1 这种:只取冒号左侧的单元格
+            val firstCell = a1.split(':').firstOrNull() ?: return -1
+            val (row, _) = parseA1Cell(firstCell)
+            row + 1 // 转回 1-based
+        } catch (e: Exception) {
+            -1
+        }
+    }
+
     private fun writeColumnValues(
         service: Sheets,
         spreadsheetId: String,
@@ -1419,6 +1983,49 @@ object SheetsManager {
                             )
                         )
                         .setFields("userEnteredFormat.textFormat.foregroundColor")
+                )
+            )
+        }
+        if (requests.isEmpty()) return Result.success(Unit)
+        return runCatching {
+            service.spreadsheets()
+                .batchUpdate(spreadsheetId, BatchUpdateSpreadsheetRequest().setRequests(requests))
+                .execute()
+            Unit
+        }
+    }
+
+    /**
+     * 逐格背景色:与 [applyTextColors] 互为镜像,但写入 userEnteredFormat.backgroundColor,
+     * 每个三元组 (row0, col0, color) 通过一次 batchUpdate 提交。
+     * 颜色无效立刻返回 Failure。
+     */
+    private fun applyBackgroundColors(
+        service: Sheets,
+        spreadsheetId: String,
+        sheetId: Int,
+        cells: List<Triple<Int, Int, String>>
+    ): Result<Unit> {
+        val requests = mutableListOf<Request>()
+        for ((row0, col0, color) in cells) {
+            val parsed = parseColor(color)
+                ?: return Result.failure(IllegalArgumentException("Invalid color '$color' at row $row0 col $col0."))
+            val grid = GridRange()
+                .setSheetId(sheetId)
+                .setStartRowIndex(row0)
+                .setEndRowIndex(row0 + 1)
+                .setStartColumnIndex(col0)
+                .setEndColumnIndex(col0 + 1)
+            requests.add(
+                Request().setRepeatCell(
+                    RepeatCellRequest()
+                        .setRange(grid)
+                        .setCell(
+                            CellData().setUserEnteredFormat(
+                                CellFormat().setBackgroundColor(parsed)
+                            )
+                        )
+                        .setFields("userEnteredFormat.backgroundColor")
                 )
             )
         }

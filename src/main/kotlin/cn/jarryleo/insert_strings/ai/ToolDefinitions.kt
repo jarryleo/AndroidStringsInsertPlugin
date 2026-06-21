@@ -92,6 +92,7 @@ object ToolDefinitions {
     private const val DESC_SHEETS_OPERATION =
         "执行 Google 表格操作。operation 决定具体动作类型。" +
             "不确定用法时先调用 load_tool_doc(\"sheets_basic\"/\"sheets_row_ops\"/...) 获取详细文档。" +
+            "需要一次性对大量单元格做混合修改(改值+填色+改文字色+删行…)时,优先用 batch_modify,把多个子操作合并到一次工具调用,后端自动分组成最少 Google API 请求,避免逐格调用触发工具调用次数上限。" +
             "安全约束:修改/删除行前先用 search 定位行号;列操作需用户确认;全表检查/修正用 check_translations/fix_translations。"
 
     private const val DESC_ASK_USER =
@@ -388,6 +389,9 @@ object ToolDefinitions {
         val operationEnum = JsonArray().apply {
             SheetsOperation.Operation.entries.forEach { add(it.name.lowercase()) }
         }
+        val batchEditTypeEnum = JsonArray().apply {
+            AiAction.BatchEditType.entries.forEach { add(it.name.lowercase()) }
+        }
         return obj {
             addProperty("type", "object")
             add("properties", obj {
@@ -406,7 +410,7 @@ object ToolDefinitions {
                 })
                 add("range", obj {
                     addProperty("type", "string")
-                    addProperty("description", "A1 表示法范围,如 \"Sheet1!A1:D10\"。read/write 时使用。")
+                    addProperty("description", "A1 表示法范围,如 \"Sheet1!A1:D10\"。read/write/set_values/fill_color/set_text_color/clear_color/clear_text_color 时使用。")
                 })
                 add("key", obj {
                     addProperty("type", "string")
@@ -414,7 +418,7 @@ object ToolDefinitions {
                 })
                 add("rowNumber", obj {
                     addProperty("type", "integer")
-                    addProperty("description", "1-based 行号,insert_row / update_row / delete_row / clear_row 必填。")
+                    addProperty("description", "1-based 行号,insert_row / update_row / delete_row / clear_row 必填;batch_modify 内 update_rows/insert_rows 的起始行号。")
                 })
                 add("rows", obj {
                     addProperty("type", "array")
@@ -422,7 +426,7 @@ object ToolDefinitions {
                         addProperty("type", "array")
                         add("items", obj { addProperty("type", "string") })
                     })
-                    addProperty("description", "二维数组,外层每项是一行数据(单元格字符串数组)。append/insert/update_row 取首元素。")
+                    addProperty("description", "二维数组,外层每项是一行数据(单元格字符串数组)。append/insert/update_row 取首元素;batch_modify 内 set_values/update_rows/append_rows/insert_rows 用全部元素。")
                 })
                 add("columnIndex", obj {
                     addProperty("type", "integer")
@@ -452,14 +456,14 @@ object ToolDefinitions {
                     addProperty("type", "string")
                     addProperty(
                         "description",
-                        "可选,背景色。fill_color 必填。支持 hex(例 #FF0000、#f0a)或命名色(red/green/blue/yellow/orange/purple/pink/gray/grey/white/black/light_gray/dark_gray/brown/cyan/magenta)。"
+                        "可选,背景色。fill_color / batch_modify.fill_color 必填。支持 hex(例 #FF0000、#f0a)或命名色(red/green/blue/yellow/orange/purple/pink/gray/grey/white/black/light_gray/dark_gray/brown/cyan/magenta)。"
                     )
                 })
                 add("textColor", obj {
                     addProperty("type", "string")
                     addProperty(
                         "description",
-                        "可选,文字色。set_text_color 必填。颜色格式同 color。"
+                        "可选,文字色。set_text_color / batch_modify.set_text_color 必填。颜色格式同 color。"
                     )
                 })
                 add("rowTextColors", obj {
@@ -488,6 +492,71 @@ object ToolDefinitions {
                     addProperty(
                         "description",
                         "可选,与 columnValues 同形的一维数组,按行顺序逐个对应。null 元素表示该格不上色。"
+                    )
+                })
+                add("batchEdits", obj {
+                    addProperty("type", "array")
+                    add("items", obj {
+                        addProperty("type", "object")
+                        add("properties", obj {
+                            add("type", obj {
+                                addProperty("type", "string")
+                                add("enum", batchEditTypeEnum)
+                                addProperty("description", "批量子操作类型。")
+                            })
+                            add("range", obj {
+                                addProperty("type", "string")
+                                addProperty("description", "A1 表示法,set_values/fill_color/set_text_color/clear_color/clear_text_color 必填。")
+                            })
+                            add("rows", obj {
+                                addProperty("type", "array")
+                                add("items", obj {
+                                    addProperty("type", "array")
+                                    add("items", obj { addProperty("type", "string") })
+                                })
+                                addProperty("description", "二维数组(每行一格字符串数组)。set_values/update_rows/append_rows/insert_rows 必填。")
+                            })
+                            add("rowNumber", obj {
+                                addProperty("type", "integer")
+                                addProperty("description", "1-based 起始行号,update_rows/insert_rows 必填。")
+                            })
+                            add("rowNumbers", obj {
+                                addProperty("type", "array")
+                                add("items", obj { addProperty("type", "integer") })
+                                addProperty("description", "1-based 行号列表,delete_rows/clear_rows 必填。")
+                            })
+                            add("color", obj {
+                                addProperty("type", "string")
+                                addProperty("description", "颜色(hex 或命名色),fill_color/set_text_color 必填。")
+                            })
+                            add("rowTextColors", obj {
+                                addProperty("type", "array")
+                                add("items", obj {
+                                    addProperty("type", "array")
+                                    add("items", obj {
+                                        addProperty("type", "string")
+                                        addProperty("description", "颜色字符串,或 null。")
+                                    })
+                                })
+                                addProperty("description", "可选,与 rows 同形的二维矩阵,逐格文字色,null 表示该格不上色。")
+                            })
+                            add("rowBackgroundColors", obj {
+                                addProperty("type", "array")
+                                add("items", obj {
+                                    addProperty("type", "array")
+                                    add("items", obj {
+                                        addProperty("type", "string")
+                                        addProperty("description", "颜色字符串,或 null。")
+                                    })
+                                })
+                                addProperty("description", "可选,与 rows 同形的二维矩阵,逐格背景色,null 表示该格不上色。")
+                            })
+                        })
+                        add("required", JsonArray().apply { add("type") })
+                    })
+                    addProperty(
+                        "description",
+                        "批量修改列表,仅 batch_modify 使用。用于一次性把多种操作(改值/填色/改文字色/删行/清空行/插入行)合并到一次工具调用,后端会自动分组成最少的 Google API 请求。详细字段见 load_tool_doc(\"sheets_batch_modify\")。"
                     )
                 })
             })
@@ -522,6 +591,7 @@ object ToolDefinitions {
             add("sheets_freeze")
             add("sheets_review")
             add("sheets_color")
+            add("sheets_batch_modify")
         }
         return obj {
             addProperty("type", "object")
