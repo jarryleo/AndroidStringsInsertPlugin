@@ -331,7 +331,7 @@ object StringsService {
         val escapedText = AndroidStringEscaper.escape(newText)
         val newNode = "<string name=\"$key\">$escapedText</string>"
 
-        // 已存在则替换
+        // 已存在则替换(只动节点内容,前后空白与缩进保持不变)
         val pattern =
             """<string\b(?=[^>]*\bname\s*=\s*(['"])$escapedKey\1)[^>]*>[\s\S]*?</string>""".toRegex()
         val match = pattern.find(xml)
@@ -339,19 +339,23 @@ object StringsService {
             document.replaceString(match.range.first, match.range.last + 1, newNode)
             return true
         }
-        // 不存在则插入到 </resources> 之前
+        // 不存在则插入到 </resources> 之前;缩进跟随文件自身风格,不再硬编码 \t
+        val indent = StringsXmlFormatter.detectIndent(xml)
+        val insertLine = StringsXmlFormatter.buildInsertLine(indent, newNode)
         val insertPos = xml.indexOf("</resources>")
         if (insertPos == -1) {
-            // 末尾追加
-            document.insertString(xml.length, "\n\t$newNode\n")
+            // 文件没有 </resources> 闭合:直接追加到末尾(appendLine 末尾自带 \n)
+            document.insertString(xml.length, insertLine)
             return true
         }
-        document.insertString(insertPos, "\n\t$newNode\n")
+        document.insertString(insertPos, insertLine)
         return true
     }
 
     /**
      * 从单个文件中删除指定 key 对应的 <string> 节点,包括所在行整行删除以保持排版整洁。
+     * 删除后调 [StringsXmlFormatter.collapseBlankLines] 折叠连续空行,
+     * 避免多次删除时累积出 2+ 个连续空行。
      * @return 实际删除了一条记录返回 true;若 key 在该文件中不存在返回 false
      */
     private fun removeFromFile(
@@ -370,6 +374,12 @@ object StringsService {
         val lineStart = xml.lastIndexOf('\n', matchStart - 1).let { if (it < 0) 0 else it + 1 }
         val lineEnd = xml.indexOf('\n', matchEnd).let { if (it < 0) xml.length else it + 1 }
         document.replaceString(lineStart, lineEnd, "")
+        // 删除整行后清理可能产生的连续空行(>=3 个 \n + 中间空白行,折叠为最多 1 个空行)
+        val updated = document.text
+        val cleaned = StringsXmlFormatter.collapseBlankLines(updated)
+        if (cleaned != updated) {
+            document.replaceString(0, updated.length, cleaned)
+        }
         return true
     }
 

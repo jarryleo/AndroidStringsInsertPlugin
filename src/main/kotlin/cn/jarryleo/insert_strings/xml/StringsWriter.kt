@@ -55,6 +55,8 @@ class StringsWriter(
     ) {
         val document = FileDocumentManager.getInstance().getDocument(xmlFile) ?: return
         WriteCommandAction.runWriteCommandAction(project) {
+            // 缩进在循环外算一次:插入新节点不会改变其它节点的缩进
+            val indent = StringsXmlFormatter.detectIndent(document.text)
             keys.forEachIndexed { index, key ->
                 val translations = translationsPerKey[key] ?: emptyMap()
                 var text = translations[language]
@@ -80,7 +82,10 @@ class StringsWriter(
                 }
 
                 val insertPos = findInsertPosition(document.text, index)
-                document.insertString(insertPos, "$node\n\t")
+                document.insertString(
+                    insertPos,
+                    StringsXmlFormatter.buildInsertLine(indent, node)
+                )
             }
         }
     }
@@ -91,12 +96,19 @@ class StringsWriter(
             val prevStart = xml.indexOf("<string name=\"$prevKey\">")
             if (prevStart != -1) {
                 val prevEnd = xml.indexOf("</string>", prevStart) + "</string>".length
-                if (prevEnd != -1) return prevEnd
+                if (prevEnd != -1) {
+                    // 跳过 prev 行尾的 \n,返回下一行行首(包含缩进);
+                    // 这样插入 "${indent}${node}\n" 后新行紧跟在前一行之后,无空行也无粘连。
+                    return if (prevEnd < xml.length && xml[prevEnd] == '\n') prevEnd + 1 else prevEnd
+                }
             }
         }
         if (anchorNodeName.isNotEmpty()) {
             val anchorStart = xml.indexOf("<string name=\"$anchorNodeName\">")
-            if (anchorStart != -1) return anchorStart
+            if (anchorStart != -1) {
+                // 返回 anchor 所在行的行首(包含缩进),插入新行紧邻 anchor 之前
+                return xml.lastIndexOf('\n', anchorStart - 1).let { if (it < 0) 0 else it + 1 }
+            }
         }
         val insertIndex = xml.indexOf("</resources>")
         return if (insertIndex != -1) insertIndex else xml.length
