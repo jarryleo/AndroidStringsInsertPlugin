@@ -62,14 +62,14 @@ object ContextManager {
         moduleManager.modules.forEach { module ->
             DebugLog.log("ContextManager", "find module name = ${module.name}")
             ModuleRootManager.getInstance(module).contentRoots.forEach { root ->
-                DebugLog.log("ContextManager", "  root = ${root.name} , path = ${root.path}")
+                //DebugLog.log("ContextManager", "  root = ${root.name} , path = ${root.path}")
                 findResDirectories(root).forEach { resDir ->
-                    DebugLog.log("ContextManager", "    resDir = ${resDir.name} , path = ${resDir.path}")
+                    //DebugLog.log("ContextManager", "    resDir = ${resDir.name} , path = ${resDir.path}")
                     // 通过文件索引把 res 目录归属到真正的模块，避免根模块吞掉子模块
                     val ownerModule = findOwnerModuleForDir(allModules, resDir)
                         ?: fileIndex.getModuleForFile(resDir)
                         ?: module
-                    DebugLog.log("ContextManager", "    ownerModule = $ownerModule")
+                    //DebugLog.log("ContextManager", "    ownerModule = $ownerModule")
                     resDir.children
                         .filter { it.isDirectory && it.name.startsWith("values") }
                         .forEach { valuesDir ->
@@ -114,7 +114,6 @@ object ContextManager {
             currentModule = null,
             modules = moduleInfos
         )
-        DebugLog.log("ContextManager", "contextInfo = ${contextInfo?.getJson()}")
     }
 
     /**

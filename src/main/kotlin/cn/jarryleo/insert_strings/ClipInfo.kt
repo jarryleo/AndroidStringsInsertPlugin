@@ -36,7 +36,7 @@ data class ClipInfo(
             arr.add(e)
         }
         obj["entries"] = arr
-        return JSON.toJSONString(obj)
+        return runCatching { JSON.toJSONString(obj) }.getOrNull() ?: ""
     }
 
     companion object {
