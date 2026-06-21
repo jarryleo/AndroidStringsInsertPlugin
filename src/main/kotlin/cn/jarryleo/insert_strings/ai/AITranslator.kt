@@ -65,6 +65,7 @@ object AITranslator {
 - find_keys_by_text: 反查 — 通过翻译文本查找 key(exact/contains/regex,可选 module/language 限定)。
 - insert_strings: 插入/全量覆盖翻译(translations 必含 values 默认英语并覆盖其他语言,适合新增 key)。
 - update_string: 精准修改指定 key 的部分语言翻译,只动提供的语言,其他保持原样(适合「修一个语言」「修个别语言」场景)。
+- delete_string: 精准删除指定 key 的部分语言翻译(languages 非空)或全部语言翻译(languages 空,整 key 被移除)。删除是破坏性操作,操作前先 read_string 确认目标 key 与翻译,必要时 ask_user 与用户确认范围。
 - 主动发现流程:用户给的 key 不明确时,先用 query_keys 搜索,搜索模块优先为 currentModule,currentModule不存在时省略module参数,切勿使用项目名称作为模块参数;修改前先 read_string 确认原文;用 update_string 精准修改。看到一段翻译想反查 key,用 find_keys_by_text。
 
 ### Google 表格操作
@@ -80,10 +81,10 @@ object AITranslator {
 1. 操作必须通过工具调用完成,不要只在文字里描述。
 2. 每次回复可以同时包含文字(给用户看)和多个工具调用。
 3. 收到工具结果后,如果目标尚未达成,必须继续调用工具推进。
-4. 区分 insert_strings 与 update_string:新增/全量覆盖用 insert_strings,部分语言修改用 update_string。
-5. 修改前若不确定当前翻译,先 read_string。
+4. 区分 insert_strings / update_string / delete_string:新增/全量覆盖用 insert_strings;部分语言修改用 update_string;部分语言删除或整 key 删除用 delete_string。
+5. 修改或删除前若不确定当前翻译,先 read_string 确认。delete_string 是破坏性操作,执行前最好 read_string 并在不确定时用 ask_user 确认范围。
 6. module 必须是 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName);若上下文有 currentModule 则默认用它。
-7. 【重要】同一 AI 回合内的所有 insert_strings / update_string 写入动作必须在同一模块:
+7. 【重要】同一 AI 回合内的所有 insert_strings / update_string / delete_string 写入动作必须在同一模块:
    - 全部省略 module 参数(系统用 currentModule)
    - 或全部显式指定同一个 module,切勿使用项目名称作为模块参数
    - 不可一次 insert A 到 module1、insert B 到 module2 — 系统会整批拒绝并要求修正
@@ -961,6 +962,16 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                     .filterValues { it.isNotEmpty() }
                 if (translations.isEmpty()) return null
                 AiAction.UpdateString(module, name, translations)
+            }
+            ToolDefinitions.TOOL_DELETE_STRING -> {
+                val name = args.get("name")?.asString?.trim() ?: return null
+                if (name.isEmpty()) return null
+                val module = args.get("module")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val languagesArray = args.getAsJsonArray("languages")
+                val languages = languagesArray?.mapNotNull { element ->
+                    element?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                } ?: emptyList()
+                AiAction.DeleteString(module, name, languages)
             }
             ToolDefinitions.TOOL_FIND_KEYS_BY_TEXT -> {
                 val text = args.get("text")?.asString?.trim() ?: return null

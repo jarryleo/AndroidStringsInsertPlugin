@@ -131,6 +131,41 @@ object StringsService {
     }
 
     /**
+     * 删除指定 key 的翻译(破坏性操作)。
+     * - [languages] 为空时,删除 key 在所有语言的翻译(整 key 被移除)。
+     * - [languages] 非空时,仅删除列表中指定语言的翻译,其他语言保持原样。
+     *
+     * @return 每个目标语言的删除结果,key 为语言目录名(例: "values-fr"),
+     *         value 为 "成功" / "未找到该 key" / "失败: <原因>"
+     */
+    fun deleteKey(
+        project: Project,
+        moduleName: String,
+        key: String,
+        languages: List<String> = emptyList()
+    ): Map<String, String> {
+        if (key.isEmpty()) return mapOf("" to "失败: key 为空")
+        val files = ContextManager.getModuleFiles(project, moduleName)
+        if (files.isEmpty()) {
+            return mapOf("" to "失败: 模块 '$moduleName' 不存在或没有 strings.xml")
+        }
+        val results = mutableMapOf<String, String>()
+        WriteCommandAction.runWriteCommandAction(project) {
+            files.forEach { (valuesDir, stringsFile) ->
+                val lang = valuesDir.name
+                if (languages.isNotEmpty() && lang !in languages) return@forEach
+                try {
+                    val removed = removeFromFile(stringsFile, key)
+                    results[lang] = if (removed) "成功" else "未找到该 key"
+                } catch (e: Exception) {
+                    results[lang] = "失败: ${e.message ?: "unknown"}"
+                }
+            }
+        }
+        return results
+    }
+
+    /**
      * 反查:根据翻译文本查找包含该文本的 key。
      *
      * @param text           要查找的翻译文本(必填,非空)
@@ -312,6 +347,29 @@ object StringsService {
             return true
         }
         document.insertString(insertPos, "\n\t$newNode\n")
+        return true
+    }
+
+    /**
+     * 从单个文件中删除指定 key 对应的 <string> 节点,包括所在行整行删除以保持排版整洁。
+     * @return 实际删除了一条记录返回 true;若 key 在该文件中不存在返回 false
+     */
+    private fun removeFromFile(
+        file: VirtualFile,
+        key: String
+    ): Boolean {
+        val document = FileDocumentManager.getInstance().getDocument(file) ?: return false
+        val xml = document.text
+        val escapedKey = Regex.escape(key)
+        val pattern =
+            """<string\b(?=[^>]*\bname\s*=\s*(['"])$escapedKey\1)[^>]*>[\s\S]*?</string>""".toRegex()
+        val match = pattern.find(xml) ?: return false
+        // 扩展到所在整行(含行首缩进与行尾换行),保证删除后不留空白行
+        val matchStart = match.range.first
+        val matchEnd = match.range.last + 1
+        val lineStart = xml.lastIndexOf('\n', matchStart - 1).let { if (it < 0) 0 else it + 1 }
+        val lineEnd = xml.indexOf('\n', matchEnd).let { if (it < 0) xml.length else it + 1 }
+        document.replaceString(lineStart, lineEnd, "")
         return true
     }
 

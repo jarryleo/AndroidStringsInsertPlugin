@@ -121,6 +121,21 @@ sealed class AiAction {
         val translations: Map<String, String>
     ) : AiAction()
 
+    /**
+     * 删除指定 key 的翻译。
+     * - [languages] 为空列表时,删除 key 在所有语言的翻译(整 key 被移除)。
+     * - [languages] 非空时,仅删除列表中指定语言的翻译,其他语言保持原样。
+     *
+     * @param module    目标模块名,省略时用 currentModule
+     * @param name      必填,字符串 key
+     * @param languages 要删除的语言目录名列表(例: ["values-fr", "values-zh-rCN"]);空表示全语言
+     */
+    data class DeleteString(
+        val module: String?,
+        val name: String,
+        val languages: List<String>
+    ) : AiAction()
+
     /** 文本匹配模式(枚举值与 StringsService / SheetsManager 的 TextMatchType 对齐)。 */
     enum class TextMatchType { EXACT, CONTAINS, REGEX }
 

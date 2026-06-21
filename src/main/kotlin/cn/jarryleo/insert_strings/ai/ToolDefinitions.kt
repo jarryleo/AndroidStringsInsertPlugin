@@ -24,6 +24,7 @@ object ToolDefinitions {
     val toolNames: List<String> = listOf(
         TOOL_INSERT_STRINGS,
         TOOL_UPDATE_STRING,
+        TOOL_DELETE_STRING,
         TOOL_QUERY_KEYS,
         TOOL_READ_STRING,
         TOOL_FIND_KEYS_BY_TEXT,
@@ -36,6 +37,7 @@ object ToolDefinitions {
 
     const val TOOL_INSERT_STRINGS = "insert_strings"
     const val TOOL_UPDATE_STRING = "update_string"
+    const val TOOL_DELETE_STRING = "delete_string"
     const val TOOL_QUERY_KEYS = "query_keys"
     const val TOOL_READ_STRING = "read_string"
     const val TOOL_FIND_KEYS_BY_TEXT = "find_keys_by_text"
@@ -57,6 +59,14 @@ object ToolDefinitions {
         "精准修改指定 key 的部分语言翻译,只动 translations 中列出的语言,其他语言保持原样。" +
             "适用场景:用户说「把 X 的繁体改成 Y」「修正 Z 的某个语言翻译」,无需提供全部语言。" +
             "若 key 不存在则自动创建。"
+
+    private const val DESC_DELETE_STRING =
+        "删除指定 key 的翻译(破坏性操作)。" +
+            "languages 为空/null/省略时,删除该 key 在所有语言的翻译(整 key 被移除);" +
+            "languages 非空时,仅删除列表中指定语言的翻译,其他语言保持原样。" +
+            "适用场景:用户说「删除 X 的法语翻译」「移除这个 key」「删掉 X 的繁体和日语」。" +
+            "安全约束:删除是破坏性操作,操作前建议先 read_string 确认目标 key 与翻译;" +
+            "如不能确定范围,可先 ask_user 与用户确认。"
 
     private const val DESC_QUERY_KEYS =
         "列出或搜索模块内的字符串 key。" +
@@ -104,6 +114,7 @@ object ToolDefinitions {
         return JsonArray().apply {
             add(openAiTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
             add(openAiTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
+            add(openAiTool(TOOL_DELETE_STRING, DESC_DELETE_STRING, openAiDeleteStringParams()))
             add(openAiTool(TOOL_QUERY_KEYS, DESC_QUERY_KEYS, openAiQueryKeysParams()))
             add(openAiTool(TOOL_READ_STRING, DESC_READ_STRING, openAiReadStringParams()))
             add(openAiTool(TOOL_FIND_KEYS_BY_TEXT, DESC_FIND_KEYS_BY_TEXT, openAiFindKeysByTextParams()))
@@ -119,6 +130,7 @@ object ToolDefinitions {
         return JsonArray().apply {
             add(anthropicTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
             add(anthropicTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
+            add(anthropicTool(TOOL_DELETE_STRING, DESC_DELETE_STRING, openAiDeleteStringParams()))
             add(anthropicTool(TOOL_QUERY_KEYS, DESC_QUERY_KEYS, openAiQueryKeysParams()))
             add(anthropicTool(TOOL_READ_STRING, DESC_READ_STRING, openAiReadStringParams()))
             add(anthropicTool(TOOL_FIND_KEYS_BY_TEXT, DESC_FIND_KEYS_BY_TEXT, openAiFindKeysByTextParams()))
@@ -253,6 +265,33 @@ object ToolDefinitions {
                 add("name")
                 add("translations")
             })
+        }
+    }
+
+    private fun openAiDeleteStringParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("module", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,目标 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时用 currentModule.moduleName。")
+                })
+                add("name", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,字符串 key,使用 snake_case。")
+                })
+                add("languages", obj {
+                    addProperty("type", "array")
+                    add("items", obj { addProperty("type", "string") })
+                    addProperty(
+                        "description",
+                        "可选,要删除的语言目录名列表(如 [\"values-fr\", \"values-zh-rCN\"])。" +
+                            "为空/null/省略时,删除该 key 在所有语言的翻译(整 key 被移除);" +
+                            "非空时,仅删除列表中指定语言的翻译,其他语言保持原样。"
+                    )
+                })
+            })
+            add("required", JsonArray().apply { add("name") })
         }
     }
 

@@ -1401,9 +1401,11 @@ class InsertStringsUI(
             return
         }
 
-        // Priority 4-5: strings.xml 写操作(insert_strings / update_string)统一做模块一致性校验
+        // Priority 4-5: strings.xml 写操作(insert_strings / update_string / delete_string)统一做模块一致性校验
         val writeEntries = pairs.filter {
-            it.action is AiAction.InsertStrings || it.action is AiAction.UpdateString
+            it.action is AiAction.InsertStrings ||
+                it.action is AiAction.UpdateString ||
+                it.action is AiAction.DeleteString
         }
         if (writeEntries.isNotEmpty()) {
             val conflict = detectWriteModuleConflict(writeEntries)
@@ -1414,14 +1416,16 @@ class InsertStringsUI(
             }
         }
 
-        // Priority 4: query_keys / read_string / update_string / find_keys_by_text(strings.xml 主动操作能力)
-        // 注意:update_string 已被上面的模块一致性校验拦截(若有问题就 reject),此处仅含只读动作
+        // Priority 4: query_keys / read_string / update_string / delete_string / find_keys_by_text(strings.xml 主动操作能力)
+        // 注意:update_string / delete_string 已被上面的模块一致性校验拦截(若有问题就 reject),此处仅含合法动作
         val stringReadEntries = pairs.filter {
             it.action is AiAction.QueryKeys ||
                 it.action is AiAction.ReadString ||
                 it.action is AiAction.FindKeysByText
         }
-        val stringWriteEntries = pairs.filter { it.action is AiAction.UpdateString }
+        val stringWriteEntries = pairs.filter {
+            it.action is AiAction.UpdateString || it.action is AiAction.DeleteString
+        }
         val stringsEntries = stringReadEntries + stringWriteEntries
         if (stringsEntries.isNotEmpty()) {
             executeStringsOps(stringsEntries, context, iteration)
@@ -1449,7 +1453,7 @@ class InsertStringsUI(
     }
 
     /**
-     * 检测 write actions(insert_strings + update_string)是否指定了不同模块。
+     * 检测 write actions(insert_strings + update_string + delete_string)是否指定了不同模块。
      * @return 冲突描述(列出所有显式指定的 module);若全部一致或仅有 0~1 个显式 module,返回 null
      */
     private fun detectWriteModuleConflict(
@@ -1460,6 +1464,7 @@ class InsertStringsUI(
                 val m = when (val action = entry.action) {
                     is AiAction.InsertStrings -> action.module
                     is AiAction.UpdateString -> action.module
+                    is AiAction.DeleteString -> action.module
                     else -> null
                 }?.trim()?.takeIf { it.isNotEmpty() }
                 normalizeExplicitWriteModule(m)
@@ -1485,7 +1490,7 @@ class InsertStringsUI(
         iteration: Int
     ) {
         val errorMsg = buildString {
-            append("[工具执行异常] 跨模块冲突:本轮内 insert_strings/update_string 动作指定了多个不同 module(")
+            append("[工具执行异常] 跨模块冲突:本轮内 insert_strings/update_string/delete_string 动作指定了多个不同 module(")
             append(explicitModulesCsv)
             append(")。同一 AI 回合内的所有字符串写入必须在同一模块。")
             append("请重新组织 actions:全部省略 module 参数(系统使用 currentModule),")
@@ -1593,6 +1598,7 @@ class InsertStringsUI(
                         is AiAction.QueryKeys -> runQueryKeys(action)
                         is AiAction.ReadString -> runReadString(action)
                         is AiAction.UpdateString -> runUpdateString(action)
+                        is AiAction.DeleteString -> runDeleteString(action)
                         is AiAction.FindKeysByText -> runFindKeysByText(action)
                         else -> return@forEach
                     }
@@ -1715,6 +1721,47 @@ class InsertStringsUI(
             results.forEach { (lang, msg) ->
                 append("  ").append(lang).append(": ").appendLine(msg)
             }
+        }
+    }
+
+    private fun runDeleteString(action: AiAction.DeleteString): String {
+        val moduleName = resolveTargetModule(
+            action.module,
+            ContextManager.contextInfo?.currentModule?.moduleName,
+            ContextManager.contextInfo?.moduleWithMostLines?.moduleName
+        ) ?: return "[工具执行结果] 类型:delete_string 状态:失败 信息:未指定目标模块"
+        val results = StringsService.deleteKey(project, moduleName, action.name, action.languages)
+        val successCount = results.values.count { it == "成功" }
+        val notFoundCount = results.values.count { it == "未找到该 key" }
+        val totalTarget = results.size
+        val scope = if (action.languages.isEmpty()) "all-languages" else action.languages.joinToString(",")
+        // 同步刷新 UI:若该 key 正在 keyEntries 中,以最新翻译内容覆盖
+        SwingUtilities.invokeLater { refreshKeyEntryAfterDelete(moduleName, action.name) }
+        return buildString {
+            append("[工具执行结果] 类型:delete_string key:").append(action.name)
+            append(" 模块:").append(moduleName)
+            append(" 范围:").append(scope)
+            append(" 状态:").append(if (successCount == totalTarget) "成功" else "部分失败")
+            append(" 成功:").append(successCount).append('/').append(totalTarget)
+            if (notFoundCount > 0) append(" 未找到:").append(notFoundCount)
+            appendLine()
+            results.forEach { (lang, msg) ->
+                append("  ").append(lang).append(": ").appendLine(msg)
+            }
+        }
+    }
+
+    /**
+     * 删除后刷新 UI:重新扫描目标 key 在模块中的最新翻译,
+     * 若 keyEntries 中包含该 key 则就地替换(并按需刷新当前选中行的 rows)。
+     */
+    private fun refreshKeyEntryAfterDelete(moduleName: String, key: String) {
+        val idx = keyEntries.indexOfFirst { it.key == key }
+        if (idx < 0) return
+        val updated = ContextManager.scanModuleForKey(project, moduleName, key)
+        keyEntries[idx] = KeyedStringsInfo(key, "", updated)
+        if (selectedKeyIndex == idx) {
+            updateRowsForSelectedKey()
         }
     }
 
