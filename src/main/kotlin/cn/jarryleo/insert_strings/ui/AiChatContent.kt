@@ -1,25 +1,15 @@
 package cn.jarryleo.insert_strings.ui
 
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -47,6 +37,14 @@ fun AiChatContent(
     chatContextText: String,
     modifier: Modifier = Modifier,
     colors: IdeColors,
+    showHeader: Boolean = true,
+    showQuickPhrases: Boolean = true,
+    showEnterHint: Boolean = true,
+    /**
+     * 消息列表内部的 contentPadding。弹框等紧凑场景可传较小值(如 4.dp),
+     * 主面板等标准场景保持默认 8.dp。
+     */
+    messageListContentPadding: PaddingValues = PaddingValues(8.dp),
 ) {
     Box(modifier = modifier) {
         AiChatBody(
@@ -62,6 +60,10 @@ fun AiChatContent(
             onQuickSend = onQuickSend,
             onOptionClick = onOptionClick,
             colors = colors,
+            showHeader = showHeader,
+            showQuickPhrases = showQuickPhrases,
+            showEnterHint = showEnterHint,
+            messageListContentPadding = messageListContentPadding,
         )
         if (showContextPopup) {
             ContextPopupOverlay(
@@ -87,6 +89,10 @@ private fun AiChatBody(
     onQuickSend: (String) -> Unit,
     onOptionClick: (Int, String) -> Unit,
     colors: IdeColors,
+    showHeader: Boolean = true,
+    showQuickPhrases: Boolean = true,
+    showEnterHint: Boolean = true,
+    messageListContentPadding: PaddingValues = PaddingValues(8.dp),
 ) {
     val listState = rememberLazyListState()
     LaunchedEffect(chatMessages.size) {
@@ -96,38 +102,40 @@ private fun AiChatBody(
     }
     Column(
         modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+        verticalArrangement = Arrangement.spacedBy(if (showHeader || showQuickPhrases) 6.dp else 4.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            CompactButton(
-                text = "New Topic",
-                onClick = onNewChat,
-                modifier = Modifier.width(82.dp),
-                colors = colors,
-            )
-            Text(
-                text = "AI Chat",
-                modifier = Modifier.weight(1f),
-                color = colors.text,
-                style = compactTextStyle(colors.text),
-                fontWeight = FontWeight.Bold,
-            )
-            CompactButton(
-                text = "Context",
-                onClick = onOpenContext,
-                modifier = Modifier.width(68.dp),
-                colors = colors,
-            )
-            CompactButton(
-                text = "Back",
-                onClick = onClose,
-                modifier = Modifier.width(56.dp),
-                colors = colors,
-            )
+        if (showHeader) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                CompactButton(
+                    text = "New Topic",
+                    onClick = onNewChat,
+                    modifier = Modifier.width(82.dp),
+                    colors = colors,
+                )
+                Text(
+                    text = "AI Chat",
+                    modifier = Modifier.weight(1f),
+                    color = colors.text,
+                    style = compactTextStyle(colors.text),
+                    fontWeight = FontWeight.Bold,
+                )
+                CompactButton(
+                    text = "Context",
+                    onClick = onOpenContext,
+                    modifier = Modifier.width(68.dp),
+                    colors = colors,
+                )
+                CompactButton(
+                    text = "Back",
+                    onClick = onClose,
+                    modifier = Modifier.width(56.dp),
+                    colors = colors,
+                )
+            }
         }
 
         Box(
@@ -152,7 +160,7 @@ private fun AiChatBody(
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
+                    contentPadding = messageListContentPadding,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     itemsIndexed(chatMessages) { index, msg ->
@@ -199,30 +207,32 @@ private fun AiChatBody(
                 }
             }
         }
-
-        val quickPhrases = remember {
-            listOf(
-                "帮我检查表格全部的翻译",
-                "帮我修正完善表格全部翻译",
-                "帮我检查选择的翻译是否有误",
-                "帮我补全和修正选中的翻译",
-                "帮我把选中的翻译插入表格",
-                "帮我从表格读取选中的翻译并插入文件",
-            )
-        }
-
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp),
-        ) {
-            quickPhrases.forEach { phrase ->
-                CompactButton(
-                    text = phrase,
-                    onClick = { onQuickSend(phrase) },
-                    enabled = !chatSending,
-                    colors = colors,
+        Spacer(Modifier.height(8.dp))
+        if (showQuickPhrases) {
+            val quickPhrases = remember {
+                listOf(
+                    "帮我检查表格全部的翻译",
+                    "帮我修正完善表格全部翻译",
+                    "帮我检查选择的翻译是否有误",
+                    "帮我补全和修正选中的翻译",
+                    "帮我把选中的翻译插入表格",
+                    "帮我从表格读取选中的翻译并插入文件",
                 )
+            }
+
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                quickPhrases.forEach { phrase ->
+                    CompactButton(
+                        text = phrase,
+                        onClick = { onQuickSend(phrase) },
+                        enabled = !chatSending,
+                        colors = colors,
+                    )
+                }
             }
         }
 
@@ -259,12 +269,14 @@ private fun AiChatBody(
                 )
             }
         }
-        Text(
-            text = "回车发送 · Alt+回车 / Shift+回车 换行",
-            color = colors.secondaryText,
-            style = compactTextStyle(colors.secondaryText),
-            modifier = Modifier.padding(start = 2.dp),
-        )
+        if (showEnterHint) {
+            Text(
+                text = "回车发送 · Alt+回车 / Shift+回车 换行",
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText),
+                modifier = Modifier.padding(start = 2.dp),
+            )
+        }
     }
 }
 
@@ -528,14 +540,17 @@ private fun buildToolSummary(content: String): String {
                 "$icon $op"
             }
         }
+
         trimmed.startsWith("[用户取消]") -> {
             val rest = trimmed.removePrefix("[用户取消]").trim()
             "🚫 已取消 · ${rest.ifEmpty { "操作" }}"
         }
+
         trimmed.startsWith("[工具执行异常]") -> {
             val rest = trimmed.removePrefix("[工具执行异常]").trim()
             "❌ 异常 · ${truncateText(rest, 50)}"
         }
+
         trimmed.startsWith("[系统监督]") -> "系统监督提示"
         trimmed.startsWith("[工具文档加载失败]") -> "❌ 文档加载失败"
         trimmed.contains("工具文档") -> "📄 工具文档加载"

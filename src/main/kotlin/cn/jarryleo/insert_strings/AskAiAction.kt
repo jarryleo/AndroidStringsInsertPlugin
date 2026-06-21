@@ -1,23 +1,21 @@
 package cn.jarryleo.insert_strings
 
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.ComposePanel
+import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.ai.AiSettingsService
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.sheets.SheetsManager
-import cn.jarryleo.insert_strings.ui.AiChatContent
-import cn.jarryleo.insert_strings.ui.ChatStateHolder
-import cn.jarryleo.insert_strings.ui.InsertStringsChatContextBuilder
-import cn.jarryleo.insert_strings.ui.InsertStringsChatDriver
-import cn.jarryleo.insert_strings.ui.InsertStringsSheetsOpsController
-import cn.jarryleo.insert_strings.ui.InsertStringsStringsOpsController
-import cn.jarryleo.insert_strings.ui.PendingSheetsInsert
-import cn.jarryleo.insert_strings.ui.rememberIdeColors
+import cn.jarryleo.insert_strings.ui.*
 import cn.jarryleo.insert_strings.xml.ContextManager
 import cn.jarryleo.insert_strings.xml.KeyedStringsInfo
 import com.intellij.openapi.actionSystem.ActionUpdateThread
@@ -28,23 +26,11 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBLabel
-import java.awt.BorderLayout
-import java.awt.Color
-import java.awt.Cursor
-import java.awt.Dialog
-import java.awt.Dimension
-import java.awt.Font
-import java.awt.Insets
-import java.awt.Point
+import com.intellij.util.ui.JBUI
+import java.awt.*
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
-import javax.swing.BorderFactory
-import javax.swing.JButton
-import javax.swing.JDialog
-import javax.swing.JPanel
-import javax.swing.SwingUtilities
-import javax.swing.Timer
-import javax.swing.UIManager
+import javax.swing.*
 
 /**
  * 在编辑器右键 / Edit 菜单中触发,弹出一个与 InsertStrings 主面板聊天页
@@ -100,9 +86,19 @@ class AskAiAction : AnAction() {
         val (titleBar, toastLabel) = createTitleBar(dialog, "Ask AI")
         state.bindToastLabel(toastLabel)
 
+        val resizeGrip = createResizeGrip(dialog)
+        // 用一个 BorderLayout 子容器把 grip 推到整条 SOUTH 的最右侧,
+        // 直接放 FlowLayout 会被 BorderLayout 把容器本身拉满到整宽,grip 反而停在容器内 16px 处。
+        val gripContainer = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            preferredSize = Dimension(0, 16)
+            add(resizeGrip, BorderLayout.EAST)
+        }
+
         val contentPanel = JPanel(BorderLayout()).apply {
             add(titleBar, BorderLayout.NORTH)
             add(composePanel, BorderLayout.CENTER)
+            add(gripContainer, BorderLayout.SOUTH)
             border = BorderFactory.createLineBorder(UIManager.getColor("Component.borderColor") ?: Color(0xC8C8C8), 1)
         }
 
@@ -148,8 +144,14 @@ class AskAiAction : AnAction() {
                     onCloseContext = driver::closeContextPopup,
                     showContextPopup = state.showContextPopup,
                     chatContextText = state.chatContextText,
-                    modifier = androidx.compose.ui.Modifier,
+                    modifier = Modifier.fillMaxSize().padding(10.dp),
                     colors = colors,
+                    // 弹框 UI 最小化:只保留消息列表 + 输入区
+                    showHeader = false,
+                    showQuickPhrases = false,
+                    showEnterHint = false,
+                    // 消息列表用更紧凑的 padding,让气泡更靠近弹框边缘
+                    messageListContentPadding = PaddingValues(8.dp),
                 )
             }
         }
@@ -158,11 +160,54 @@ class AskAiAction : AnAction() {
 
         // 复刻原行为:有选中文字时,把"解释选中代码"作为首条 user 消息自动发出
         if (selectedText.isNotBlank()) {
-            val firstMessage = "请分析并解释以下从编辑器中选中的代码或文本内容。请用简洁清晰的中文回答，重点说明其含义、用途和关键逻辑。\n\n```\n$selectedText\n```"
+            val firstMessage =
+                "请分析并解释以下从编辑器中选中的代码或文本内容。请用简洁清晰的中文回答，重点说明其含义、用途和关键逻辑。\n\n```\n$selectedText\n```"
             ApplicationManager.getApplication().executeOnPooledThread {
                 driver.sendChatMessage(firstMessage)
             }
         }
+    }
+
+    /**
+     * 右下角 resize grip:小三角组件,拖动它即可调整 dialog 尺寸。
+     * 解决 undecorated JDialog 默认无可见缩放手柄的问题。
+     */
+    private fun createResizeGrip(dialog: JDialog): JPanel {
+        val grip = object : JPanel() {
+            override fun paintComponent(g: Graphics) {
+                super.paintComponent(g)
+                g.color = Color(0x909090)
+                val w = width
+                val h = height
+                g.drawLine(w - 4, h - 11, w - 11, h - 4)
+                g.drawLine(w - 4, h - 7, w - 7, h - 4)
+                g.drawLine(w - 4, h - 3, w - 3, h - 4)
+            }
+        }
+        grip.preferredSize = Dimension(16, 16)
+        grip.cursor = Cursor.getPredefinedCursor(Cursor.SE_RESIZE_CURSOR)
+        grip.isOpaque = true
+
+        // 拖动调整 dialog 尺寸
+        var startPoint: Point? = null
+        var startSize: Dimension? = null
+        grip.addMouseListener(object : MouseAdapter() {
+            override fun mousePressed(e: MouseEvent) {
+                startPoint = e.point
+                startSize = dialog.size
+            }
+        })
+        grip.addMouseMotionListener(object : MouseAdapter() {
+            override fun mouseDragged(e: MouseEvent) {
+                val sp = startPoint ?: return
+                val ss = startSize ?: return
+                val newWidth = (ss.width + e.x - sp.x).coerceAtLeast(320)
+                val newHeight = (ss.height + e.y - sp.y).coerceAtLeast(280)
+                dialog.setSize(newWidth, newHeight)
+            }
+        })
+
+        return grip
     }
 
     /**
@@ -197,7 +242,7 @@ class AskAiAction : AnAction() {
             isBorderPainted = false
             font = font.deriveFont(Font.BOLD, 14f)
             preferredSize = Dimension(60, 24)
-            margin = Insets(8, 0, 0, 0)
+            margin = JBUI.insetsTop(8)
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
             addActionListener { dialog.dispose() }
         }
@@ -206,7 +251,7 @@ class AskAiAction : AnAction() {
         val dragStart = Point()
         val dragListener = object : MouseAdapter() {
             override fun mousePressed(e: MouseEvent) {
-                dragStart.setLocation(e.point)
+                dragStart.location = e.point
             }
 
             override fun mouseDragged(e: MouseEvent) {
@@ -244,6 +289,7 @@ private class AskAiChatHolder(
     override val chatMessages: SnapshotStateList<ChatMessage> = mutableStateListOf()
     override var chatInput: String by mutableStateOf("")
     override var chatSending: Boolean by mutableStateOf(false)
+
     @Volatile
     override var stopRequested: Boolean = false
     override var pendingAskUserToolCallId: String? = null
@@ -257,7 +303,7 @@ private class AskAiChatHolder(
     override val keyEntries: MutableList<KeyedStringsInfo> = mutableListOf()
     override var selectedKeyIndex: Int = 0
     override val sheetsAvailableSheets: MutableList<SheetsManager.SheetInfo> = mutableListOf()
-    override val rows: List<cn.jarryleo.insert_strings.ui.StringRow> = emptyList()
+    override val rows: List<StringRow> = emptyList()
 
     private var toastLabel: JBLabel? = null
     private var toastTimer: Timer? = null
