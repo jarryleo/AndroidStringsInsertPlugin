@@ -1,7 +1,5 @@
 package cn.jarryleo.insert_strings.xml
 
-import com.alibaba.fastjson2.JSON
-
 /**
  * 项目国际化上下文信息，用于以 JSON 格式传递给 AI
  */
@@ -11,8 +9,6 @@ data class ContextInfo(
     val modules: List<ModuleInfo>,
 ) {
     val moduleWithMostLines: ModuleInfo? = modules.maxByOrNull { it.totalLines }
-
-    fun getJson(): String = runCatching { JSON.toJSONString(this) }.getOrNull() ?: ""
 
     fun findModule(name: String): ModuleInfo? = modules.find {
         it.moduleName == name || it.originalModuleName == name

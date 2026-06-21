@@ -43,7 +43,7 @@ dependencies {
     implementation(compose.desktop.currentOs)
     implementation("org.commonmark:commonmark:0.22.0")
     implementation("org.commonmark:commonmark-ext-gfm-tables:0.22.0")
-    implementation("com.alibaba.fastjson2:fastjson2:2.0.52")
+    implementation("com.google.code.gson:gson:2.11.0")
     implementation("com.google.api-client:google-api-client:2.7.2")
     implementation("com.google.oauth-client:google-oauth-client-jetty:1.39.0")
     implementation("com.google.apis:google-api-services-sheets:v4-rev20241203-2.0.0")

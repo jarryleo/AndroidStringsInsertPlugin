@@ -1,8 +1,8 @@
 package cn.jarryleo.insert_strings
 
-import com.alibaba.fastjson2.JSON
-import com.alibaba.fastjson2.JSONArray
-import com.alibaba.fastjson2.JSONObject
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 
 /**
  * 剪贴板中单条 key 的翻译快照。
@@ -24,42 +24,48 @@ data class ClipInfo(
 ) {
 
     fun toJson(): String {
-        val obj = JSONObject()
-        obj["anchor"] = anchor
-        val arr = JSONArray()
+        val obj = JsonObject()
+        obj.addProperty("anchor", anchor)
+        val arr = JsonArray()
         entries.forEach { entry ->
-            val e = JSONObject()
-            e["key"] = entry.key
-            val t = JSONObject()
-            entry.translations.forEach { (k, v) -> t[k] = v }
-            e["translations"] = t
+            val e = JsonObject()
+            e.addProperty("key", entry.key)
+            val t = JsonObject()
+            entry.translations.forEach { (k, v) -> t.addProperty(k, v) }
+            e.add("translations", t)
             arr.add(e)
         }
-        obj["entries"] = arr
-        return runCatching { JSON.toJSONString(obj) }.getOrNull() ?: ""
+        obj.add("entries", arr)
+        return obj.toString()
     }
 
     companion object {
 
         fun fromJson(json: String): ClipInfo? {
             return try {
-                val obj = JSON.parseObject(json)
-                val anchor = obj.getString("anchor") ?: ""
-                val entriesArr = obj.getJSONArray("entries")
+                val obj = JsonParser.parseString(json).asJsonObject
+                val anchor = obj.get("anchor")?.takeIf { !it.isJsonNull }?.asString.orEmpty()
+                val entriesArr = obj.getAsJsonArray("entries")
                 if (entriesArr != null) {
                     val entries = entriesArr.mapNotNull { el ->
-                        val e = el as? JSONObject ?: return@mapNotNull null
-                        val key = e.getString("key") ?: return@mapNotNull null
-                        val translationsObj = e.getJSONObject("translations") ?: JSONObject()
-                        val translations = translationsObj.mapValues { it.value.toString() }
+                        if (!el.isJsonObject) return@mapNotNull null
+                        val e = el.asJsonObject
+                        val key = e.get("key")?.takeIf { !it.isJsonNull }?.asString
+                            ?: return@mapNotNull null
+                        val translationsObj = e.getAsJsonObject("translations")
+                        val translations = translationsObj?.entrySet()?.associate { (k, v) ->
+                            k to v.asString
+                        }.orEmpty()
                         ClipEntry(key, translations)
                     }
                     if (entries.isEmpty()) return null
                     ClipInfo(entries, anchor)
                 } else {
-                    val node = obj.getString("node") ?: return null
-                    val valueObj = obj.getJSONObject("value") ?: return null
-                    val value = valueObj.mapValues { it.value.toString() }
+                    // 旧格式兼容:{"node":"k1","anchor":"...","value":{...}}
+                    val node = obj.get("node")?.takeIf { !it.isJsonNull }?.asString
+                        ?: return null
+                    val valueObj = obj.getAsJsonObject("value") ?: return null
+                    val value = valueObj.entrySet().associate { (k, v) -> k to v.asString }
                     ClipInfo(listOf(ClipEntry(node, value)), anchor)
                 }
             } catch (e: Exception) {
