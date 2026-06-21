@@ -1,18 +1,10 @@
 package cn.jarryleo.insert_strings.xml
 
 import cn.jarryleo.insert_strings.ui.DebugLog
-import cn.jarryleo.insert_strings.xml.ContextManager.getModuleFiles
-import cn.jarryleo.insert_strings.xml.ContextManager.getModuleStringsInfo
-import cn.jarryleo.insert_strings.xml.ContextManager.moduleFilesMap
 import com.intellij.openapi.application.WriteAction
 import com.intellij.openapi.fileEditor.FileDocumentManager
-import com.intellij.openapi.module.Module
-import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.roots.ModuleRootManager
-import com.intellij.openapi.roots.ProjectRootManager
 import com.intellij.openapi.vfs.VirtualFile
-import java.io.File
 import java.util.*
 
 object ContextManager {
@@ -20,8 +12,11 @@ object ContextManager {
     var contextInfo: ContextInfo? = null
         private set
 
-    // displayModuleName -> (originalModuleName, list of valuesDir to stringsFile)
+    // moduleName -> list of (valuesDir, stringsFile)
     private var moduleFilesMap: Map<String, List<Pair<VirtualFile, VirtualFile>>> = emptyMap()
+
+    // moduleName -> module root path
+    private var modulePathMap: Map<String, String> = emptyMap()
 
     /**
      * 获取模块的 values 目录与 strings.xml 文件对。
@@ -50,54 +45,55 @@ object ContextManager {
     }
 
     /**
-     * 初始化项目所有模块的 strings.xml 上下文信息
+     * 初始化项目所有模块的 strings.xml 上下文信息。
+     * 通过扫描项目目录树查找包含 res 目录的模块,不依赖 IntelliJ 的 ModuleManager,
+     * 避免 Android 项目未编译时模块信息不准确的问题。
      */
     @JvmStatic
     fun initContextInfo(project: Project) {
-        val moduleManager = ModuleManager.getInstance(project)
-        val fileIndex = ProjectRootManager.getInstance(project).fileIndex
-        val rawModuleFiles = mutableMapOf<Module, MutableList<Pair<VirtualFile, VirtualFile>>>()
-        val allModules = moduleManager.modules.toList()
+        val basePath = project.basePath ?: return
+        val baseDir = com.intellij.openapi.vfs.LocalFileSystem.getInstance()
+            .findFileByPath(basePath) ?: return
 
-        moduleManager.modules.forEach { module ->
-            DebugLog.log("ContextManager", "find module name = ${module.name}")
-            ModuleRootManager.getInstance(module).contentRoots.forEach { root ->
-                //DebugLog.log("ContextManager", "  root = ${root.name} , path = ${root.path}")
-                findResDirectories(root).forEach { resDir ->
-                    //DebugLog.log("ContextManager", "    resDir = ${resDir.name} , path = ${resDir.path}")
-                    // 通过文件索引把 res 目录归属到真正的模块，避免根模块吞掉子模块
-                    val ownerModule = findOwnerModuleForDir(allModules, resDir)
-                        ?: fileIndex.getModuleForFile(resDir)
-                        ?: module
-                    //DebugLog.log("ContextManager", "    ownerModule = $ownerModule")
-                    resDir.children
-                        .filter { it.isDirectory && it.name.startsWith("values") }
-                        .forEach { valuesDir ->
-                            val stringsFile = valuesDir.children
-                                .find { it.name.contains("strings", ignoreCase = true) && it.extension == "xml" }
-                            if (stringsFile != null) {
-                                rawModuleFiles.getOrPut(ownerModule) { mutableListOf() }.add(valuesDir to stringsFile)
-                            }
-                        }
-                }
+        val allResDirs = findResDirectories(baseDir)
+        val rawModules = mutableMapOf<String, MutableList<Pair<VirtualFile, VirtualFile>>>()
+        val rawPaths = mutableMapOf<String, String>()
+
+        for (resDir in allResDirs) {
+            val moduleRoot = determineModuleRoot(baseDir, resDir) ?: continue
+            val moduleName = if (moduleRoot.path == baseDir.path) {
+                project.name
+            } else {
+                moduleRoot.name
             }
+            rawPaths.putIfAbsent(moduleName, moduleRoot.path)
+            DebugLog.log("ContextManager", "found module=$moduleName, resDir=${resDir.path}")
+
+            resDir.children
+                .filter { it.isDirectory && it.name.startsWith("values") }
+                .forEach { valuesDir ->
+                    val stringsFile = valuesDir.children
+                        .find { it.name.contains("strings", ignoreCase = true) && it.extension == "xml" }
+                    if (stringsFile != null) {
+                        rawModules.getOrPut(moduleName) { mutableListOf() }.add(valuesDir to stringsFile)
+                    }
+                }
         }
 
         val tempMap = mutableMapOf<String, List<Pair<VirtualFile, VirtualFile>>>()
-        val moduleInfos = rawModuleFiles.mapNotNull { (module, files) ->
+        val moduleInfos = rawModules.mapNotNull { (name, files) ->
             if (files.isEmpty()) return@mapNotNull null
             // 同一模块下同语言只保留一份（多个 sourceSet 时会出现重复）
             val seenLanguages = mutableSetOf<String>()
             val uniqueFiles = files.filter { seenLanguages.add(it.first.name) }
             if (uniqueFiles.isEmpty()) return@mapNotNull null
 
-            val displayName = getDisplayModuleName(module, project)
-            tempMap[displayName] = uniqueFiles
+            tempMap[name] = uniqueFiles
 
             ModuleInfo(
-                moduleName = displayName,
-                originalModuleName = module.name,
-                modulePath = getModuleRootPath(module),
+                moduleName = name,
+                originalModuleName = name,
+                modulePath = rawPaths[name] ?: "",
                 xmlFiles = uniqueFiles.map { (valuesDir, stringsFile) ->
                     XmlFileInfo(
                         filePath = stringsFile.path,
@@ -109,6 +105,7 @@ object ContextManager {
         }
 
         moduleFilesMap = tempMap
+        modulePathMap = rawPaths
         contextInfo = ContextInfo(
             projectName = project.name,
             currentModule = null,
@@ -155,9 +152,7 @@ object ContextManager {
         val candidate = moduleName?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         if (candidate in moduleFilesMap) return candidate
         contextInfo?.findModule(candidate)?.let { return it.moduleName }
-        val target = ModuleManager.getInstance(project).modules.find { it.name == candidate }
-            ?: return null
-        return getDisplayModuleName(target, project).takeIf { it in moduleFilesMap }
+        return null
     }
 
     /**
@@ -256,8 +251,8 @@ object ContextManager {
         val files = moduleFilesMap[displayName] ?: return null
         return ModuleInfo(
             moduleName = displayName,
-            originalModuleName = findOriginalModuleName(project, displayName) ?: "",
-            modulePath = getModuleRootPathByName(project, displayName) ?: "",
+            originalModuleName = displayName,
+            modulePath = modulePathMap[displayName] ?: "",
             xmlFiles = files.map { (valuesDir, stringsFile) ->
                 XmlFileInfo(
                     filePath = stringsFile.path,
@@ -268,46 +263,23 @@ object ContextManager {
         )
     }
 
+    /**
+     * 根据文件路径查找其所属模块。
+     * 通过路径前缀匹配,取最深的模块路径作为归属。
+     */
     private fun findModuleDisplayNameForFile(project: Project, file: VirtualFile): String? {
-        val modules = ModuleManager.getInstance(project).modules.toList()
-        val module = findOwnerModuleForDir(modules, file)
-            ?: ProjectRootManager.getInstance(project).fileIndex.getModuleForFile(file)
-            ?: return null
-        return getDisplayModuleName(module, project)
-    }
-
-    private fun findOriginalModuleName(project: Project, displayName: String): String? {
-        return ModuleManager.getInstance(project).modules
-            .find { getDisplayModuleName(it, project) == displayName }
-            ?.name
-    }
-
-    private fun getModuleRootPathByName(project: Project, displayName: String): String? {
-        return ModuleManager.getInstance(project).modules
-            .find { getDisplayModuleName(it, project) == displayName }
-            ?.let { getModuleRootPath(it) }
-    }
-
-    private fun getDisplayModuleName(module: Module, project: Project): String {
-        val prefix = "${project.name}."
-        val name = module.name
-        return if (name.startsWith(prefix)) name.removePrefix(prefix) else name
-    }
-
-    private fun findOwnerModuleForDir(modules: List<Module>, dir: VirtualFile): Module? {
-        val dirPath = dir.path
-        return modules
-            .flatMap { module ->
-                ModuleRootManager.getInstance(module).contentRoots.map { root -> module to root }
+        val filePath = file.path
+        return modulePathMap.entries
+            .filter { (_, modulePath) ->
+                filePath == modulePath || filePath.startsWith(modulePath)
             }
-            .filter { (_, root) ->
-                val rootPath = root.path
-                dirPath == rootPath || dirPath.startsWith(root.path)
-            }
-            .maxByOrNull { (_, root) -> root.path.length }
-            ?.first
+            .maxByOrNull { (_, modulePath) -> modulePath.length }
+            ?.key
     }
 
+    /**
+     * BFS 扫描目录下所有 res 子目录
+     */
     private fun findResDirectories(root: VirtualFile): List<VirtualFile> {
         val result = mutableListOf<VirtualFile>()
         val visited = mutableSetOf<String>()
@@ -315,7 +287,7 @@ object ContextManager {
         queue.add(root to 0)
         while (queue.isNotEmpty()) {
             val (dir, depth) = queue.removeFirst()
-            if (!dir.isDirectory || depth > 6) continue
+            if (!dir.isDirectory || depth > 15) continue
             val path = dir.path
             if (!visited.add(path)) continue
             if (dir.name == "res") {
@@ -328,19 +300,35 @@ object ContextManager {
         return result
     }
 
+    /**
+     * 从 res 目录向上推导模块根目录。
+     * 跳过 Android source set 中间目录(src/main/debug/release 等),
+     * 但不跳过项目根目录。
+     */
+    private fun determineModuleRoot(projectRoot: VirtualFile, resDir: VirtualFile): VirtualFile? {
+        var current: VirtualFile = resDir.parent ?: return null
+        while (current.path != projectRoot.path) {
+            val parent = current.parent ?: return current
+            if (parent.path == projectRoot.path) return current
+            if (current.name in SOURCE_SET_DIRS) {
+                current = parent
+            } else {
+                return current
+            }
+        }
+        return current // res 在项目根目录下
+    }
+
     private fun shouldSkipDir(name: String): Boolean {
         return name in SKIP_DIRS
     }
+
+    private val SOURCE_SET_DIRS = setOf("src", "main", "debug", "release", "test", "androidTest")
 
     private val SKIP_DIRS = setOf(
         ".git", ".idea", ".gradle", "build", "out", "captures", ".cxx",
         "node_modules", "gradle"
     )
-
-    private fun getModuleRootPath(module: Module): String {
-        return ModuleRootManager.getInstance(module).contentRoots.firstOrNull()?.path
-            ?: module.moduleFilePath?.substringBeforeLast(File.separatorChar) ?: ""
-    }
 
     private fun getFileLines(file: VirtualFile): Int {
         return FileDocumentManager.getInstance().getDocument(file)?.lineCount
