@@ -17,7 +17,7 @@ import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.ai.AiProtocol
 
 enum class SettingsTab {
-    AI, SHEETS
+    AI, SHEETS, DEBUG
 }
 
 @Composable
@@ -92,6 +92,13 @@ fun SettingsContent(
                 modifier = Modifier.weight(1f),
                 colors = colors,
             )
+            SettingsTabButton(
+                text = "Debug",
+                selected = selectedTab == SettingsTab.DEBUG,
+                onClick = { onTabChange(SettingsTab.DEBUG) },
+                modifier = Modifier.weight(1f),
+                colors = colors,
+            )
         }
 
         when (selectedTab) {
@@ -122,6 +129,12 @@ fun SettingsContent(
                 onTestConnection = onTestSheetsConnection,
                 onSave = onSaveSheetsSettings,
                 onRefreshSheets = onRefreshSheetsList,
+                modifier = Modifier.fillMaxSize(),
+                colors = colors,
+            )
+            SettingsTab.DEBUG -> DebugContent(
+                logs = DebugLog.entries.toList(),
+                onClear = { DebugLog.clear() },
                 modifier = Modifier.fillMaxSize(),
                 colors = colors,
             )

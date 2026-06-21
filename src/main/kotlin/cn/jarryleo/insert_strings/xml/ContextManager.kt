@@ -1,5 +1,9 @@
 package cn.jarryleo.insert_strings.xml
 
+import cn.jarryleo.insert_strings.ui.DebugLog
+import cn.jarryleo.insert_strings.xml.ContextManager.getModuleFiles
+import cn.jarryleo.insert_strings.xml.ContextManager.getModuleStringsInfo
+import cn.jarryleo.insert_strings.xml.ContextManager.moduleFilesMap
 import com.intellij.openapi.application.WriteAction
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.module.Module
@@ -9,7 +13,7 @@ import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.roots.ProjectRootManager
 import com.intellij.openapi.vfs.VirtualFile
 import java.io.File
-import java.util.ArrayDeque
+import java.util.*
 
 object ContextManager {
 
@@ -56,12 +60,16 @@ object ContextManager {
         val allModules = moduleManager.modules.toList()
 
         moduleManager.modules.forEach { module ->
+            DebugLog.log("ContextManager", "find module name = ${module.name}")
             ModuleRootManager.getInstance(module).contentRoots.forEach { root ->
+                DebugLog.log("ContextManager", "  root = ${root.name} , path = ${root.path}")
                 findResDirectories(root).forEach { resDir ->
+                    DebugLog.log("ContextManager", "    resDir = ${resDir.name} , path = ${resDir.path}")
                     // 通过文件索引把 res 目录归属到真正的模块，避免根模块吞掉子模块
                     val ownerModule = findOwnerModuleForDir(allModules, resDir)
                         ?: fileIndex.getModuleForFile(resDir)
                         ?: module
+                    DebugLog.log("ContextManager", "    ownerModule = $ownerModule")
                     resDir.children
                         .filter { it.isDirectory && it.name.startsWith("values") }
                         .forEach { valuesDir ->
@@ -106,6 +114,7 @@ object ContextManager {
             currentModule = null,
             modules = moduleInfos
         )
+        DebugLog.log("ContextManager", "contextInfo = ${contextInfo?.getJson()}")
     }
 
     /**
@@ -287,14 +296,14 @@ object ContextManager {
     }
 
     private fun findOwnerModuleForDir(modules: List<Module>, dir: VirtualFile): Module? {
-        val dirPath = dir.path.trimEnd('/')
+        val dirPath = dir.path
         return modules
             .flatMap { module ->
                 ModuleRootManager.getInstance(module).contentRoots.map { root -> module to root }
             }
             .filter { (_, root) ->
-                val rootPath = root.path.trimEnd('/')
-                dirPath == rootPath || dirPath.startsWith("$rootPath/")
+                val rootPath = root.path
+                dirPath == rootPath || dirPath.startsWith(root.path)
             }
             .maxByOrNull { (_, root) -> root.path.length }
             ?.first
