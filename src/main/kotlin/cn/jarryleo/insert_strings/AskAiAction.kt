@@ -1,38 +1,60 @@
 package cn.jarryleo.insert_strings
 
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.MaterialTheme
-import androidx.compose.material.Text
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.awt.ComposePanel
-import androidx.compose.ui.unit.dp
-import cn.jarryleo.insert_strings.ai.AITranslator
 import cn.jarryleo.insert_strings.ai.AiSettingsService
 import cn.jarryleo.insert_strings.ai.ChatMessage
-import cn.jarryleo.insert_strings.ui.*
+import cn.jarryleo.insert_strings.sheets.SheetsManager
+import cn.jarryleo.insert_strings.ui.AiChatContent
+import cn.jarryleo.insert_strings.ui.ChatStateHolder
+import cn.jarryleo.insert_strings.ui.InsertStringsChatContextBuilder
+import cn.jarryleo.insert_strings.ui.InsertStringsChatDriver
+import cn.jarryleo.insert_strings.ui.InsertStringsSheetsOpsController
+import cn.jarryleo.insert_strings.ui.InsertStringsStringsOpsController
+import cn.jarryleo.insert_strings.ui.PendingSheetsInsert
+import cn.jarryleo.insert_strings.ui.rememberIdeColors
 import cn.jarryleo.insert_strings.xml.ContextManager
+import cn.jarryleo.insert_strings.xml.KeyedStringsInfo
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBLabel
-import java.awt.*
+import java.awt.BorderLayout
+import java.awt.Color
+import java.awt.Cursor
+import java.awt.Dialog
+import java.awt.Dimension
+import java.awt.Font
+import java.awt.Insets
+import java.awt.Point
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
-import javax.swing.*
+import javax.swing.BorderFactory
+import javax.swing.JButton
+import javax.swing.JDialog
+import javax.swing.JPanel
+import javax.swing.SwingUtilities
+import javax.swing.Timer
+import javax.swing.UIManager
 
+/**
+ * 在编辑器右键 / Edit 菜单中触发,弹出一个与 InsertStrings 主面板聊天页
+ * "等价 AI 操作能力"的轻量 dialog。
+ *
+ * 复用 [InsertStringsChatDriver] + 三个 controller + [InsertStringsChatContextBuilder],
+ * 状态由 [AskAiChatHolder] 持有(实现 [ChatStateHolder],与主面板的 InsertStringsUI 同型)。
+ * 弹框外壳(`JDialog` + 自绘标题栏 + Close 按钮)保持不变;内容区用主面板同款
+ * [AiChatContent] Composable,从而获得工具调用 / ask_user / Context / Stop 等全套能力。
+ */
 class AskAiAction : AnAction() {
 
     override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
@@ -56,11 +78,12 @@ class AskAiAction : AnAction() {
         ContextManager.ensureInitialized(project)
         ContextManager.updateCurrentModule(project, currentFile)
 
-        showChatDialog(editor, selectedText)
+        showChatDialog(editor, project, selectedText)
     }
 
     private fun showChatDialog(
         editor: com.intellij.openapi.editor.Editor,
+        project: Project,
         selectedText: String
     ) {
         val window = SwingUtilities.getWindowAncestor(editor.component)
@@ -69,9 +92,13 @@ class AskAiAction : AnAction() {
             isResizable = true
         }
 
-        val composePanel = ComposePanel()
+        // 弹框持有的轻量 chat state。showToast 直接改标题栏右侧的状态标签,
+        // 其它表格相关回调全部空实现 —— 弹框不展示 strings.xml 表格。
+        val state = AskAiChatHolder(project)
 
-        val titleBar = createTitleBar(dialog, "Ask AI")
+        val composePanel = ComposePanel()
+        val (titleBar, toastLabel) = createTitleBar(dialog, "Ask AI")
+        state.bindToastLabel(toastLabel)
 
         val contentPanel = JPanel(BorderLayout()).apply {
             add(titleBar, BorderLayout.NORTH)
@@ -92,19 +119,59 @@ class AskAiAction : AnAction() {
             editorLoc.y + (editor.component.height - dialog.height) / 2
         )
 
+        // 装配 driver + 三个 controller(共享同一 ChatStateHolder)
+        val stringsOps = InsertStringsStringsOpsController(state)
+        val sheetsOps = InsertStringsSheetsOpsController(state)
+        val contextBuilder = InsertStringsChatContextBuilder(state)
+        val driver = InsertStringsChatDriver(
+            state = state,
+            stringsOps = stringsOps,
+            sheetsOps = sheetsOps,
+            chatContextBuilder = contextBuilder,
+        )
+
         composePanel.setContent {
             MaterialTheme {
-                AskAiChatContent(
-                    selectedText = selectedText,
-                    onClose = { dialog.dispose() }
+                val colors = rememberIdeColors()
+                AiChatContent(
+                    chatMessages = state.chatMessages,
+                    chatInput = state.chatInput,
+                    chatSending = state.chatSending,
+                    onClose = { dialog.dispose() },
+                    onNewChat = driver::newChat,
+                    onChatInputChange = { state.chatInput = it },
+                    onSendChat = driver::sendChat,
+                    onStopChat = driver::stopChat,
+                    onQuickSend = driver::quickSend,
+                    onOptionClick = driver::onChatOptionClick,
+                    onOpenContext = driver::openContextPopup,
+                    onCloseContext = driver::closeContextPopup,
+                    showContextPopup = state.showContextPopup,
+                    chatContextText = state.chatContextText,
+                    modifier = androidx.compose.ui.Modifier,
+                    colors = colors,
                 )
             }
         }
 
         dialog.isVisible = true
+
+        // 复刻原行为:有选中文字时,把"解释选中代码"作为首条 user 消息自动发出
+        if (selectedText.isNotBlank()) {
+            val firstMessage = "请分析并解释以下从编辑器中选中的代码或文本内容。请用简洁清晰的中文回答，重点说明其含义、用途和关键逻辑。\n\n```\n$selectedText\n```"
+            ApplicationManager.getApplication().executeOnPooledThread {
+                driver.sendChatMessage(firstMessage)
+            }
+        }
     }
 
-    private fun createTitleBar(dialog: JDialog, title: String): JPanel {
+    /**
+     * 自绘标题栏:左侧标题、中部 toast(平时空)、右侧 Close 按钮。
+     * 整条支持拖动。
+     *
+     * @return (titleBar, toastLabel) toastLabel 由 caller 注入到 ChatHolder 以便 showToast 用。
+     */
+    private fun createTitleBar(dialog: JDialog, title: String): Pair<JPanel, JBLabel> {
         val titleBar = JPanel(BorderLayout()).apply {
             preferredSize = Dimension(0, 32)
             border = BorderFactory.createEmptyBorder(4, 10, 4, 10)
@@ -117,6 +184,12 @@ class AskAiAction : AnAction() {
             font = font.deriveFont(Font.BOLD)
         }
         titleBar.add(label, BorderLayout.WEST)
+
+        val toastLabel = JBLabel("").apply {
+            font = font.deriveFont(Font.PLAIN, 12f)
+            foreground = UIManager.getColor("Label.foreground") ?: Color(0x606060)
+        }
+        titleBar.add(toastLabel, BorderLayout.CENTER)
 
         val closeBtn = JButton("Close").apply {
             isFocusPainted = false
@@ -151,167 +224,57 @@ class AskAiAction : AnAction() {
 
         titleBar.cursor = Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR)
 
-        return titleBar
+        return titleBar to toastLabel
     }
 }
 
-@Composable
-private fun AskAiChatContent(
-    selectedText: String,
-    onClose: () -> Unit
-) {
-    val colors = rememberIdeColors()
-    val chatMessages = remember { mutableStateListOf<ChatMessage>() }
-    var chatInput by remember { mutableStateOf("") }
-    var chatSending by remember { mutableStateOf(false) }
-    val listState = rememberLazyListState()
+/**
+ * AskAi 弹框使用的 [ChatStateHolder] 轻量实现。
+ *
+ * 持有 dialog 生命周期内的 chat state + driver 引用。
+ * 表格相关字段为空容器(不与主面板共享,controllers 写入会被丢弃,符合"弹框不展示表格"语义)。
+ * showToast 直接把文字写到标题栏中央的 toast 标签上(1.8s 后自动清空)。
+ */
+private class AskAiChatHolder(
+    override val project: Project
+) : ChatStateHolder {
+    override val insertStringsManager: InsertStringsManager =
+        InsertStringsManager.getInstance(project)
 
-    if (selectedText.isNotBlank()) {
-        LaunchedEffect(Unit) {
-            val firstMessage = ChatMessage(
-                "user",
-                "请分析并解释以下从编辑器中选中的代码或文本内容。请用简洁清晰的中文回答，重点说明其含义、用途和关键逻辑。\n\n```\n$selectedText\n```"
-            )
-            chatMessages.add(firstMessage)
-            chatSending = true
-            ApplicationManager.getApplication().executeOnPooledThread {
-                val result = AITranslator.chat(chatMessages.toList(), "")
-                SwingUtilities.invokeLater {
-                    chatMessages.add(ChatMessage("assistant", result.reply))
-                    chatSending = false
-                }
-            }
-        }
+    override val chatMessages: SnapshotStateList<ChatMessage> = mutableStateListOf()
+    override var chatInput: String by mutableStateOf("")
+    override var chatSending: Boolean by mutableStateOf(false)
+    @Volatile
+    override var stopRequested: Boolean = false
+    override var pendingAskUserToolCallId: String? = null
+    override var askUserCallCount: Int = 0
+    override var toolDocLoadCount: Int = 0
+    override var pendingSheetsInsert: PendingSheetsInsert? = null
+    override var showContextPopup: Boolean by mutableStateOf(false)
+    override var chatContextText: String by mutableStateOf("")
+
+    // 弹框无表格 —— 提供空容器,controllers 写入即丢弃
+    override val keyEntries: MutableList<KeyedStringsInfo> = mutableListOf()
+    override var selectedKeyIndex: Int = 0
+    override val sheetsAvailableSheets: MutableList<SheetsManager.SheetInfo> = mutableListOf()
+    override val rows: List<cn.jarryleo.insert_strings.ui.StringRow> = emptyList()
+
+    private var toastLabel: JBLabel? = null
+    private var toastTimer: Timer? = null
+
+    fun bindToastLabel(label: JBLabel) {
+        toastLabel = label
     }
 
-    LaunchedEffect(chatMessages.size, chatSending) {
-        if (chatMessages.isNotEmpty()) {
-            listState.animateScrollToItem(chatMessages.size - 1)
-        }
-    }
-
-    fun sendMessage() {
-        val input = chatInput.trim()
-        if (input.isEmpty() || chatSending) return
-        chatMessages.add(ChatMessage("user", input))
-        chatInput = ""
-        chatSending = true
-        ApplicationManager.getApplication().executeOnPooledThread {
-            val result = AITranslator.chat(chatMessages.toList(), "")
-            SwingUtilities.invokeLater {
-                chatMessages.add(ChatMessage("assistant", result.reply))
-                chatSending = false
-            }
-        }
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.panel)
-            .padding(10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .border(BorderStroke(1.dp, colors.border), RoundedCornerShape(4.dp))
-                .background(colors.tableBackground, RoundedCornerShape(4.dp))
-        ) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                itemsIndexed(chatMessages) { _, msg ->
-                    AskAiChatBubble(message = msg, colors = colors)
-                }
-                if (chatSending) {
-                    item {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .background(colors.fieldBackground, RoundedCornerShape(8.dp))
-                                    .border(BorderStroke(1.dp, colors.fieldBorder), RoundedCornerShape(8.dp))
-                                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                            ) {
-                                Text(
-                                    text = "Thinking...",
-                                    color = colors.secondaryText,
-                                    style = compactTextStyle(colors.secondaryText),
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            CompactTextField(
-                value = chatInput,
-                onValueChange = { chatInput = it },
-                modifier = Modifier.weight(1f),
-                singleLine = false,
-                maxLines = 10,
-                colors = colors,
-                // 回车发送,Alt+回车 / Shift+回车 换行
-                onSend = { sendMessage() },
-            )
-            CompactButton(
-                text = if (chatSending) "..." else "Send",
-                onClick = { sendMessage() },
-                modifier = Modifier.width(56.dp),
-                colors = colors,
-                primary = true,
-            )
-        }
-    }
-}
-
-@Composable
-private fun AskAiChatBubble(
-    message: ChatMessage,
-    colors: IdeColors,
-) {
-    val isUser = message.role == "user"
-    val bubbleColor = if (isUser) colors.accent else colors.fieldBackground
-    val alignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
-    val border = if (isUser) {
-        Modifier
-    } else {
-        Modifier.border(width = 1.dp, color = colors.border, RoundedCornerShape(12.dp))
-    }
-    Column(
-        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
-    ) {
-        Box(
-            modifier = Modifier.fillMaxWidth(),
-            contentAlignment = alignment,
-        ) {
-            Box(
-                modifier = Modifier
-                    .widthIn(max = 500.dp)
-                    .padding(start = if (isUser) 32.dp else 0.dp, end = if (isUser) 0.dp else 32.dp)
-                    .background(bubbleColor, RoundedCornerShape(12.dp))
-                    .then(border)
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-            ) {
-                SelectionContainer {
-                    MarkdownContent(
-                        markdown = message.content,
-                        colors = colors,
-                    )
-                }
+    override fun showToast(message: String) {
+        SwingUtilities.invokeLater {
+            toastLabel?.text = message
+            toastTimer?.stop()
+            toastTimer = Timer(1800) {
+                toastLabel?.text = ""
+            }.apply {
+                isRepeats = false
+                start()
             }
         }
     }

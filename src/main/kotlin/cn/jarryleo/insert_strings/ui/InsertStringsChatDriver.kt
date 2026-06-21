@@ -24,13 +24,13 @@ import javax.swing.SwingUtilities
  * InsertStringsUI 类本身只剩 state + 装配,主类体积会从 ~2900 行降到 ~300 行。
  */
 internal class InsertStringsChatDriver(
-    private val ui: InsertStringsUI,
+    private val state: ChatStateHolder,
     private val stringsOps: InsertStringsStringsOpsController,
     private val sheetsOps: InsertStringsSheetsOpsController,
     private val chatContextBuilder: InsertStringsChatContextBuilder,
 ) {
 
-    private val project: Project get() = ui.project
+    private val project: Project get() = state.project
 
     companion object {
         // 单次对话中 AI 调用工具的最大轮数。超过则强制结束,防止死循环。
@@ -56,48 +56,34 @@ internal class InsertStringsChatDriver(
         val toolCallId: String
     )
 
-    /**
-     * 系统发起的「重复 key 插入」询问,等待用户在气泡上选择覆盖/末尾追加/取消。
-     */
-    data class PendingSheetsInsert(
-        val actions: List<AiAction.SheetsOperation>,
-        /**
-         * 与 [actions] 平行对齐的 tool_call_id 列表。用户做出选择、执行后,
-         * 用这些 id 把 tool result 回传给 AI。
-         */
-        val actionToolCallIds: List<String>,
-        val duplicateKeys: Set<String>,
-        val spreadsheetId: String,
-        val sheetName: String,
-        val context: String,
-        val iteration: Int
-    )
+    // PendingSheetsInsert 已抽到顶层 PendingSheetsInsert.kt,
+    // 以便 ChatStateHolder 接口(以及其它跨 controller 类型)可以安全引用。
 
     fun sendChat() {
-        val text = ui.chatInput.trim()
-        if (text.isEmpty() || ui.chatSending) return
-        ui.chatInput = ""
+        val text = state.chatInput.trim()
+        if (text.isEmpty() || state.chatSending) return
+        state.chatInput = ""
         sendChatMessage(text)
     }
 
     fun quickSend(text: String) {
-        if (text.isBlank() || ui.chatSending) return
+        if (text.isBlank() || state.chatSending) return
         sendChatMessage(text.trim())
     }
 
     fun sendChatMessage(text: String) {
-        val askToolCallId = ui.pendingAskUserToolCallId
+        val askToolCallId = state.pendingAskUserToolCallId
         if (askToolCallId != null) {
             // 这是对 ask_user(无 options 场景)的回复,作为 tool_result 回传给 AI,
             // 而非新增 user 消息,否则会破坏 tool_use/tool_result 的配对语义。
-            ui.pendingAskUserToolCallId = null
-            ui.chatMessages.add(ChatMessage(role = "tool", content = text, toolCallId = askToolCallId))
+            state.pendingAskUserToolCallId = null
+            state.chatMessages.add(ChatMessage(role = "tool", content = text, toolCallId = askToolCallId))
         } else {
-            ui.chatMessages.add(ChatMessage(role = "user", content = text))
+            state.chatMessages.add(ChatMessage(role = "user", content = text))
         }
-        ui.toolDocLoadCount = 0
-        ui.askUserCallCount = 0
-        ui.stopRequested = false
+        state.toolDocLoadCount = 0
+        state.askUserCallCount = 0
+        state.stopRequested = false
         continueChatWithAi()
     }
 
@@ -110,16 +96,16 @@ internal class InsertStringsChatDriver(
      * 非空,需要补全 tool_result 以满足 Anthropic 协议要求,否则下次发送新消息时会 HTTP 400。
      */
     fun stopChat() {
-        val hasPendingAsk = ui.pendingAskUserToolCallId != null
-        if (!ui.chatSending && !hasPendingAsk) return
-        ui.stopRequested = true
-        ui.chatSending = false
+        val hasPendingAsk = state.pendingAskUserToolCallId != null
+        if (!state.chatSending && !hasPendingAsk) return
+        state.stopRequested = true
+        state.chatSending = false
         if (hasPendingAsk) {
             fillMissingToolResults("[已取消] 用户点击了停止按钮")
-            ui.pendingAskUserToolCallId = null
-            ui.chatMessages.add(ChatMessage(role = "assistant", content = "⏹ 已停止生成。"))
+            state.pendingAskUserToolCallId = null
+            state.chatMessages.add(ChatMessage(role = "assistant", content = "⏹ 已停止生成。"))
         }
-        ui.actionsController.showToast("已停止生成")
+        state.showToast("已停止生成")
     }
 
     /**
@@ -128,25 +114,25 @@ internal class InsertStringsChatDriver(
      */
     fun openContextPopup() {
         val raw = chatContextBuilder.build()
-        ui.chatContextText = runCatching {
+        state.chatContextText = runCatching {
             val element = com.google.gson.JsonParser.parseString(raw)
             com.google.gson.GsonBuilder().setPrettyPrinting().serializeNulls().create().toJson(element)
         }.getOrElse { raw }
-        ui.showContextPopup = true
+        state.showContextPopup = true
     }
 
     fun closeContextPopup() {
-        ui.showContextPopup = false
+        state.showContextPopup = false
     }
 
     fun newChat() {
         // 标记停止,防止正在运行的 tool loop 在清空后继续向 chatMessages 追加新消息
-        ui.stopRequested = true
-        ui.chatMessages.clear()
-        ui.chatInput = ""
-        ui.chatSending = false
-        ui.pendingAskUserToolCallId = null
-        ui.askUserCallCount = 0
+        state.stopRequested = true
+        state.chatMessages.clear()
+        state.chatInput = ""
+        state.chatSending = false
+        state.pendingAskUserToolCallId = null
+        state.askUserCallCount = 0
     }
 
     /**
@@ -155,20 +141,20 @@ internal class InsertStringsChatDriver(
      */
     fun onChatOptionClick(messageIndex: Int, option: String) {
         // 清除该消息的 options 使按钮消失
-        if (messageIndex in ui.chatMessages.indices) {
-            val msg = ui.chatMessages[messageIndex]
-            ui.chatMessages[messageIndex] = msg.copy(options = emptyList())
+        if (messageIndex in state.chatMessages.indices) {
+            val msg = state.chatMessages[messageIndex]
+            state.chatMessages[messageIndex] = msg.copy(options = emptyList())
         }
 
         // 重置停止标志:用户主动操作意味着继续对话
-        ui.stopRequested = false
+        state.stopRequested = false
 
         // Priority 1:ask_user 工具调用 → 作为 tool result 回传给 AI
-        val askToolCallId = ui.pendingAskUserToolCallId
+        val askToolCallId = state.pendingAskUserToolCallId
         if (askToolCallId != null) {
-            ui.pendingAskUserToolCallId = null
-            ui.askUserCallCount = 0
-            ui.chatMessages.add(
+            state.pendingAskUserToolCallId = null
+            state.askUserCallCount = 0
+            state.chatMessages.add(
                 ChatMessage(role = "tool", content = option, toolCallId = askToolCallId)
             )
             val context = chatContextBuilder.build()
@@ -177,16 +163,16 @@ internal class InsertStringsChatDriver(
         }
 
         // Priority 2:系统发起的重复 key 询问
-        val pending = ui.pendingSheetsInsert
+        val pending = state.pendingSheetsInsert
         if (pending != null) {
-            ui.pendingSheetsInsert = null
+            state.pendingSheetsInsert = null
             resolveDuplicateInsert(option, pending)
             return
         }
 
         // 兜底:作为普通用户消息发回(保持旧逻辑兼容)
-        ui.chatMessages.add(ChatMessage(role = "user", content = option))
-        ui.toolDocLoadCount = 0
+        state.chatMessages.add(ChatMessage(role = "user", content = option))
+        state.toolDocLoadCount = 0
         continueChatWithAi()
     }
 
@@ -198,7 +184,7 @@ internal class InsertStringsChatDriver(
      * runToolLoop 在后台持续驱动 AI 调用工具,直到达成 task_complete 或达到 MAX_ITERATIONS。
      */
     private fun continueChatWithAi() {
-        ui.chatSending = true
+        state.chatSending = true
         val context = chatContextBuilder.build()
         continueToolLoopInBackground(context, iteration = 0)
     }
@@ -221,7 +207,7 @@ internal class InsertStringsChatDriver(
      * 命中时立即结束(正在进行的网络请求会等其完成,但其返回结果会被丢弃)。
      */
     private fun runToolLoop(context: String, iteration: Int) {
-        if (ui.stopRequested) {
+        if (state.stopRequested) {
             // 在 AI 调用之前就已停止(用户在迭代间隙点击了 Stop),不发起任何请求
             handleStoppedByUser()
             return
@@ -229,13 +215,13 @@ internal class InsertStringsChatDriver(
 
         if (iteration >= MAX_ITERATIONS) {
             SwingUtilities.invokeLater {
-                ui.chatMessages.add(
+                state.chatMessages.add(
                     ChatMessage(
                         role = "assistant",
                         content = "已达到最大工具调用轮数($MAX_ITERATIONS),强制结束。请检查任务后重试。"
                     )
                 )
-                ui.chatSending = false
+                state.chatSending = false
             }
             return
         }
@@ -254,23 +240,23 @@ internal class InsertStringsChatDriver(
 
         val reply: AiReply
         try {
-            reply = AITranslator.chat(ui.chatMessages.toList(), context)
+            reply = AITranslator.chat(state.chatMessages.toList(), context)
         } catch (e: Exception) {
             SwingUtilities.invokeLater {
-                ui.chatMessages.add(
+                state.chatMessages.add(
                     ChatMessage(
                         role = "assistant",
                         content = "AI 请求失败:${e.message ?: "unknown"}"
                     )
                 )
-                ui.chatSending = false
+                state.chatSending = false
             }
             return
         }
 
         // 用户在 AI 网络请求期间点击了 Stop:丢弃本次响应,不再处理 tool_calls,
         // 避免已请求到的 tool_use 在下次发送时因缺少 tool_result 而触发 Anthropic 报错。
-        if (ui.stopRequested) {
+        if (state.stopRequested) {
             handleStoppedByUser()
             return
         }
@@ -283,7 +269,7 @@ internal class InsertStringsChatDriver(
                 reply.toolCalls.isNotEmpty() -> "执行操作: ${summarizeToolCalls(reply.toolCalls)}"
                 else -> ""
             }
-            ui.chatMessages.add(
+            state.chatMessages.add(
                 ChatMessage(
                     role = "assistant",
                     content = assistantContent,
@@ -296,7 +282,7 @@ internal class InsertStringsChatDriver(
             //    block immediately after")。这些 tool_use 占着 assistant 的位置,
             //    但 actions 中没有对应项,会被 processAiReply 漏掉,必须在此处补齐。
             reply.failedToolCalls.forEach { failed ->
-                ui.chatMessages.add(
+                state.chatMessages.add(
                     ChatMessage(
                         role = "tool",
                         content = "[工具执行结果] 类型:unknown(${failed.name}) 状态:解析失败 " +
@@ -363,10 +349,10 @@ internal class InsertStringsChatDriver(
             val askToolCallId = askUserEntry.toolCallId.takeIf { it.isNotEmpty() }
 
             // 安全网:限制单轮内 ask_user 连续调用次数,防止 AI 反复追问形成死循环。
-            ui.askUserCallCount++
-            if (ui.askUserCallCount > MAX_ASK_USER_CALLS) {
+            state.askUserCallCount++
+            if (state.askUserCallCount > MAX_ASK_USER_CALLS) {
                 if (askToolCallId != null) {
-                    ui.chatMessages.add(
+                    state.chatMessages.add(
                         ChatMessage(
                             role = "tool",
                             content = "[已取消] ask_user 调用次数已达上限($MAX_ASK_USER_CALLS 次),系统为防止死循环自动终止。" +
@@ -379,34 +365,34 @@ internal class InsertStringsChatDriver(
                     unprocessed,
                     "因 ask_user 调用次数超限被强制终止"
                 )
-                ui.chatMessages.add(
+                state.chatMessages.add(
                     ChatMessage(
                         role = "assistant",
                         content = "⏹ ask_user 调用次数已达上限($MAX_ASK_USER_CALLS 次),已自动终止。请基于已有信息继续。"
                     )
                 )
-                ui.chatSending = false
-                ui.pendingAskUserToolCallId = null
+                state.chatSending = false
+                state.pendingAskUserToolCallId = null
                 return
             }
 
             if (askAction.options.isNotEmpty()) {
                 // 带 options:挂到 assistant 消息渲染按钮,记录 toolCallId,等待用户点击
-                ui.chatMessages[ui.chatMessages.lastIndex] =
-                    ui.chatMessages.last().copy(options = askAction.options)
+                state.chatMessages[state.chatMessages.lastIndex] =
+                    state.chatMessages.last().copy(options = askAction.options)
             } else {
                 // 无 options:用 toast 通知用户问题内容,等待用户在输入框中回复
-                ui.actionsController.showToast(askAction.question)
+                state.showToast(askAction.question)
             }
             // 无论是否带 options,都暂停 loop 等待用户响应。
             // 修复:之前无 options 时自动回传「已向用户显示问题,无需回复」并继续 loop,
             //      导致 AI 反复调用 ask_user 而用户根本没机会回复,形成死循环。
-            ui.pendingAskUserToolCallId = askToolCallId
+            state.pendingAskUserToolCallId = askToolCallId
             addSkippedToolResults(
                 unprocessed,
                 "因 ask_user 等待用户响应而跳过(用户点击选项或发送消息后 AI 可继续)"
             )
-            ui.chatSending = false
+            state.chatSending = false
             return
         }
 
@@ -479,7 +465,7 @@ internal class InsertStringsChatDriver(
 
         // 没有任何可执行 tool call:AI 只是在说,等用户输入
         addSkippedToolResults(unprocessed, "本轮 AI 未调用可识别的工具")
-        ui.chatSending = false
+        state.chatSending = false
     }
 
     /**
@@ -508,7 +494,7 @@ internal class InsertStringsChatDriver(
                 is AiAction.SheetsOperation -> "sheets_operation(${action.operation.name.lowercase()})"
                 is AiAction.TaskComplete -> "task_complete"
             }
-            ui.chatMessages.add(
+            state.chatMessages.add(
                 ChatMessage(
                     role = "tool",
                     content = "[工具执行结果] 类型:$actionLabel 状态:已跳过 信息:$reason。如需执行,请在下一轮重新调用。",
@@ -562,12 +548,12 @@ internal class InsertStringsChatDriver(
             append("请重新组织 actions:全部省略 module 参数(系统使用 currentModule),")
             append("或全部显式指定同一 module。若确实需要写入多个模块,请拆成多个 AI 回合。")
         }
-        ui.chatMessages.add(
+        state.chatMessages.add(
             ChatMessage(role = "tool", content = errorMsg, toolCallId = writeEntries.first().toolCallId)
         )
         // 其余 action 同样发错误,避免协议错位
         writeEntries.drop(1).forEach { entry ->
-            ui.chatMessages.add(
+            state.chatMessages.add(
                 ChatMessage(role = "tool", content = errorMsg, toolCallId = entry.toolCallId)
             )
         }
@@ -587,8 +573,8 @@ internal class InsertStringsChatDriver(
                 append("\n\n").append(complete.notes)
             }
         }
-        ui.chatMessages.add(ChatMessage(role = "assistant", content = text))
-        ui.chatSending = false
+        state.chatMessages.add(ChatMessage(role = "assistant", content = text))
+        state.chatSending = false
     }
 
     /**
@@ -605,8 +591,8 @@ internal class InsertStringsChatDriver(
             //   block immediately after
             // 这覆盖了 ask_user 等待用户点选项、用户却点 Stop 等导致 tool_use 悬挂的场景。
             fillMissingToolResults("[已取消] 用户点击了停止按钮,该工具调用未执行。如需执行,请在下一轮重新发起。")
-            ui.chatMessages.add(ChatMessage(role = "assistant", content = "⏹ 已停止生成。"))
-            ui.stopRequested = false
+            state.chatMessages.add(ChatMessage(role = "assistant", content = "⏹ 已停止生成。"))
+            state.stopRequested = false
         }
     }
 
@@ -627,33 +613,33 @@ internal class InsertStringsChatDriver(
      * @param reason 写入 tool_result content 的说明,告诉 AI 为什么这个 action 没被执行
      */
     private fun fillMissingToolResults(reason: String) {
-        if (ui.chatMessages.isEmpty()) return
+        if (state.chatMessages.isEmpty()) return
 
         // 1) 收集所有 (insertAt, toolResultMessage),稍后按 insertAt 降序插入
         val toInsert = mutableListOf<Pair<Int, ChatMessage>>()
 
         // 2) 助手查名字表(toolCallId -> 工具名),用于合成 tool_result 的内容描述
         val nameById = mutableMapOf<String, String>()
-        ui.chatMessages.forEach { msg ->
+        state.chatMessages.forEach { msg ->
             if (msg.role == "assistant") {
                 msg.toolCalls.forEach { tc -> nameById.putIfAbsent(tc.id, tc.name) }
             }
         }
 
         // 3) 遍历每个含 tool_uses 的 assistant,计算其 block 与插入点
-        ui.chatMessages.forEachIndexed { idx, msg ->
+        state.chatMessages.forEachIndexed { idx, msg ->
             if (msg.role != "assistant" || msg.toolCalls.isEmpty()) return@forEachIndexed
 
             // block = [idx+1, endOfBlock),endOfBlock 是下一个 assistant 或 chatMessages 末尾
             var endOfBlock = idx + 1
-            while (endOfBlock < ui.chatMessages.size && ui.chatMessages[endOfBlock].role != "assistant") {
+            while (endOfBlock < state.chatMessages.size && state.chatMessages[endOfBlock].role != "assistant") {
                 endOfBlock++
             }
 
             // 在 block 内找到所有已有的 tool_result(tool 消息 + user 带 toolCallId)
             val pairedIds = mutableSetOf<String>()
             for (i in (idx + 1) until endOfBlock) {
-                val m = ui.chatMessages[i]
+                val m = state.chatMessages[i]
                 if (m.role == "tool" || (m.role == "user" && m.toolCallId != null)) {
                     m.toolCallId?.let { pairedIds.add(it) }
                 }
@@ -666,7 +652,7 @@ internal class InsertStringsChatDriver(
             // 在 block 内找第一个非 tool_result 的位置(没有则用 block 末尾)
             var insertAt = endOfBlock
             for (i in (idx + 1) until endOfBlock) {
-                val m = ui.chatMessages[i]
+                val m = state.chatMessages[i]
                 val isToolResult = m.role == "tool" || (m.role == "user" && m.toolCallId != null)
                 if (!isToolResult) {
                     insertAt = i
@@ -687,7 +673,7 @@ internal class InsertStringsChatDriver(
 
         // 4) 按 insertAt 降序插入,避免下标位移影响后续插入位置
         toInsert.sortedByDescending { it.first }.forEach { (insertAt, message) ->
-            ui.chatMessages.add(insertAt, message)
+            state.chatMessages.add(insertAt, message)
         }
     }
 
@@ -700,17 +686,17 @@ internal class InsertStringsChatDriver(
         context: String,
         iteration: Int
     ) {
-        if (ui.toolDocLoadCount >= MAX_TOOL_DOC_LOADS) {
-            ui.chatMessages.add(
+        if (state.toolDocLoadCount >= MAX_TOOL_DOC_LOADS) {
+            state.chatMessages.add(
                 ChatMessage(
                     role = "assistant",
                     content = "工具文档加载次数已达上限($MAX_TOOL_DOC_LOADS 次),请直接执行操作或向用户说明情况。"
                 )
             )
-            ui.chatSending = false
+            state.chatSending = false
             return
         }
-        ui.toolDocLoadCount++
+        state.toolDocLoadCount++
 
         val requestedTools = entries.mapNotNull { (action, _) ->
             (action as? AiAction.LoadToolDoc)?.tool
@@ -736,7 +722,7 @@ internal class InsertStringsChatDriver(
         // 为每个 load_tool_doc 调用添加对应的 tool result(一对一关联 toolCallId)
         entries.forEach { (_, toolCallId) ->
             if (toolCallId.isNotEmpty()) {
-                ui.chatMessages.add(
+                state.chatMessages.add(
                     ChatMessage(role = "tool", content = summary, toolCallId = toolCallId)
                 )
             }
@@ -772,7 +758,7 @@ internal class InsertStringsChatDriver(
                 }
                 SwingUtilities.invokeLater {
                     pendingResults.forEach { (toolCallId, content) ->
-                        ui.chatMessages.add(
+                        state.chatMessages.add(
                             ChatMessage(role = "tool", content = content, toolCallId = toolCallId)
                         )
                     }
@@ -780,13 +766,13 @@ internal class InsertStringsChatDriver(
                 }
             } catch (e: Exception) {
                 SwingUtilities.invokeLater {
-                    ui.chatMessages.add(
+                    state.chatMessages.add(
                         ChatMessage(
                             role = "assistant",
                             content = "strings.xml 操作执行异常:${e.message ?: "unknown"}"
                         )
                     )
-                    ui.chatSending = false
+                    state.chatSending = false
                 }
             }
         }
@@ -843,8 +829,8 @@ internal class InsertStringsChatDriver(
                                 iteration = iteration
                             )
                             SwingUtilities.invokeLater {
-                                ui.pendingSheetsInsert = pending
-                                ui.chatMessages.add(
+                                state.pendingSheetsInsert = pending
+                                state.chatMessages.add(
                                     ChatMessage(
                                         role = "assistant",
                                         content = "检测到以下 key 已存在于表格中:" +
@@ -856,7 +842,7 @@ internal class InsertStringsChatDriver(
                                         )
                                     )
                                 )
-                                ui.chatSending = false
+                                state.chatSending = false
                             }
                             return@executeOnPooledThread
                         }
@@ -891,7 +877,7 @@ internal class InsertStringsChatDriver(
 
                 SwingUtilities.invokeLater {
                     pendingResults.forEach { (toolCallId, content) ->
-                        ui.chatMessages.add(
+                        state.chatMessages.add(
                             ChatMessage(role = "tool", content = content, toolCallId = toolCallId)
                         )
                     }
@@ -907,7 +893,7 @@ internal class InsertStringsChatDriver(
                                 is AiAction.FindRowsByText -> "find_rows_by_text"
                                 else -> "unknown"
                             }
-                            ui.chatMessages.add(
+                            state.chatMessages.add(
                                 ChatMessage(
                                     role = "tool",
                                     content = "[工具执行异常] $typeLabel 失败:${e.message ?: "unknown"}",
@@ -916,13 +902,13 @@ internal class InsertStringsChatDriver(
                             )
                         }
                     }
-                    ui.chatMessages.add(
+                    state.chatMessages.add(
                         ChatMessage(
                             role = "assistant",
                             content = "操作执行过程中发生异常,未完成:${e.message ?: "unknown"}"
                         )
                     )
-                    ui.chatSending = false
+                    state.chatSending = false
                 }
             }
         }
@@ -937,7 +923,7 @@ internal class InsertStringsChatDriver(
     private fun resolveDuplicateInsert(option: String, pending: PendingSheetsInsert) {
         when {
             option.contains("覆盖") -> {
-                ui.chatSending = true
+                state.chatSending = true
                 ApplicationManager.getApplication().executeOnPooledThread {
                     try {
                         val resolvedActions = pending.actions.map { action ->
@@ -970,19 +956,19 @@ internal class InsertStringsChatDriver(
                         )
                     } catch (e: Exception) {
                         SwingUtilities.invokeLater {
-                            ui.chatMessages.add(
+                            state.chatMessages.add(
                                 ChatMessage(
                                     role = "assistant",
                                     content = "覆盖操作执行异常:${e.message ?: "unknown"}"
                                 )
                             )
-                            ui.chatSending = false
+                            state.chatSending = false
                         }
                     }
                 }
             }
             option.contains("末尾") -> {
-                ui.chatSending = true
+                state.chatSending = true
                 ApplicationManager.getApplication().executeOnPooledThread {
                     try {
                         executeSheetsActions(
@@ -992,13 +978,13 @@ internal class InsertStringsChatDriver(
                         )
                     } catch (e: Exception) {
                         SwingUtilities.invokeLater {
-                            ui.chatMessages.add(
+                            state.chatMessages.add(
                                 ChatMessage(
                                     role = "assistant",
                                     content = "追加操作执行异常:${e.message ?: "unknown"}"
                                 )
                             )
-                            ui.chatSending = false
+                            state.chatSending = false
                         }
                     }
                 }
@@ -1009,7 +995,7 @@ internal class InsertStringsChatDriver(
                     pending.actions.forEachIndexed { i, action ->
                         val toolCallId = pending.actionToolCallIds.getOrNull(i).orEmpty()
                         if (toolCallId.isNotEmpty()) {
-                            ui.chatMessages.add(
+                            state.chatMessages.add(
                                 ChatMessage(
                                     role = "tool",
                                     content = "[用户取消] ${action.operation} 未执行。",
@@ -1018,7 +1004,7 @@ internal class InsertStringsChatDriver(
                             )
                         }
                     }
-                    ui.chatMessages.add(ChatMessage(role = "assistant", content = "已取消插入操作。"))
+                    state.chatMessages.add(ChatMessage(role = "assistant", content = "已取消插入操作。"))
                     continueToolLoopInBackground(pending.context, pending.iteration + 1)
                 }
             }
@@ -1065,7 +1051,7 @@ internal class InsertStringsChatDriver(
             // 理论上不会走到这里(校验时已拦截),兜底
             entries.forEach { (_, toolCallId) ->
                 if (toolCallId.isNotEmpty()) {
-                    ui.chatMessages.add(
+                    state.chatMessages.add(
                         ChatMessage(
                             role = "tool",
                             content = "[工具执行异常] insert_strings 未指定目标模块且无 currentModule , moduleList = $moduleList",
@@ -1082,7 +1068,7 @@ internal class InsertStringsChatDriver(
             // 理论上不会走到这里(校验时已拦截),兜底
             entries.forEach { (_, toolCallId) ->
                 if (toolCallId.isNotEmpty()) {
-                    ui.chatMessages.add(
+                    state.chatMessages.add(
                         ChatMessage(
                             role = "tool",
                             content = "[工具执行异常] insert_strings 模块名称 = 项目名称,请勿使用项目名插入翻译 , moduleList = $moduleList",
@@ -1116,7 +1102,7 @@ internal class InsertStringsChatDriver(
             val targetModule = batchModule
             val moduleStringsInfo = ContextManager.getModuleStringsInfo(project, targetModule)
             if (moduleStringsInfo.isEmpty()) {
-                ui.actionsController.showToast("Module $targetModule has no strings.xml")
+                state.showToast("Module $targetModule has no strings.xml")
                 return@map "模块 $targetModule 没有 strings.xml 或缺少 res/ 目录" to false
             }
 
@@ -1131,7 +1117,7 @@ internal class InsertStringsChatDriver(
             if (DEFAULT_LANGUAGE !in merged) merged[DEFAULT_LANGUAGE] = ""
 
             try {
-                ui.insertStringsManager.insertIntoModule(
+                state.insertStringsManager.insertIntoModule(
                     project, targetModule, mapOf(action.name to merged)
                 )
                 "成功" to true
@@ -1148,17 +1134,17 @@ internal class InsertStringsChatDriver(
                 ContextManager.scanModuleForKey(project, batchModule, action.name)
             )
         }
-        ui.insertStringsManager.updateUI(allEntries)
+        state.insertStringsManager.updateUI(allEntries)
         val names = actions.joinToString(", ") { it.name }
-        ui.actionsController.showToast("Inserted: $names")
-        ui.showChat = false
+        state.showToast("Inserted: $names")
+        state.closeChatView()
 
         // 为每个 insert_strings 调用添加对应的 tool result(使用 entry 自带的 toolCallId,避免下标错位)
         entries.forEachIndexed { i, (_, toolCallId) ->
             val action = actions.getOrNull(i)
             val (msg, _) = results.getOrNull(i) ?: ("" to false)
             if (action != null && toolCallId.isNotEmpty()) {
-                ui.chatMessages.add(
+                state.chatMessages.add(
                     ChatMessage(
                         role = "tool",
                         content = "[工具执行结果] insert_strings module=$batchModule name=${action.name} 状态:$msg",

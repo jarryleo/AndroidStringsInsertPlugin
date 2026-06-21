@@ -20,10 +20,10 @@ import javax.swing.SwingUtilities
  * 由上层 ChatDriver 负责组装 tool_result 与驱动流程。
  */
 internal class InsertStringsSheetsOpsController(
-    private val ui: InsertStringsUI,
+    private val state: ChatStateHolder,
 ) {
 
-    private val project: Project get() = ui.project
+    private val project: Project get() = state.project
 
     /**
      * 批量翻译审查/修正的每批行数。控制单次 AI 调用 token,避免溢出。
@@ -144,8 +144,8 @@ internal class InsertStringsSheetsOpsController(
                 result.fold(
                     onSuccess = { sheets ->
                         SwingUtilities.invokeLater {
-                            ui.sheetsAvailableSheets.clear()
-                            ui.sheetsAvailableSheets.addAll(sheets)
+                            state.sheetsAvailableSheets.clear()
+                            state.sheetsAvailableSheets.addAll(sheets)
                         }
                         val names = sheets.map { it.title }
                         val summary = if (names.isEmpty()) "表格中没有工作表" else "共 ${names.size} 个工作表: ${names.joinToString(", ")}"
@@ -172,7 +172,7 @@ internal class InsertStringsSheetsOpsController(
                 }
                 result.fold(
                     onSuccess = { sheetRows ->
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Read from Google Sheets.") }
+                        SwingUtilities.invokeLater { state.showToast("Read from Google Sheets.") }
                         val dataSummary = if (sheetRows.isEmpty()) "工作表 '$sheetName' 为空" else "读取到 ${sheetRows.size} 行数据"
                         SheetsToolResult("读取表格", true, dataSummary, sheetRows)
                     },
@@ -191,7 +191,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.searchRowByKey(project, spreadsheetId, range, key)
                 result.fold(
                     onSuccess = { (rowNum, row) ->
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Found key '$key' at row $rowNum.") }
+                        SwingUtilities.invokeLater { state.showToast("Found key '$key' at row $rowNum.") }
                         SheetsToolResult(
                             operation = "搜索表格",
                             success = true,
@@ -212,7 +212,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.writeRange(project, spreadsheetId, range, rowsToWrite, action.rowTextColors)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Wrote to Google Sheets.") }
+                        SwingUtilities.invokeLater { state.showToast("Wrote to Google Sheets.") }
                         SheetsToolResult("写入表格", true, "成功写入 ${rowsToWrite.size} 行数据到范围 $range")
                     },
                     onFailure = {
@@ -231,7 +231,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.appendRow(project, spreadsheetId, sheetName, row, rowColors)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Appended row to $sheetName.") }
+                        SwingUtilities.invokeLater { state.showToast("Appended row to $sheetName.") }
                         SheetsToolResult("追加行", true, "成功在工作表 '$sheetName' 末尾追加 1 行: ${row.joinToString(" | ")}")
                     },
                     onFailure = {
@@ -254,7 +254,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.insertRow(project, spreadsheetId, sheetName, rowNum, row, rowColors)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Inserted row at $rowNum in $sheetName.") }
+                        SwingUtilities.invokeLater { state.showToast("Inserted row at $rowNum in $sheetName.") }
                         SheetsToolResult("插入行", true, "成功在工作表 '$sheetName' 第 $rowNum 行插入新行: ${row.joinToString(" | ")}")
                     },
                     onFailure = {
@@ -277,7 +277,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.updateRow(project, spreadsheetId, sheetName, rowNum, row, rowColors)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Updated row $rowNum in $sheetName.") }
+                        SwingUtilities.invokeLater { state.showToast("Updated row $rowNum in $sheetName.") }
                         SheetsToolResult("更新行", true, "成功更新工作表 '$sheetName' 第 $rowNum 行为: ${row.joinToString(" | ")}")
                     },
                     onFailure = {
@@ -294,7 +294,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.deleteRow(project, spreadsheetId, sheetName, rowNum)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Deleted row $rowNum in $sheetName.") }
+                        SwingUtilities.invokeLater { state.showToast("Deleted row $rowNum in $sheetName.") }
                         SheetsToolResult("删除行", true, "成功删除工作表 '$sheetName' 第 $rowNum 行")
                     },
                     onFailure = {
@@ -311,7 +311,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.clearRow(project, spreadsheetId, sheetName, rowNum)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Cleared row $rowNum in $sheetName.") }
+                        SwingUtilities.invokeLater { state.showToast("Cleared row $rowNum in $sheetName.") }
                         SheetsToolResult("清空行", true, "成功清空工作表 '$sheetName' 第 $rowNum 行内容")
                     },
                     onFailure = {
@@ -337,7 +337,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.insertColumn(project, spreadsheetId, sheetName, colIdx, values, action.columnTextColors)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Inserted column at $colIdx in $sheetName.") }
+                        SwingUtilities.invokeLater { state.showToast("Inserted column at $colIdx in $sheetName.") }
                         SheetsToolResult("插入列", true, "成功在工作表 '$sheetName' 第 $colIdx 列插入新列,共 ${values.size} 个单元格")
                     },
                     onFailure = { SheetsToolResult("插入列", false, it.message ?: "Sheets insert column failed.") }
@@ -355,7 +355,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.appendColumn(project, spreadsheetId, sheetName, values, action.columnTextColors)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Appended column to $sheetName.") }
+                        SwingUtilities.invokeLater { state.showToast("Appended column to $sheetName.") }
                         SheetsToolResult("追加列", true, "成功在工作表 '$sheetName' 末尾追加新列,共 ${values.size} 个单元格")
                     },
                     onFailure = { SheetsToolResult("追加列", false, it.message ?: "Sheets append column failed.") }
@@ -377,7 +377,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.updateColumn(project, spreadsheetId, sheetName, colIdx, values, action.columnTextColors)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Updated column $colIdx in $sheetName.") }
+                        SwingUtilities.invokeLater { state.showToast("Updated column $colIdx in $sheetName.") }
                         SheetsToolResult("更新列", true, "成功更新工作表 '$sheetName' 第 $colIdx 列,共 ${values.size} 个单元格")
                     },
                     onFailure = { SheetsToolResult("更新列", false, it.message ?: "Sheets update column failed.") }
@@ -395,7 +395,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.deleteColumn(project, spreadsheetId, sheetName, colIdx)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Deleted column $colIdx in $sheetName.") }
+                        SwingUtilities.invokeLater { state.showToast("Deleted column $colIdx in $sheetName.") }
                         SheetsToolResult("删除列", true, "成功删除工作表 '$sheetName' 第 $colIdx 列")
                     },
                     onFailure = { SheetsToolResult("删除列", false, it.message ?: "Sheets delete column failed.") }
@@ -413,7 +413,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.clearColumn(project, spreadsheetId, sheetName, colIdx)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Cleared column $colIdx in $sheetName.") }
+                        SwingUtilities.invokeLater { state.showToast("Cleared column $colIdx in $sheetName.") }
                         SheetsToolResult("清空列", true, "成功清空工作表 '$sheetName' 第 $colIdx 列内容")
                     },
                     onFailure = { SheetsToolResult("清空列", false, it.message ?: "Sheets clear column failed.") }
@@ -424,13 +424,13 @@ internal class InsertStringsSheetsOpsController(
 
             AiAction.SheetsOperation.Operation.CHECK_TRANSLATIONS -> {
                 val report = runTranslationReview(action, spreadsheetId, sheetName, mode = "check")
-                SwingUtilities.invokeLater { ui.actionsController.showToast(report.summary.ifBlank { "检查完成" }) }
+                SwingUtilities.invokeLater { state.showToast(report.summary.ifBlank { "检查完成" }) }
                 SheetsToolResult("检查全部翻译", true, report.toReportText())
             }
 
             AiAction.SheetsOperation.Operation.FIX_TRANSLATIONS -> {
                 val report = runTranslationReview(action, spreadsheetId, sheetName, mode = "fix")
-                SwingUtilities.invokeLater { ui.actionsController.showToast(report.summary.ifBlank { "修正完成" }) }
+                SwingUtilities.invokeLater { state.showToast(report.summary.ifBlank { "修正完成" }) }
                 SheetsToolResult("修正全部翻译", report.success, report.toReportText())
             }
 
@@ -443,7 +443,7 @@ internal class InsertStringsSheetsOpsController(
                 result.fold(
                     onSuccess = {
                         SwingUtilities.invokeLater {
-                            ui.actionsController.showToast(if (rowCount == 0) "已取消冻结行" else "已冻结前 $rowCount 行")
+                            state.showToast(if (rowCount == 0) "已取消冻结行" else "已冻结前 $rowCount 行")
                         }
                         SheetsToolResult(
                             "冻结行",
@@ -467,7 +467,7 @@ internal class InsertStringsSheetsOpsController(
                 result.fold(
                     onSuccess = {
                         SwingUtilities.invokeLater {
-                            ui.actionsController.showToast(if (colCount == 0) "已取消冻结列" else "已冻结前 $colCount 列")
+                            state.showToast(if (colCount == 0) "已取消冻结列" else "已冻结前 $colCount 列")
                         }
                         SheetsToolResult(
                             "冻结列",
@@ -496,7 +496,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.fillColor(project, spreadsheetId, range, color, sheetName)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Filled $range with $color.") }
+                        SwingUtilities.invokeLater { state.showToast("Filled $range with $color.") }
                         SheetsToolResult(
                             "填充颜色",
                             true,
@@ -517,7 +517,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.clearColor(project, spreadsheetId, range, sheetName)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Cleared color on $range.") }
+                        SwingUtilities.invokeLater { state.showToast("Cleared color on $range.") }
                         SheetsToolResult(
                             "清除颜色",
                             true,
@@ -542,7 +542,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.setTextColor(project, spreadsheetId, range, textColor, sheetName)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Set text color $textColor on $range.") }
+                        SwingUtilities.invokeLater { state.showToast("Set text color $textColor on $range.") }
                         SheetsToolResult(
                             "设置文字色",
                             true,
@@ -563,7 +563,7 @@ internal class InsertStringsSheetsOpsController(
                 val result = SheetsManager.clearTextColor(project, spreadsheetId, range, sheetName)
                 result.fold(
                     onSuccess = {
-                        SwingUtilities.invokeLater { ui.actionsController.showToast("Cleared text color on $range.") }
+                        SwingUtilities.invokeLater { state.showToast("Cleared text color on $range.") }
                         SheetsToolResult(
                             "清除文字色",
                             true,
@@ -587,7 +587,7 @@ internal class InsertStringsSheetsOpsController(
                 result.fold(
                     onSuccess = { report ->
                         SwingUtilities.invokeLater {
-                            ui.actionsController.showToast("Batch modify done: ${report.apiCallCount} API calls")
+                            state.showToast("Batch modify done: ${report.apiCallCount} API calls")
                         }
                         val fullMessage = buildString {
                             append("[工具执行结果] 操作:批量修改 工作表:").append(sheetName)
@@ -643,12 +643,12 @@ internal class InsertStringsSheetsOpsController(
      * 把当前 UI 的 keyEntries 转换为 sheet 二维表(用于 WRITE 等需要 rows 的操作)。
      */
     fun buildSheetRows(): List<List<String>> {
-        ui.actionsController.saveCurrentEdits()
-        val languages = ui.keyEntries.firstOrNull()?.stringsInfoList?.map { it.language }
-            ?: ui.rows.map { it.language }
+        state.saveCurrentEdits()
+        val languages = state.keyEntries.firstOrNull()?.stringsInfoList?.map { it.language }
+            ?: state.rows.map { it.language }
         if (languages.isEmpty()) return emptyList()
         val header = listOf("key") + languages
-        val dataRows = ui.keyEntries.map { entry ->
+        val dataRows = state.keyEntries.map { entry ->
             val translationsMap = entry.stringsInfoList.associate { it.language to it.text }
             listOf(entry.key) + languages.map { translationsMap[it] ?: "" }
         }
@@ -685,7 +685,7 @@ internal class InsertStringsSheetsOpsController(
             KeyedStringsInfo(key, "", emptyList())
         }
 
-        val existingLanguages = ui.keyEntries.firstOrNull()?.stringsInfoList?.map { it.language }
+        val existingLanguages = state.keyEntries.firstOrNull()?.stringsInfoList?.map { it.language }
         if (existingLanguages != null && existingLanguages.isNotEmpty()) {
             val mergedEntries = newEntries.mapIndexed { idx, entry ->
                 val dataRow = dataRows[idx]
@@ -697,19 +697,19 @@ internal class InsertStringsSheetsOpsController(
                         dataRow.getOrNull(originalIndex) ?: ""
                     } else ""
                 }
-                val infoList = ui.keyEntries.firstOrNull()?.stringsInfoList?.map { info ->
+                val infoList = state.keyEntries.firstOrNull()?.stringsInfoList?.map { info ->
                     StringsInfo(info.stringsFile, info.language, entry.key, translationsMap[info.language] ?: "")
                 } ?: emptyList()
                 KeyedStringsInfo(entry.key, "", infoList)
             }
-            ui.keyEntries.clear()
-            ui.keyEntries.addAll(mergedEntries)
+            state.keyEntries.clear()
+            state.keyEntries.addAll(mergedEntries)
         } else {
-            ui.keyEntries.clear()
-            ui.keyEntries.addAll(newEntries)
+            state.keyEntries.clear()
+            state.keyEntries.addAll(newEntries)
         }
-        ui.selectedKeyIndex = 0
-        ui.actionsController.updateRowsForSelectedKey()
+        state.selectedKeyIndex = 0
+        state.updateRowsForSelectedKey()
     }
 
     fun applySheetRowToUi(row: List<String>) {

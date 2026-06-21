@@ -14,7 +14,7 @@ import com.google.gson.JsonObject
  * 拆分理由:这块逻辑只读 state,本身没有副作用,放在 UI 类里只是堆体积。
  */
 internal class InsertStringsChatContextBuilder(
-    private val ui: InsertStringsUI,
+    private val state: ChatStateHolder,
 ) {
 
     companion object {
@@ -26,16 +26,16 @@ internal class InsertStringsChatContextBuilder(
         // 基础集合:优先用用户在表格里选中的语言,否则用 currentModule 的 xmlFiles。
         // 始终把默认英语 "values" 包含进去,避免用户没选英语行时 AI 漏写 English,
         // 进而让 StringsWriter 把 values/strings.xml 写成空文本。
-        val baseLanguages = ui.insertStringsManager.languages?.takeIf { it.isNotEmpty() }
+        val baseLanguages = state.insertStringsManager.languages?.takeIf { it.isNotEmpty() }
             ?: contextInfo.currentModule?.xmlFiles?.map { it.language }
             ?: emptyList()
         val availableLanguages = if (DEFAULT_LANGUAGE in baseLanguages) baseLanguages
         else baseLanguages + DEFAULT_LANGUAGE
         // 同步把当前编辑保存到 keyEntries,保证 AI 看到的 currentKeys 是最新
-        ui.actionsController.saveCurrentEdits()
-        val sheetsSettings = SheetsSettingsService.getInstance(ui.project).state
-        val sheetsConfigured = SheetsManager.isConfigured(ui.project)
-        val availableSheetNames = ui.sheetsAvailableSheets.map { it.title }
+        state.saveCurrentEdits()
+        val sheetsSettings = SheetsSettingsService.getInstance(state.project).state
+        val sheetsConfigured = SheetsManager.isConfigured(state.project)
+        val availableSheetNames = state.sheetsAvailableSheets.map { it.title }
             .takeIf { it.isNotEmpty() }
 
         val root = JsonObject().apply {
@@ -55,7 +55,7 @@ internal class InsertStringsChatContextBuilder(
                 availableLanguages.forEach { add(it) }
             })
             add("currentKeys", JsonArray().apply {
-                ui.keyEntries.forEach { entry ->
+                state.keyEntries.forEach { entry ->
                     add(JsonObject().apply {
                         addProperty("key", entry.key)
                         add("translations", JsonObject().apply {

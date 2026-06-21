@@ -17,10 +17,10 @@ import javax.swing.SwingUtilities
  * 跨模块写入的校验由上层 ChatDriver 在 processAiReply 阶段统一处理,本类不做。
  */
 internal class InsertStringsStringsOpsController(
-    private val ui: InsertStringsUI,
+    private val state: ChatStateHolder,
 ) {
 
-    private val project: Project get() = ui.project
+    private val project: Project get() = state.project
 
     /**
      * 解析 "AI 显式 module / currentModule / 行数最多模块" 的优先级,得到本次操作的目标模块。
@@ -178,12 +178,12 @@ internal class InsertStringsStringsOpsController(
      * 若 keyEntries 中包含该 key 则就地替换(并按需刷新当前选中行的 rows)。
      */
     private fun refreshKeyEntryAfterDelete(moduleName: String, key: String) {
-        val idx = ui.keyEntries.indexOfFirst { it.key == key }
+        val idx = state.keyEntries.indexOfFirst { it.key == key }
         if (idx < 0) return
         val updated = ContextManager.scanModuleForKey(project, moduleName, key)
-        ui.keyEntries[idx] = cn.jarryleo.insert_strings.xml.KeyedStringsInfo(key, "", updated)
-        if (ui.selectedKeyIndex == idx) {
-            ui.actionsController.updateRowsForSelectedKey()
+        state.keyEntries[idx] = cn.jarryleo.insert_strings.xml.KeyedStringsInfo(key, "", updated)
+        if (state.selectedKeyIndex == idx) {
+            state.updateRowsForSelectedKey()
         }
     }
 

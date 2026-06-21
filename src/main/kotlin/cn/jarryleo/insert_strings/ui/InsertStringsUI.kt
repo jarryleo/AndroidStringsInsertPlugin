@@ -38,19 +38,19 @@ import javax.swing.Timer
  */
 class InsertStringsUI(
     private val toolWindow: ToolWindow
-) : UiCallback {
+) : UiCallback, ChatStateHolder {
 
     // ============== 业务依赖(由 IntelliJ 注入) ==============
-    internal lateinit var project: Project
+    override lateinit var project: Project
         private set
-    internal lateinit var insertStringsManager: InsertStringsManager
+    override lateinit var insertStringsManager: InsertStringsManager
         private set
 
     // ============== 主表编辑 state ==============
     internal var stringName by mutableStateOf("")
-    internal val rows = mutableStateListOf<StringRow>()
-    internal val keyEntries = mutableStateListOf<KeyedStringsInfo>()
-    internal var selectedKeyIndex by mutableStateOf(0)
+    override val rows = mutableStateListOf<StringRow>()
+    override val keyEntries = mutableStateListOf<KeyedStringsInfo>()
+    override var selectedKeyIndex by mutableStateOf(0)
     internal var toastMessage by mutableStateOf("")
     internal var toastTimer: Timer? = null
 
@@ -71,31 +71,31 @@ class InsertStringsUI(
     internal var sheetsDefaultSpreadsheetId by mutableStateOf("")
     internal var sheetsDefaultSheetName by mutableStateOf("Sheet1")
     internal var sheetsConnectionStatus by mutableStateOf("")
-    internal val sheetsAvailableSheets = mutableStateListOf<SheetsManager.SheetInfo>()
+    override val sheetsAvailableSheets = mutableStateListOf<SheetsManager.SheetInfo>()
     internal var sheetsListStatus by mutableStateOf("")
 
     // ============== Chat state ==============
-    internal val chatMessages = mutableStateListOf<ChatMessage>()
-    internal var chatInput by mutableStateOf("")
-    internal var chatSending by mutableStateOf(false)
+    override val chatMessages = mutableStateListOf<ChatMessage>()
+    override var chatInput by mutableStateOf("")
+    override var chatSending by mutableStateOf(false)
     // 加载工具文档的连续次数(防止 AI 反复加载文档)
-    internal var toolDocLoadCount: Int = 0
+    override var toolDocLoadCount: Int = 0
     // 当前轮待响应的 ask_user 工具调用 ID
-    internal var pendingAskUserToolCallId: String? = null
+    override var pendingAskUserToolCallId: String? = null
     // ask_user 连续调用次数(防死循环)
-    internal var askUserCallCount: Int = 0
+    override var askUserCallCount: Int = 0
     // 用户点击「停止」时置为 true,tool loop 看到就退出
     @Volatile
-    internal var stopRequested: Boolean = false
+    override var stopRequested: Boolean = false
     // AI 上下文弹窗
-    internal var showContextPopup by mutableStateOf(false)
-    internal var chatContextText by mutableStateOf("")
+    override var showContextPopup by mutableStateOf(false)
+    override var chatContextText by mutableStateOf("")
 
     /**
      * 「重复 key 插入」二次确认时持有的状态。
      * 拆出去会让 ChatDriver 反向依赖过多,保留在 UI 上更直接。
      */
-    internal var pendingSheetsInsert: InsertStringsChatDriver.PendingSheetsInsert? = null
+    override var pendingSheetsInsert: PendingSheetsInsert? = null
 
     // ============== 协作类(延迟初始化,见 [createToolWindowContent]) ==============
     internal lateinit var actionsController: InsertStringsActionsController
@@ -203,7 +203,7 @@ class InsertStringsUI(
         sheetsOpsController = InsertStringsSheetsOpsController(this)
         chatContextBuilder = InsertStringsChatContextBuilder(this)
         chatDriver = InsertStringsChatDriver(
-            ui = this,
+            state = this,
             stringsOps = stringsOpsController,
             sheetsOps = sheetsOpsController,
             chatContextBuilder = chatContextBuilder,
@@ -226,4 +226,10 @@ class InsertStringsUI(
         actionsController.updateRowsForSelectedKey()
         toolWindow.show()
     }
+
+    // ============== ChatStateHolder 回调桥接 ==============
+    override fun showToast(message: String) = actionsController.showToast(message)
+    override fun saveCurrentEdits() = actionsController.saveCurrentEdits()
+    override fun updateRowsForSelectedKey() = actionsController.updateRowsForSelectedKey()
+    override fun closeChatView() { showChat = false }
 }
