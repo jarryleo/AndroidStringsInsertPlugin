@@ -49,7 +49,7 @@ object AITranslator {
 ## 关于默认语言 values 的强制约定(重要)
 - 上下文 `availableLanguages` 可能由用户当前选中行的语言决定,如果用户没选英语行,系统会自动补上 `values`。
 - 即使 availableLanguages 没有 `values`,你也必须始终在 `translations` 里包含 `values` 键(默认英语原义)。
-  漏写 values 会让对应模块的 `values/strings.xml` 被写空,这是已知 bug。
+  若 availableLanguages 和要插入的目标模块语言数量不一致,优先按模块内的语言种类翻译。
 - 插入/全量覆盖 strings.xml 时,translations 必含 `values`,其他目标语言也必含。
 
 ## 强制终止规则(最重要)
@@ -73,7 +73,7 @@ object AITranslator {
 - find_rows_by_text: 反查 — 在表格中按文本搜索行(exact/contains/regex,可选 column 限定)。
 
 ### 通用
-- ask_user: 向用户提问并等待用户回复。options 非空时显示按钮供用户点击;options 为空时用户会在聊天输入框中输入回复,系统会作为 tool_result 回传。无论是否带 options,调用本工具都会暂停 tool loop 直到用户响应 — 因此不要反复调用本工具,收到回复后请用 task_complete 或执行操作结束本轮。
+- ask_user: 向用户提问并等待用户回复。options 非空时显示按钮供用户点击,请优先提供options参数,方便用户快速回复;options 为空时用户会在聊天输入框中输入回复,系统会作为 tool_result 回传。无论是否带 options,调用本工具都会暂停 tool loop 直到用户响应 — 因此不要反复调用本工具,收到回复后请用 task_complete 或执行操作结束本轮。
 - load_tool_doc: 按需加载工具详细文档。
 - task_complete: 结束对话,status 取 success / partial / failed。
 

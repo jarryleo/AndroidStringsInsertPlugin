@@ -353,9 +353,10 @@ object StringsService {
     }
 
     /**
-     * 从单个文件中删除指定 key 对应的 <string> 节点,包括所在行整行删除以保持排版整洁。
-     * 删除后调 [StringsXmlFormatter.collapseBlankLines] 折叠连续空行,
-     * 避免多次删除时累积出 2+ 个连续空行。
+     * 从单个文件中删除指定 key 对应的 <string> 节点所在的整行
+     * (含行首缩进与行尾换行),下一行内容字节不动、缩进自然保持。
+     *
+     * 设计原则:只删目标行,不改文件其它部分的空行 / 排版。多次删除也不会互相影响。
      * @return 实际删除了一条记录返回 true;若 key 在该文件中不存在返回 false
      */
     private fun removeFromFile(
@@ -368,18 +369,12 @@ object StringsService {
         val pattern =
             """<string\b(?=[^>]*\bname\s*=\s*(['"])$escapedKey\1)[^>]*>[\s\S]*?</string>""".toRegex()
         val match = pattern.find(xml) ?: return false
-        // 扩展到所在整行(含行首缩进与行尾换行),保证删除后不留空白行
+        // 扩展到所在整行:行首从上一个 \n 之后开始,行尾到下一个 \n 之后结束
         val matchStart = match.range.first
         val matchEnd = match.range.last + 1
         val lineStart = xml.lastIndexOf('\n', matchStart - 1).let { if (it < 0) 0 else it + 1 }
         val lineEnd = xml.indexOf('\n', matchEnd).let { if (it < 0) xml.length else it + 1 }
         document.replaceString(lineStart, lineEnd, "")
-        // 删除整行后清理可能产生的连续空行(>=3 个 \n + 中间空白行,折叠为最多 1 个空行)
-        val updated = document.text
-        val cleaned = StringsXmlFormatter.collapseBlankLines(updated)
-        if (cleaned != updated) {
-            document.replaceString(0, updated.length, cleaned)
-        }
         return true
     }
 
