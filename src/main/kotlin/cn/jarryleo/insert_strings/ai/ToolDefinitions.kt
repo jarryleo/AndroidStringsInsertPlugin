@@ -95,8 +95,9 @@ object ToolDefinitions {
             "安全约束:修改/删除行前先用 search 定位行号;列操作需用户确认;全表检查/修正用 check_translations/fix_translations。"
 
     private const val DESC_ASK_USER =
-        "向用户提问并等待回复。options 非空时显示按钮供用户点击;为空时只显示文本等待用户输入。" +
-            "使用场景:关键参数缺失、风险操作确认、目标不明确需要澄清。"
+        "向用户提问并等待用户回复。options 非空时显示按钮供用户点击;options 为空时用户可在聊天输入框中输入回复内容。" +
+            "使用场景:关键参数缺失、风险操作确认、目标不明确需要澄清。" +
+            "重要:每次调用都会暂停 tool loop 等待用户响应,不会自动继续 — 因此若想退出循环,必须在收到用户回复后调用 task_complete 或采取其他操作,不能连续反复调用本工具。"
 
     private const val DESC_LOAD_TOOL_DOC =
         "按需加载工具的详细使用文档(枚举值、参数约束、示例)。" +

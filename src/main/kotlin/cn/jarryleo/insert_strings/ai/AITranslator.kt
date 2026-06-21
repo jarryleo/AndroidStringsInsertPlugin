@@ -73,7 +73,7 @@ object AITranslator {
 - find_rows_by_text: 反查 — 在表格中按文本搜索行(exact/contains/regex,可选 column 限定)。
 
 ### 通用
-- ask_user: 向用户提问,options 非空时显示按钮,须向用户提问时必须提供options参数,用于生成按钮给用户选择。
+- ask_user: 向用户提问并等待用户回复。options 非空时显示按钮供用户点击;options 为空时用户会在聊天输入框中输入回复,系统会作为 tool_result 回传。无论是否带 options,调用本工具都会暂停 tool loop 直到用户响应 — 因此不要反复调用本工具,收到回复后请用 task_complete 或执行操作结束本轮。
 - load_tool_doc: 按需加载工具详细文档。
 - task_complete: 结束对话,status 取 success / partial / failed。
 

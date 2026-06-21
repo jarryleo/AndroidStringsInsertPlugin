@@ -53,6 +53,9 @@ class InsertStringsUI(
         private const val REVIEW_BATCH_SIZE = 80
         // load_tool_doc 按需加载工具文档的最大连续次数,防止 AI 反复加载文档而不执行操作。
         private const val MAX_TOOL_DOC_LOADS = 4
+        // 单轮对话中 ask_user 的最大连续调用次数,防止 AI 反复追问形成死循环。
+        // 每次用户实际回复(发送消息 / 点击选项)后重置为 0。
+        private const val MAX_ASK_USER_CALLS = 3
         // 默认语言目录名(对应 values/ 目录,Android 默认英语资源)。
         // 作为兜底确保插入翻译时一定包含 values 键,避免英语写空。
         private const val DEFAULT_LANGUAGE = "values"
@@ -87,8 +90,11 @@ class InsertStringsUI(
     // 当前对话轮中已连续加载工具文档的次数,防止 AI 反复加载文档而不执行操作。
     // 每次用户发新消息时重置为 0。
     private var toolDocLoadCount: Int = 0
-    // 当前轮待响应的 ask_user 工具调用 ID。用户点击选项后,作为 tool result 回传给 AI。
+    // 当前轮待响应的 ask_user 工具调用 ID。用户点击选项或发送消息后,作为 tool result 回传给 AI。
     private var pendingAskUserToolCallId: String? = null
+    // 当前对话轮中已连续调用 ask_user 的次数,防止 AI 反复追问导致死循环。
+    // 每次用户实际回复(发送新消息、点击选项)后重置为 0;超过 MAX_ASK_USER_CALLS 强制终止。
+    private var askUserCallCount: Int = 0
     // 用户点击「停止」时置为 true。runToolLoop 在每轮开头与 AI 调用返回后检查该标志,
     // 为 true 时立即终止 tool loop,不再继续驱动 AI。
     // 下一轮用户发送新消息时(sendChatMessage / onChatOptionClick)会重置为 false。
@@ -1265,8 +1271,17 @@ class InsertStringsUI(
     }
 
     private fun sendChatMessage(text: String) {
-        chatMessages.add(ChatMessage(role = "user", content = text))
+        val askToolCallId = pendingAskUserToolCallId
+        if (askToolCallId != null) {
+            // 这是对 ask_user(无 options 场景)的回复,作为 tool_result 回传给 AI,
+            // 而非新增 user 消息,否则会破坏 tool_use/tool_result 的配对语义。
+            pendingAskUserToolCallId = null
+            chatMessages.add(ChatMessage(role = "tool", content = text, toolCallId = askToolCallId))
+        } else {
+            chatMessages.add(ChatMessage(role = "user", content = text))
+        }
         toolDocLoadCount = 0
+        askUserCallCount = 0
         stopRequested = false
         continueChatWithAi()
     }
@@ -1275,12 +1290,20 @@ class InsertStringsUI(
      * 用户点击「停止」按钮:标记停止请求,让当前/下一轮 tool loop 检测到后立即终止。
      * 由于 AI HTTP 请求是阻塞的,正在进行的网络请求会等其完成,但其返回的 tool_call 不会再驱动新轮次。
      * 不可重复点击(无副作用但也无意义)。
+     *
+     * 同时也覆盖 ask_user 等待用户响应的场景:此时 chatSending=false 但 pendingAskUserToolCallId
+     * 非空,需要补全 tool_result 以满足 Anthropic 协议要求,否则下次发送新消息时会 HTTP 400。
      */
     private fun stopChat() {
-        if (!chatSending) return
+        val hasPendingAsk = pendingAskUserToolCallId != null
+        if (!chatSending && !hasPendingAsk) return
         stopRequested = true
         chatSending = false
-        pendingAskUserToolCallId = null
+        if (hasPendingAsk) {
+            fillMissingToolResults("[已取消] 用户点击了停止按钮")
+            pendingAskUserToolCallId = null
+            chatMessages.add(ChatMessage(role = "assistant", content = "⏹ 已停止生成。"))
+        }
         showToast("已停止生成")
     }
 
@@ -1471,36 +1494,54 @@ class InsertStringsUI(
         if (askUserEntry != null) {
             unprocessed.remove(askUserEntry)
             val askAction = askUserEntry.action as AiAction.AskUser
+            val askToolCallId = askUserEntry.toolCallId.takeIf { it.isNotEmpty() }
+
+            // 安全网:限制单轮内 ask_user 连续调用次数,防止 AI 反复追问形成死循环。
+            askUserCallCount++
+            if (askUserCallCount > MAX_ASK_USER_CALLS) {
+                if (askToolCallId != null) {
+                    chatMessages.add(
+                        ChatMessage(
+                            role = "tool",
+                            content = "[已取消] ask_user 调用次数已达上限($MAX_ASK_USER_CALLS 次),系统为防止死循环自动终止。" +
+                                "请基于已有信息完成任务(task_complete),或直接采取合理操作。",
+                            toolCallId = askToolCallId
+                        )
+                    )
+                }
+                addSkippedToolResults(
+                    unprocessed,
+                    "因 ask_user 调用次数超限被强制终止"
+                )
+                chatMessages.add(
+                    ChatMessage(
+                        role = "assistant",
+                        content = "⏹ ask_user 调用次数已达上限($MAX_ASK_USER_CALLS 次),已自动终止。请基于已有信息继续。"
+                    )
+                )
+                chatSending = false
+                pendingAskUserToolCallId = null
+                return
+            }
+
             if (askAction.options.isNotEmpty()) {
                 // 带 options:挂到 assistant 消息渲染按钮,记录 toolCallId,等待用户点击
                 chatMessages[chatMessages.lastIndex] =
                     chatMessages.last().copy(options = askAction.options)
-                pendingAskUserToolCallId = askUserEntry.toolCallId.takeIf { it.isNotEmpty() }
-                addSkippedToolResults(
-                    unprocessed,
-                    "因 ask_user 等待用户选择而跳过(用户点击选项后 AI 可重新发起)"
-                )
-                chatSending = false
-                return
+            } else {
+                // 无 options:用 toast 通知用户问题内容,等待用户在输入框中回复
+                showToast(askAction.question)
             }
-            // 无 options:仅提示用户,自动添加 tool result 继续
-            showToast(askAction.question)
-            if (askUserEntry.toolCallId.isNotEmpty()) {
-                chatMessages.add(
-                    ChatMessage(
-                        role = "tool",
-                        content = "[已向用户显示问题,无需回复] ${askAction.question}",
-                        toolCallId = askUserEntry.toolCallId
-                    )
-                )
-                addSkippedToolResults(
-                    unprocessed,
-                    "因 ask_user 提示用户而跳过(系统已自动以提示内容回传 tool_result)"
-                )
-                continueToolLoopInBackground(context, iteration + 1)
-                return
-            }
-            // toolCallId 缺失(异常):不回传 tool result,让 AI 看到「无 options + 无响应」自己决定下一步
+            // 无论是否带 options,都暂停 loop 等待用户响应。
+            // 修复:之前无 options 时自动回传「已向用户显示问题,无需回复」并继续 loop,
+            //      导致 AI 反复调用 ask_user 而用户根本没机会回复,形成死循环。
+            pendingAskUserToolCallId = askToolCallId
+            addSkippedToolResults(
+                unprocessed,
+                "因 ask_user 等待用户响应而跳过(用户点击选项或发送消息后 AI 可继续)"
+            )
+            chatSending = false
+            return
         }
 
         // Priority 3: load_tool_doc
@@ -2341,6 +2382,7 @@ class InsertStringsUI(
         val askToolCallId = pendingAskUserToolCallId
         if (askToolCallId != null) {
             pendingAskUserToolCallId = null
+            askUserCallCount = 0
             chatMessages.add(
                 ChatMessage(role = "tool", content = option, toolCallId = askToolCallId)
             )
@@ -2369,6 +2411,8 @@ class InsertStringsUI(
         chatMessages.clear()
         chatInput = ""
         chatSending = false
+        pendingAskUserToolCallId = null
+        askUserCallCount = 0
     }
 
     private fun buildChatContext(): String {
