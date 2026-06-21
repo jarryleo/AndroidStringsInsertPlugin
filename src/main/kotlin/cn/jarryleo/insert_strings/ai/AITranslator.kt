@@ -716,9 +716,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             add("tools", ToolDefinitions.anthropicTools)
             add(
                 "messages",
-                JsonArray().apply {
-                    messages.forEach { msg -> add(msg.toAnthropicMessage()) }
-                }
+                JsonArray().apply { buildAnthropicMessages(messages).forEach { add(it) } }
             )
         }
         return root.toString()
@@ -771,9 +769,59 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
     }
 
     /**
+     * 把聊天消息列表转换为 Anthropic Messages API 的 messages 数组。
+     *
+     * 关键约束:Anthropic 要求 assistant 消息中的每个 tool_use 块,必须在**紧接其后**
+     * 的同一条 user 消息中拥有对应的 tool_result 块;否则会 HTTP 400:
+     *   `tool_use.id 'xxx' was found without a corresponding tool_result block
+     *    immediately after`
+     *
+     * 因此本函数把连续的 tool 结果(role="tool" 或带 toolCallId 的 user)合并到
+     * 同一个 user 消息里,让所有配对 tool_result 与上一条 assistant 的 tool_use
+     * 在结构上"立即相邻"。
+     */
+    private fun buildAnthropicMessages(messages: List<ChatMessage>): List<JsonObject> {
+        val result = mutableListOf<JsonObject>()
+        val pendingToolResults = mutableListOf<JsonObject>()
+
+        fun flushToolResults() {
+            if (pendingToolResults.isEmpty()) return
+            result.add(
+                JsonObject().apply {
+                    addProperty("role", "user")
+                    add("content", JsonArray().apply { pendingToolResults.forEach { add(it) } })
+                }
+            )
+            pendingToolResults.clear()
+        }
+
+        messages.forEach { msg ->
+            if (msg.role == "tool" || (msg.role == "user" && msg.toolCallId != null)) {
+                pendingToolResults.add(
+                    JsonObject().apply {
+                        addProperty("type", "tool_result")
+                        addProperty("tool_use_id", msg.toolCallId.orEmpty())
+                        addProperty("content", msg.content)
+                    }
+                )
+            } else {
+                flushToolResults()
+                result.add(msg.toAnthropicMessage())
+            }
+        }
+        flushToolResults()
+        return result
+    }
+
+    /**
      * 把 [ChatMessage] 转换为 Anthropic Messages API 的 messages 元素。
      * - assistant 消息含 toolCalls 时用 content 数组(text + tool_use 块)
-     * - tool 结果统一用 user 角色的 tool_result 块
+     * - tool 的结果统一用 user 角色的 tool_result 块
+     *
+     * 注意:本函数只做单条消息的转换,不处理 tool_result 的合并。
+     * 整批消息请使用 [buildAnthropicMessages],它会把连续的 tool 消息合并到
+     * 同一条 user 消息中,以满足 Anthropic 协议对 tool_use/tool_result
+     * "立即相邻"的硬约束。
      */
     private fun ChatMessage.toAnthropicMessage(): JsonObject {
         // tool result → user with tool_result block(s)
@@ -826,11 +874,23 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
 
     private fun parseAiReply(responseText: String): AiReply {
         val root = runCatching { JsonParser.parseString(responseText).asJsonObject }.getOrNull()
-            ?: return AiReply(responseText, emptyList())
+            ?: return AiReply(responseText, emptyList(), emptyList(), emptyList())
         val text = extractAssistantText(root)
-        val toolCalls = extractToolCalls(root)
-        val actions = toolCalls.mapNotNull { call -> toolCallToAction(call) }
-        return AiReply(text, actions, toolCalls)
+        val rawToolCalls = extractToolCalls(root)
+        val actions = mutableListOf<AiAction>()
+        val parsedToolCalls = mutableListOf<ToolCall>()
+        val failedToolCalls = mutableListOf<ToolCall>()
+        rawToolCalls.forEach { call ->
+            val action = toolCallToAction(call)
+            if (action != null) {
+                actions.add(action)
+                parsedToolCalls.add(call)
+            } else {
+                // 解析失败:tool_use 仍占据 assistant 消息的 tool_use 块,必须配 tool_result
+                failedToolCalls.add(call)
+            }
+        }
+        return AiReply(text, actions, parsedToolCalls, failedToolCalls)
     }
 
     /**

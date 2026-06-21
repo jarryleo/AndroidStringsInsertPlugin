@@ -184,10 +184,19 @@ data class AiReply(
     val reply: String,
     val actions: List<AiAction>,
     /**
-     * 模型返回的原始 tool_calls,与 [actions] 按下标对齐(parse 失败的位置会被丢弃)。
-     * UI 层在构造 tool result 消息时,需要用这里的 id 回传给 API。
+     * 与 [actions] 严格按下标一一对应的原始 tool_calls(只有解析成功的 tool_call
+     * 才会同时出现在 actions 和这里)。UI 层在构造 tool result 消息时,
+     * 直接按 [actions] 的下标取这里的 id 即可,不会错位。
      */
-    val toolCalls: List<ToolCall> = emptyList()
+    val toolCalls: List<ToolCall> = emptyList(),
+    /**
+     * 模型返回的 tool_calls 中,参数无法解析或工具名未知的子集。
+     * 这些 tool_use 仍占据 assistant 消息的 tool_use 块,必须配对以 tool_result
+     * 才能继续对话(否则 Anthropic 会 HTTP 400:
+     * `tool_use.id 'xxx' was found without a corresponding tool_result block
+     * immediately after`)。driver 层需要为这些 id 添加「解析失败」的 tool_result。
+     */
+    val failedToolCalls: List<ToolCall> = emptyList()
 )
 
 /**

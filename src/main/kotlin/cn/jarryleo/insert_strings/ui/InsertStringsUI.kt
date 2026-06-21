@@ -1326,6 +1326,18 @@ class InsertStringsUI(
             return
         }
 
+        // 兜底安全网:在 AI 调用前扫描 chatMessages,补齐所有尚未配对的 tool_result。
+        // 这一步能挡住所有前序流程(用户主动操作 / 后台线程竞态 / Stop 按钮等)
+        // 引入的悬挂 tool_use,确保每次 API 请求都满足 Anthropic 协议要求
+        // (tool_use 必须紧跟 tool_result,否则 HTTP 400)。
+        try {
+            SwingUtilities.invokeAndWait {
+                fillMissingToolResults("[自动补全] 上一轮未配对的工具调用")
+            }
+        } catch (e: Exception) {
+            // invokeAndWait 异常不应阻塞 AI 调用,继续走原流程
+        }
+
         val reply: AiReply
         try {
             reply = AITranslator.chat(chatMessages.toList(), context)
@@ -1350,7 +1362,7 @@ class InsertStringsUI(
         }
 
         SwingUtilities.invokeLater {
-            // 1. 记入 assistant 消息,带 tool_calls
+            // 1. 记入 assistant 消息,带 tool_calls(同时包含已解析与未解析的全部 tool_use)
             //    若 AI 只返回 tool_calls 没文字,填充占位文案,避免空气泡
             val assistantContent = when {
                 reply.reply.isNotBlank() -> reply.reply
@@ -1365,12 +1377,29 @@ class InsertStringsUI(
                 )
             )
 
-            // 2. 建立 action → toolCallId 的下标映射
+            // 2. 为「解析失败」的 tool_use 补 tool_result(防止 Anthropic 报
+            //    "tool_use.id 'xxx' was found without a corresponding tool_result
+            //    block immediately after")。这些 tool_use 占着 assistant 的位置,
+            //    但 actions 中没有对应项,会被 processAiReply 漏掉,必须在此处补齐。
+            reply.failedToolCalls.forEach { failed ->
+                chatMessages.add(
+                    ChatMessage(
+                        role = "tool",
+                        content = "[工具执行结果] 类型:unknown(${failed.name}) 状态:解析失败 " +
+                            "信息:该工具调用的参数无法解析或工具名未注册。请检查调用格式后重试。",
+                        toolCallId = failed.id
+                    )
+                )
+            }
+
+            // 3. 建立 action → toolCallId 的下标映射。
+            //    parseAiReply 已保证 reply.actions 与 reply.toolCalls 严格 1:1 对齐,
+            //    这里的下标取 id 才是正确的(之前 mapNotNull 会丢项导致错位)。
             val actionToolCallIds = reply.actions.indices.map { i ->
                 reply.toolCalls.getOrNull(i)?.id.orEmpty()
             }
 
-            // 3. 分发处理
+            // 4. 分发处理
             processAiReply(reply, actionToolCallIds, context, iteration)
         }
     }
@@ -1638,8 +1667,51 @@ class InsertStringsUI(
      */
     private fun handleStoppedByUser() {
         SwingUtilities.invokeLater {
+            // 防御性:在添加「已停止」消息前,先把对话历史中所有尚未配对的 tool_use
+            // 补上「已取消」tool_result,避免下一轮 AI 请求时 Anthropic 报:
+            //   tool_use.id 'xxx' was found without a corresponding tool_result
+            //   block immediately after
+            // 这覆盖了 ask_user 等待用户点选项、用户却点 Stop 等导致 tool_use 悬挂的场景。
+            fillMissingToolResults("[已取消] 用户点击了停止按钮,该工具调用未执行。如需执行,请在下一轮重新发起。")
             chatMessages.add(ChatMessage(role = "assistant", content = "⏹ 已停止生成。"))
             stopRequested = false
+        }
+    }
+
+    /**
+     * 扫描 chatMessages,找出所有尚未配对的 tool_use 块(assistant.toolCalls 中存在、
+     * 但 chatMessages 中没有对应 toolCallId 的 tool 消息),为它们补一条 tool_result
+     * 以满足 Anthropic 协议要求(每个 tool_use 必须紧跟 tool_result,否则 HTTP 400)。
+     *
+     * @param reason 写入 tool_result content 的说明,告诉 AI 为什么这个 action 没被执行
+     */
+    private fun fillMissingToolResults(reason: String) {
+        // 用 LinkedHashSet 保持 assistant 消息中 tool_use 的出现顺序
+        val pending = LinkedHashSet<String>()
+        chatMessages.forEach { msg ->
+            when (msg.role) {
+                "assistant" -> msg.toolCalls.forEach { tc -> pending.add(tc.id) }
+                "tool" -> msg.toolCallId?.let { id -> pending.remove(id) }
+                "user" -> msg.toolCallId?.let { id -> pending.remove(id) }
+            }
+        }
+        if (pending.isEmpty()) return
+        // 找最近一个 assistant 消息中对应 tool_use 的 name,用于工具结果描述
+        val nameById = mutableMapOf<String, String>()
+        chatMessages.forEach { msg ->
+            if (msg.role == "assistant") {
+                msg.toolCalls.forEach { tc -> nameById.putIfAbsent(tc.id, tc.name) }
+            }
+        }
+        pending.forEach { id ->
+            val name = nameById[id] ?: "unknown"
+            chatMessages.add(
+                ChatMessage(
+                    role = "tool",
+                    content = "[工具执行结果] 类型:$name 状态:已取消 信息:$reason",
+                    toolCallId = id
+                )
+            )
         }
     }
 
