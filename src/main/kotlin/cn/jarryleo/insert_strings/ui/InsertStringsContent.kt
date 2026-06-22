@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.ai.AiProtocol
 import cn.jarryleo.insert_strings.ai.ChatMessage
+import cn.jarryleo.insert_strings.phrases.QuickPhrase
 
 @Composable
 internal fun InsertStringsContent(
@@ -66,6 +67,13 @@ internal fun InsertStringsContent(
     onTestSheetsConnection: () -> Unit,
     onSaveSheetsSettings: () -> Unit,
     onRefreshSheetsList: () -> Unit,
+    phrases: List<QuickPhrase>,
+    editingPhrase: QuickPhrase?,
+    onAddPhrase: () -> Unit,
+    onEditPhrase: (QuickPhrase) -> Unit,
+    onDeletePhrase: (QuickPhrase) -> Unit,
+    onSavePhraseEdit: (title: String, text: String, color: String?) -> Boolean,
+    onCancelPhraseEdit: () -> Unit,
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
     onStopChat: () -> Unit,
@@ -117,6 +125,13 @@ internal fun InsertStringsContent(
                         onTestSheetsConnection = onTestSheetsConnection,
                         onSaveSheetsSettings = onSaveSheetsSettings,
                         onRefreshSheetsList = onRefreshSheetsList,
+                        phrases = phrases,
+                        editingPhrase = editingPhrase,
+                        onAddPhrase = onAddPhrase,
+                        onEditPhrase = onEditPhrase,
+                        onDeletePhrase = onDeletePhrase,
+                        onSavePhraseEdit = onSavePhraseEdit,
+                        onCancelPhraseEdit = onCancelPhraseEdit,
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )
@@ -136,6 +151,7 @@ internal fun InsertStringsContent(
                         onCloseContext = onCloseContext,
                         showContextPopup = showContextPopup,
                         chatContextText = chatContextText,
+                        quickPhrases = phrases,
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )

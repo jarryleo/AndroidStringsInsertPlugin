@@ -31,6 +31,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.ai.ChatMessage
+import cn.jarryleo.insert_strings.phrases.QuickPhrase
 
 @Composable
 fun AiChatContent(
@@ -52,6 +53,13 @@ fun AiChatContent(
     colors: IdeColors,
     showHeader: Boolean = true,
     showQuickPhrases: Boolean = true,
+    /**
+     * 快捷短语列表。
+     * - 与 [showQuickPhrases] 配合:showQuickPhrases = true 时才渲染;
+     * - 列表为空时不显示该区域,避免空 UI 占用空间。
+     * - 元素的 [QuickPhrase.color] 控制按钮的文字着色(便于分辨不同类别的快捷短语)。
+     */
+    quickPhrases: List<QuickPhrase> = emptyList(),
     showEnterHint: Boolean = true,
     /**
      * 消息列表内部的 contentPadding。弹框等紧凑场景可传较小值(如 4.dp),
@@ -75,6 +83,7 @@ fun AiChatContent(
             colors = colors,
             showHeader = showHeader,
             showQuickPhrases = showQuickPhrases,
+            quickPhrases = quickPhrases,
             showEnterHint = showEnterHint,
             messageListContentPadding = messageListContentPadding,
         )
@@ -104,6 +113,7 @@ private fun AiChatBody(
     colors: IdeColors,
     showHeader: Boolean = true,
     showQuickPhrases: Boolean = true,
+    quickPhrases: List<QuickPhrase> = emptyList(),
     showEnterHint: Boolean = true,
     messageListContentPadding: PaddingValues = PaddingValues(8.dp),
 ) {
@@ -215,29 +225,21 @@ private fun AiChatBody(
             }
         }
         Spacer(Modifier.height(8.dp))
-        if (showQuickPhrases) {
-            val quickPhrases = remember {
-                listOf(
-                    "帮我检查表格全部的翻译",
-                    "帮我修正完善表格全部翻译",
-                    "帮我检查选择的翻译是否有误",
-                    "帮我补全和修正选中的翻译",
-                    "帮我把选中的翻译插入表格",
-                    "帮我从表格读取选中的翻译并插入文件",
-                )
-            }
-
+        if (showQuickPhrases && quickPhrases.isNotEmpty()) {
+            // 快捷短语以按钮形式展示,点击即把 phrase.text 作为用户消息发送。
+            // 颜色从 phrase.color 解析,失败/null 沿用 IDE 主题色。
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
                 verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
                 quickPhrases.forEach { phrase ->
+                    val textColor = phrase.toColorOrNull() ?: colors.text
                     CompactButton(
-                        text = phrase,
-                        onClick = { onQuickSend(phrase) },
+                        text = phrase.title,
+                        onClick = { onQuickSend(phrase.text) },
                         enabled = !chatSending,
-                        colors = colors,
+                        colors = colors.copy(text = textColor),
                     )
                 }
             }

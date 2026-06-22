@@ -15,9 +15,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.ai.AiProtocol
+import cn.jarryleo.insert_strings.phrases.QuickPhrase
 
 enum class SettingsTab {
-    AI, SHEETS, DEBUG
+    AI, SHEETS, QUICK_PHRASES, DEBUG
 }
 
 @Composable
@@ -47,6 +48,13 @@ fun SettingsContent(
     onTestSheetsConnection: () -> Unit,
     onSaveSheetsSettings: () -> Unit,
     onRefreshSheetsList: () -> Unit,
+    phrases: List<QuickPhrase>,
+    editingPhrase: QuickPhrase?,
+    onAddPhrase: () -> Unit,
+    onEditPhrase: (QuickPhrase) -> Unit,
+    onDeletePhrase: (QuickPhrase) -> Unit,
+    onSavePhraseEdit: (title: String, text: String, color: String?) -> Boolean,
+    onCancelPhraseEdit: () -> Unit,
     modifier: Modifier = Modifier,
     colors: IdeColors,
 ) {
@@ -93,6 +101,13 @@ fun SettingsContent(
                 colors = colors,
             )
             SettingsTabButton(
+                text = "Quick Phrases",
+                selected = selectedTab == SettingsTab.QUICK_PHRASES,
+                onClick = { onTabChange(SettingsTab.QUICK_PHRASES) },
+                modifier = Modifier.weight(1f),
+                colors = colors,
+            )
+            SettingsTabButton(
                 text = "Debug",
                 selected = selectedTab == SettingsTab.DEBUG,
                 onClick = { onTabChange(SettingsTab.DEBUG) },
@@ -129,6 +144,17 @@ fun SettingsContent(
                 onTestConnection = onTestSheetsConnection,
                 onSave = onSaveSheetsSettings,
                 onRefreshSheets = onRefreshSheetsList,
+                modifier = Modifier.fillMaxSize(),
+                colors = colors,
+            )
+            SettingsTab.QUICK_PHRASES -> QuickPhrasesContent(
+                phrases = phrases,
+                editing = editingPhrase,
+                onAdd = onAddPhrase,
+                onEdit = onEditPhrase,
+                onDelete = onDeletePhrase,
+                onSaveEdit = onSavePhraseEdit,
+                onCancelEdit = onCancelPhraseEdit,
                 modifier = Modifier.fillMaxSize(),
                 colors = colors,
             )

@@ -10,6 +10,7 @@ import cn.jarryleo.insert_strings.InsertStringsManager
 import cn.jarryleo.insert_strings.UiCallback
 import cn.jarryleo.insert_strings.ai.AiProtocol
 import cn.jarryleo.insert_strings.ai.ChatMessage
+import cn.jarryleo.insert_strings.phrases.QuickPhrase
 import cn.jarryleo.insert_strings.sheets.SheetsManager
 import cn.jarryleo.insert_strings.xml.ContextManager
 import cn.jarryleo.insert_strings.xml.KeyedStringsInfo
@@ -74,6 +75,18 @@ class InsertStringsUI(
     override val sheetsAvailableSheets = mutableStateListOf<SheetsManager.SheetInfo>()
     internal var sheetsListStatus by mutableStateOf("")
 
+    // ============== 快捷短语 state ==============
+    /**
+     * 已保存的快捷短语列表(应用级持久化)。
+     * 在 tool window 打开时由 [InsertStringsPhrasesController.loadPhrases] 加载。
+     */
+    internal val quickPhrases = mutableStateListOf<QuickPhrase>()
+    /**
+     * 当前正在行内编辑的短语(null 表示列表模式)。
+     * 编辑态下,原行就地展开为编辑表单;Save 落库或 Cancel 丢弃。
+     */
+    internal var editingPhrase: QuickPhrase? by mutableStateOf(null)
+
     // ============== Chat state ==============
     override val chatMessages = mutableStateListOf<ChatMessage>()
     override var chatInput by mutableStateOf("")
@@ -101,6 +114,8 @@ class InsertStringsUI(
     internal lateinit var actionsController: InsertStringsActionsController
         private set
     internal lateinit var settingsController: InsertStringsSettingsController
+        private set
+    internal lateinit var phrasesController: InsertStringsPhrasesController
         private set
     internal lateinit var stringsOpsController: InsertStringsStringsOpsController
         private set
@@ -161,6 +176,13 @@ class InsertStringsUI(
                     onTestSheetsConnection = settingsController::testSheetsConnection,
                     onSaveSheetsSettings = settingsController::saveSheetsSettings,
                     onRefreshSheetsList = settingsController::refreshSheetsList,
+                    phrases = quickPhrases,
+                    editingPhrase = editingPhrase,
+                    onAddPhrase = phrasesController::beginAdd,
+                    onEditPhrase = phrasesController::beginEdit,
+                    onDeletePhrase = phrasesController::delete,
+                    onSavePhraseEdit = phrasesController::saveEdit,
+                    onCancelPhraseEdit = phrasesController::cancelEdit,
                     onChatInputChange = { chatInput = it },
                     onSendChat = chatDriver::sendChat,
                     onStopChat = chatDriver::stopChat,
@@ -188,6 +210,7 @@ class InsertStringsUI(
         // 2) 加载持久化设置
         settingsController.loadAiSettings()
         settingsController.loadSheetsSettings()
+        phrasesController.loadPhrases()
 
         // 3) 拉取默认表格的工作表列表
         settingsController.refreshSheetsList()
@@ -199,6 +222,7 @@ class InsertStringsUI(
     private fun wireCollaborators() {
         actionsController = InsertStringsActionsController(this)
         settingsController = InsertStringsSettingsController(this)
+        phrasesController = InsertStringsPhrasesController(this)
         stringsOpsController = InsertStringsStringsOpsController(this)
         sheetsOpsController = InsertStringsSheetsOpsController(this)
         chatContextBuilder = InsertStringsChatContextBuilder(this)
