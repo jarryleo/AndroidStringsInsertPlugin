@@ -35,7 +35,7 @@ class InsertStringsManager(private val project: Project) {
     private var uiCallBack: UiCallback? = null
 
     init {
-        ContextManager.initContextInfo(project)
+        ContextManager.getInstance(project).initContextInfo()
     }
 
     fun setUiCallBack(uiCallBack: UiCallback) {
@@ -67,7 +67,7 @@ class InsertStringsManager(private val project: Project) {
         moduleName: String,
         translationsPerKey: Map<String, Map<String, String>>
     ) {
-        val moduleStringsInfo = ContextManager.getModuleStringsInfo(project, moduleName)
+        val moduleStringsInfo = ContextManager.getInstance(project).getModuleStringsInfo(moduleName)
         StringsWriter(
             project,
             translationsPerKey.keys.toList(),

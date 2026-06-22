@@ -61,8 +61,9 @@ class AskAiAction : AnAction() {
         }
 
         val currentFile = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: editor.virtualFile
-        ContextManager.ensureInitialized(project)
-        ContextManager.updateCurrentModule(project, currentFile)
+        val context = ContextManager.getInstance(project)
+        context.ensureInitialized()
+        context.updateCurrentModule(currentFile)
 
         showChatDialog(editor, project, selectedText)
     }

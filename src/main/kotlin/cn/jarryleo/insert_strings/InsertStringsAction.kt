@@ -26,8 +26,9 @@ class InsertStringsAction : AnAction() {
         if (xml) {
             val entries = stringsScanner.getMultiKeyStringsInfoList()
             val currentFile = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: e.getData(CommonDataKeys.EDITOR)?.virtualFile
-            ContextManager.ensureInitialized(project)
-            ContextManager.updateCurrentModule(project, currentFile)
+            val context = ContextManager.getInstance(project)
+            context.ensureInitialized()
+            context.updateCurrentModule(currentFile)
             InsertStringsManager.updateUI(project, entries)
             ToolWindowManager.getInstance(project)
                 .getToolWindow("InsertStrings")

@@ -22,7 +22,7 @@ internal class InsertStringsChatContextBuilder(
     }
 
     fun build(): String {
-        val contextInfo = ContextManager.contextInfo ?: return ""
+        val contextInfo = ContextManager.getInstance(state.project).contextInfo ?: return ""
         // 基础集合:优先用用户在表格里选中的语言,否则用 currentModule 的 xmlFiles。
         // 始终把默认英语 "values" 包含进去,避免用户没选英语行时 AI 漏写 English,
         // 进而让 StringsWriter 把 values/strings.xml 写成空文本。

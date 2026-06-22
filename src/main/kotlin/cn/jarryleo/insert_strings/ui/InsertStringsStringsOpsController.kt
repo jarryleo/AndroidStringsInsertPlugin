@@ -31,7 +31,8 @@ internal class InsertStringsStringsOpsController(
         currentModuleName: String?,
         moduleWithMostLinesName: String?
     ): String? {
-        val contextInfo = ContextManager.contextInfo
+        val context = ContextManager.getInstance(project)
+        val contextInfo = context.contextInfo
         val projectName = contextInfo?.projectName
         val realModuleNames = contextInfo?.modules?.map { it.moduleName }?.toSet().orEmpty()
         val actionModuleSanitized = actionModule?.trim()?.takeIf { it.isNotBlank() }?.let { candidate ->
@@ -40,7 +41,7 @@ internal class InsertStringsStringsOpsController(
             } else if (candidate in realModuleNames) {
                 candidate
             } else {
-                ContextManager.resolveDisplayModuleName(project, candidate)
+                context.resolveDisplayModuleName(candidate)
             }
         }
         return actionModuleSanitized
@@ -49,10 +50,12 @@ internal class InsertStringsStringsOpsController(
     }
 
     fun runQueryKeys(action: AiAction.QueryKeys): String {
+        val context = ContextManager.getInstance(project)
+        val contextInfo = context.contextInfo
         val moduleName = resolveTargetModule(
             action.module,
-            ContextManager.contextInfo?.currentModule?.moduleName,
-            ContextManager.contextInfo?.moduleWithMostLines?.moduleName
+            contextInfo?.currentModule?.moduleName,
+            contextInfo?.moduleWithMostLines?.moduleName
         ) ?: return "[工具执行结果] 类型:query_keys 状态:失败 信息:未指定目标模块且无 currentModule"
 
         val results: List<KeySearchResult>
@@ -100,10 +103,12 @@ internal class InsertStringsStringsOpsController(
     }
 
     fun runReadString(action: AiAction.ReadString): String {
+        val context = ContextManager.getInstance(project)
+        val contextInfo = context.contextInfo
         val moduleName = resolveTargetModule(
             action.module,
-            ContextManager.contextInfo?.currentModule?.moduleName,
-            ContextManager.contextInfo?.moduleWithMostLines?.moduleName
+            contextInfo?.currentModule?.moduleName,
+            contextInfo?.moduleWithMostLines?.moduleName
         ) ?: return "[工具执行结果] 类型:read_string 状态:失败 信息:未指定目标模块"
         val result = StringsService.readKey(project, moduleName, action.name)
             ?: return "[工具执行结果] 类型:read_string key:${action.name} 模块:$moduleName 状态:失败 信息:模块不存在或没有 strings.xml"
@@ -123,10 +128,12 @@ internal class InsertStringsStringsOpsController(
     }
 
     fun runUpdateString(action: AiAction.UpdateString): String {
+        val context = ContextManager.getInstance(project)
+        val contextInfo = context.contextInfo
         val moduleName = resolveTargetModule(
             action.module,
-            ContextManager.contextInfo?.currentModule?.moduleName,
-            ContextManager.contextInfo?.moduleWithMostLines?.moduleName
+            contextInfo?.currentModule?.moduleName,
+            contextInfo?.moduleWithMostLines?.moduleName
         ) ?: return "[工具执行结果] 类型:update_string 状态:失败 信息:未指定目标模块"
         val results = StringsService.updateKey(project, moduleName, action.name, action.translations)
         val successCount = results.values.count { it == "成功" }
@@ -147,10 +154,12 @@ internal class InsertStringsStringsOpsController(
     }
 
     fun runDeleteString(action: AiAction.DeleteString): String {
+        val context = ContextManager.getInstance(project)
+        val contextInfo = context.contextInfo
         val moduleName = resolveTargetModule(
             action.module,
-            ContextManager.contextInfo?.currentModule?.moduleName,
-            ContextManager.contextInfo?.moduleWithMostLines?.moduleName
+            contextInfo?.currentModule?.moduleName,
+            contextInfo?.moduleWithMostLines?.moduleName
         ) ?: return "[工具执行结果] 类型:delete_string 状态:失败 信息:未指定目标模块"
         val results = StringsService.deleteKey(project, moduleName, action.name, action.languages)
         val successCount = results.values.count { it == "成功" }
@@ -180,7 +189,7 @@ internal class InsertStringsStringsOpsController(
     private fun refreshKeyEntryAfterDelete(moduleName: String, key: String) {
         val idx = state.keyEntries.indexOfFirst { it.key == key }
         if (idx < 0) return
-        val updated = ContextManager.scanModuleForKey(project, moduleName, key)
+        val updated = ContextManager.getInstance(project).scanModuleForKey(moduleName, key)
         state.keyEntries[idx] = cn.jarryleo.insert_strings.xml.KeyedStringsInfo(key, "", updated)
         if (state.selectedKeyIndex == idx) {
             state.updateRowsForSelectedKey()

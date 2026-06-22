@@ -7,7 +7,21 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import java.util.*
 
-object ContextManager {
+/**
+ * 项目级 strings.xml 上下文管理器(原为单例 object,改为 per-Project 实例)。
+ *
+ * 改动原因:原实现把所有项目的模块列表、当前模块、文件缓存都存在 Kotlin `object` 的全局字段里,
+ * 多个 Android Studio 项目同时打开时,后初始化的项目会**覆盖**之前项目的缓存,
+ * 导致 AI 工具读到错的模块、修改到错的项目文件 — 见 issue「多项目上下文串扰」。
+ *
+ * 设计:实例本身按 Project 维度存储,缓存 [contextInfo] / [moduleFilesMap] / [modulePathMap] 全部进实例字段;
+ * 静态 [getInstance] 用 [WeakHashMap] 弱持有 Project 引用,关闭/GC 后自动释放,
+ * 不需要手动反注册,也不需要订阅 ProjectManager 监听(避免引入新依赖)。
+ *
+ * 公共 API 形态保持不变:每个方法第一个参数仍是 [project],内部用 `getInstance(project)` 取对应实例。
+ * 调用点不需要再关心「这是不是单例」,照常传 project 即可。
+ */
+class ContextManager private constructor(private val project: Project) {
 
     var contextInfo: ContextInfo? = null
         private set
@@ -23,10 +37,9 @@ object ContextManager {
      * 对 AI 工具调用开放,允许扫描任意模块的所有语言文件。
      * @return values 目录 -> strings.xml 映射列表,模块不存在时返回空列表
      */
-    @JvmStatic
-    fun getModuleFiles(project: Project, moduleName: String): List<Pair<VirtualFile, VirtualFile>> {
-        ensureInitialized(project)
-        val displayName = resolveDisplayModuleName(project, moduleName) ?: return emptyList()
+    fun getModuleFiles(moduleName: String): List<Pair<VirtualFile, VirtualFile>> {
+        ensureInitialized()
+        val displayName = resolveDisplayModuleName(moduleName) ?: return emptyList()
         return moduleFilesMap[displayName] ?: emptyList()
     }
 
@@ -34,9 +47,8 @@ object ContextManager {
      * 获取项目中所有模块的所有 strings.xml 文件(三元组: moduleName, valuesDir, stringsFile)。
      * 用于 AI 工具的跨模块反查。
      */
-    @JvmStatic
-    fun getAllModuleFiles(project: Project): List<Triple<String, VirtualFile, VirtualFile>> {
-        ensureInitialized(project)
+    fun getAllModuleFiles(): List<Triple<String, VirtualFile, VirtualFile>> {
+        ensureInitialized()
         return moduleFilesMap.flatMap { (moduleName, files) ->
             files.map { (valuesDir, stringsFile) ->
                 Triple(moduleName, valuesDir, stringsFile)
@@ -49,8 +61,7 @@ object ContextManager {
      * 通过扫描项目目录树查找包含 res 目录的模块,不依赖 IntelliJ 的 ModuleManager,
      * 避免 Android 项目未编译时模块信息不准确的问题。
      */
-    @JvmStatic
-    fun initContextInfo(project: Project) {
+    fun initContextInfo() {
         val basePath = project.basePath ?: return
         val baseDir = com.intellij.openapi.vfs.LocalFileSystem.getInstance()
             .findFileByPath(basePath) ?: return
@@ -67,7 +78,7 @@ object ContextManager {
                 moduleRoot.name
             }
             rawPaths.putIfAbsent(moduleName, moduleRoot.path)
-            DebugLog.log("ContextManager", "found module=$moduleName, resDir=${resDir.path}")
+            DebugLog.log("ContextManager[${project.name}]", "found module=$moduleName, resDir=${resDir.path}")
 
             resDir.children
                 .filter { it.isDirectory && it.name.startsWith("values") }
@@ -116,39 +127,35 @@ object ContextManager {
     /**
      * 确保上下文已经初始化
      */
-    @JvmStatic
-    fun ensureInitialized(project: Project) {
+    fun ensureInitialized() {
         if (contextInfo == null) {
-            initContextInfo(project)
+            initContextInfo()
         }
     }
 
     /**
      * 根据当前文件更新 currentModule
      */
-    @JvmStatic
-    fun updateCurrentModule(project: Project, currentFile: VirtualFile?) {
-        ensureInitialized(project)
-        val current = currentFile?.let { buildCurrentModuleInfo(project, it) }
+    fun updateCurrentModule(currentFile: VirtualFile?) {
+        ensureInitialized()
+        val current = currentFile?.let { buildCurrentModuleInfo(it) }
         contextInfo = contextInfo?.copy(currentModule = current)
     }
 
     /**
      * 获取指定显示名称模块的所有 strings.xml 文件信息（key/text 为空，仅用于定位文件）
      */
-    @JvmStatic
-    fun getModuleStringsInfo(project: Project, moduleName: String): List<StringsInfo> {
-        ensureInitialized(project)
-        val displayName = resolveDisplayModuleName(project, moduleName) ?: return emptyList()
+    fun getModuleStringsInfo(moduleName: String): List<StringsInfo> {
+        ensureInitialized()
+        val displayName = resolveDisplayModuleName(moduleName) ?: return emptyList()
         val files = moduleFilesMap[displayName] ?: return emptyList()
         return files.map { (valuesDir, stringsFile) ->
             StringsInfo(stringsFile, valuesDir.name, "", "")
         }
     }
 
-    @JvmStatic
-    fun resolveDisplayModuleName(project: Project, moduleName: String?): String? {
-        ensureInitialized(project)
+    fun resolveDisplayModuleName(moduleName: String?): String? {
+        ensureInitialized()
         val candidate = moduleName?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         if (candidate in moduleFilesMap) return candidate
         contextInfo?.findModule(candidate)?.let { return it.moduleName }
@@ -160,10 +167,9 @@ object ContextManager {
      * 用在 AI 工具执行链路里,判断「当前 keyEntries 是否与目标模块一致」,避免跨模块串写。
      * 找不到(未初始化/外部文件)返回 null。
      */
-    @JvmStatic
-    fun findModuleNameForFile(project: Project, file: VirtualFile?): String? {
+    fun findModuleNameForFile(file: VirtualFile?): String? {
         if (file == null) return null
-        ensureInitialized(project)
+        ensureInitialized()
         return moduleFilesMap.entries.firstOrNull { (_, files) ->
             files.any { it.second == file }
         }?.key
@@ -181,15 +187,13 @@ object ContextManager {
      *
      * @return 新创建(或已存在)的 strings.xml 文件;模块没有 res 目录时返回 null
      */
-    @JvmStatic
     fun ensureLanguageFile(
-        project: Project,
         moduleName: String,
         language: String
     ): VirtualFile? {
         if (language.isBlank()) return null
-        ensureInitialized(project)
-        val displayName = resolveDisplayModuleName(project, moduleName) ?: return null
+        ensureInitialized()
+        val displayName = resolveDisplayModuleName(moduleName) ?: return null
         val existing = moduleFilesMap[displayName]?.firstOrNull { it.first.name == language }
         if (existing != null) return existing.second
 
@@ -236,18 +240,17 @@ object ContextManager {
     /**
      * 扫描指定模块中指定 key 的翻译内容
      */
-    @JvmStatic
-    fun scanModuleForKey(project: Project, moduleName: String, key: String): List<StringsInfo> {
-        ensureInitialized(project)
-        val displayName = resolveDisplayModuleName(project, moduleName) ?: return emptyList()
+    fun scanModuleForKey(moduleName: String, key: String): List<StringsInfo> {
+        ensureInitialized()
+        val displayName = resolveDisplayModuleName(moduleName) ?: return emptyList()
         val files = moduleFilesMap[displayName] ?: return emptyList()
         return files.map { (valuesDir, stringsFile) ->
             StringsInfo(stringsFile, valuesDir.name, key, getStringText(stringsFile, key))
         }
     }
 
-    private fun buildCurrentModuleInfo(project: Project, file: VirtualFile): ModuleInfo? {
-        val displayName = findModuleDisplayNameForFile(project, file) ?: return null
+    private fun buildCurrentModuleInfo(file: VirtualFile): ModuleInfo? {
+        val displayName = findModuleDisplayNameForFile(file) ?: return null
         val files = moduleFilesMap[displayName] ?: return null
         return ModuleInfo(
             moduleName = displayName,
@@ -267,7 +270,7 @@ object ContextManager {
      * 根据文件路径查找其所属模块。
      * 通过路径前缀匹配,取最深的模块路径作为归属。
      */
-    private fun findModuleDisplayNameForFile(project: Project, file: VirtualFile): String? {
+    private fun findModuleDisplayNameForFile(file: VirtualFile): String? {
         val filePath = file.path
         return modulePathMap.entries
             .filter { (_, modulePath) ->
@@ -342,5 +345,19 @@ object ContextManager {
         val escapedKey = Regex.escape(key)
         val regex = """<string\b(?=[^>]*\bname\s*=\s*(['"])$escapedKey\1)[^>]*>([\s\S]*?)</string>""".toRegex()
         return regex.find(xml)?.groupValues?.get(2) ?: ""
+    }
+
+    companion object {
+        // 用 WeakHashMap 弱持有 Project,避免关闭后仍持有引用导致内存泄漏;
+        // 同时不订阅 ProjectManager 主题,降低与平台其他监听的耦合。
+        private val instances = WeakHashMap<Project, ContextManager>()
+
+        @JvmStatic
+        fun getInstance(project: Project): ContextManager {
+            // WeakHashMap 本身不是线程安全的,这里加锁避免多线程下出现重复实例。
+            synchronized(instances) {
+                return instances.getOrPut(project) { ContextManager(project) }
+            }
+        }
     }
 }

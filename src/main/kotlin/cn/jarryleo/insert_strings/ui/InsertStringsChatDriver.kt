@@ -672,8 +672,9 @@ internal class InsertStringsChatDriver(
 
     private fun normalizeExplicitWriteModule(moduleName: String?): String? {
         val candidate = moduleName?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-        if (candidate == ContextManager.contextInfo?.projectName) return null
-        return ContextManager.resolveDisplayModuleName(project, candidate) ?: candidate
+        val context = ContextManager.getInstance(project)
+        if (candidate == context.contextInfo?.projectName) return null
+        return context.resolveDisplayModuleName(candidate) ?: candidate
     }
 
     /**
@@ -1221,7 +1222,7 @@ internal class InsertStringsChatDriver(
             continueToolLoopInBackground(context, iteration + 1)
             return
         }
-        val contextInfo = ContextManager.contextInfo
+        val contextInfo = ContextManager.getInstance(project).contextInfo
         val currentModuleName = contextInfo?.currentModule?.moduleName
         val moduleWithMostLines = contextInfo?.moduleWithMostLines
         val moduleList = contextInfo?.modules?.map { it.moduleName }
@@ -1280,14 +1281,15 @@ internal class InsertStringsChatDriver(
         // 这是修复「values 写到别的模块」的关键 — targetModule 没有 values/ 时,直接建一个,
         // 所有语言落在同一模块,不会再让用户看到 values 在 module A、其它语言在 module B。
         val allLanguagesNeeded = (actions.flatMap { it.translations.keys } + DEFAULT_LANGUAGE).toSet()
+        val contextMgr = ContextManager.getInstance(project)
         allLanguagesNeeded.forEach { lang ->
             if (!lang.startsWith("values")) return@forEach
-            ContextManager.ensureLanguageFile(project, batchModule, lang)
+            contextMgr.ensureLanguageFile(batchModule, lang)
         }
 
         val results = actions.map { action ->
             val targetModule = batchModule
-            val moduleStringsInfo = ContextManager.getModuleStringsInfo(project, targetModule)
+            val moduleStringsInfo = contextMgr.getModuleStringsInfo(targetModule)
             if (moduleStringsInfo.isEmpty()) {
                 state.showToast("Module $targetModule has no strings.xml")
                 return@map "模块 $targetModule 没有 strings.xml 或缺少 res/ 目录" to false
@@ -1296,7 +1298,7 @@ internal class InsertStringsChatDriver(
             // 以 batchModule 现有翻译为底,AI 没写的语言不覆盖(避免漏写时把已有翻译清空)。
             // 注意:此处只对「已存在的 key」保留翻译;对新增 key 来说,scanModuleForKey 全部返回空串,
             // 等价于空白底,行为与之前一致。
-            val existingInfo = ContextManager.scanModuleForKey(project, targetModule, action.name)
+            val existingInfo = contextMgr.scanModuleForKey(targetModule, action.name)
             val existingTranslations = existingInfo.associate { it.language to it.text }
             val merged = existingTranslations.toMutableMap()
             merged.putAll(action.translations)
@@ -1318,7 +1320,7 @@ internal class InsertStringsChatDriver(
             KeyedStringsInfo(
                 action.name,
                 "",
-                ContextManager.scanModuleForKey(project, batchModule, action.name)
+                contextMgr.scanModuleForKey(batchModule, action.name)
             )
         }
         state.insertStringsManager.updateUI(allEntries)

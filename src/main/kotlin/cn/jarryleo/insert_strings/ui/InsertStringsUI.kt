@@ -180,7 +180,7 @@ class InsertStringsUI(
         this.project = project
         insertStringsManager = InsertStringsManager.getInstance(project)
         val currentFile = FileEditorManager.getInstance(project).selectedEditor?.file
-        ContextManager.updateCurrentModule(project, currentFile)
+        ContextManager.getInstance(project).updateCurrentModule(currentFile)
 
         // 1) 装配协作类(状态 binding 必须先于任何调用)
         wireCollaborators()

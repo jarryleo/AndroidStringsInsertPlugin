@@ -65,7 +65,7 @@ object StringsService {
         if (!includeTranslations) {
             return page.map { KeySearchResult(it, emptyMap(), "") }
         }
-        val files = ContextManager.getModuleFiles(project, moduleName)
+        val files = ContextManager.getInstance(project).getModuleFiles(moduleName)
         return page.map { key ->
             val translations = files.associate { (valuesDir, stringsFile) ->
                 valuesDir.name to getStringText(stringsFile, key)
@@ -83,7 +83,7 @@ object StringsService {
         key: String
     ): KeyReadResult? {
         if (key.isEmpty()) return null
-        val files = ContextManager.getModuleFiles(project, moduleName)
+        val files = ContextManager.getInstance(project).getModuleFiles(moduleName)
         if (files.isEmpty()) return null
         val translations = files.associate { (valuesDir, stringsFile) ->
             valuesDir.name to getStringText(stringsFile, key)
@@ -110,7 +110,7 @@ object StringsService {
     ): Map<String, String> {
         if (key.isEmpty()) return mapOf("" to "失败: key 为空")
         if (translations.isEmpty()) return mapOf("" to "失败: translations 为空,未提供任何语言")
-        val files = ContextManager.getModuleFiles(project, moduleName)
+        val files = ContextManager.getInstance(project).getModuleFiles(moduleName)
         if (files.isEmpty()) {
             return mapOf("" to "失败: 模块 '$moduleName' 不存在或没有 strings.xml")
         }
@@ -145,7 +145,7 @@ object StringsService {
         languages: List<String> = emptyList()
     ): Map<String, String> {
         if (key.isEmpty()) return mapOf("" to "失败: key 为空")
-        val files = ContextManager.getModuleFiles(project, moduleName)
+        val files = ContextManager.getInstance(project).getModuleFiles(moduleName)
         if (files.isEmpty()) {
             return mapOf("" to "失败: 模块 '$moduleName' 不存在或没有 strings.xml")
         }
@@ -189,13 +189,14 @@ object StringsService {
         val matcher = buildMatcher(text, matchType, caseSensitive) ?: return emptyList()
 
         // 收集要扫描的 (valuesDir, stringsFile, moduleName) 三元组
+        val context = ContextManager.getInstance(project)
         val targets: List<Triple<String, VirtualFile, String>> = run {
             if (moduleName != null) {
-                ContextManager.getModuleFiles(project, moduleName).map { (valuesDir, file) ->
+                context.getModuleFiles(moduleName).map { (valuesDir, file) ->
                     Triple(valuesDir.name, file, moduleName)
                 }
             } else {
-                ContextManager.getAllModuleFiles(project).map { (mod, valuesDir, file) ->
+                context.getAllModuleFiles().map { (mod, valuesDir, file) ->
                     Triple(valuesDir.name, file, mod)
                 }
             }
@@ -274,7 +275,7 @@ object StringsService {
         project: Project,
         moduleName: String
     ): VirtualFile? {
-        val files = ContextManager.getModuleFiles(project, moduleName)
+        val files = ContextManager.getInstance(project).getModuleFiles(moduleName)
         return files.firstOrNull { it.first.name == "values" }?.second
             ?: files.firstOrNull()?.second
     }
