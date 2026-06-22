@@ -574,6 +574,156 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
     }
 
     /**
+     * 流式版本的 chat。
+     *
+     * 与 [chat] 区别:向 OpenAI / Anthropic 发起 stream=true 请求,
+     * 解析 SSE 事件流,每当累积到一段新的 assistant 文本就通过 [onPartialText] 回调推给调用方。
+     * 调用方负责把增量文本转 EDT 后更新 UI,实现「打字机」效果,降低体感延迟。
+     *
+     * 回调约定:
+     * - [onPartialText] 跑在**后台线程**(发请求的池化线程),每次有新 token 累计进来就触发一次,
+     *   参数是「到目前为止的完整 assistant 文本」(不是 delta)。
+     *   实现里应做去抖/节流(本函数内部已经按行+去 delta 推送,粒度较细;若调用方发现仍太密可自行节流)。
+     * - [onPartialText] 可能被调用 0 次(模型只返回 tool_calls,没有文字)。
+     * - 流结束后返回完整的 [AiReply](含 toolCalls / failedToolCalls),
+     *   与非流式 [chat] 行为一致,可直接复用下游分发逻辑。
+     *
+     * 错误处理:任何 HTTP 错误 / 解析异常,都通过返回的 [AiReply].reply 暴露错误文案,
+     *   并继续走完整流程(不抛异常),保证 driver 层不用 try/catch 包装。
+     * 取消:调用方应通过 [stopRequested] 之类机制在外部取消;本函数不支持中途打断。
+     *
+     * @return 与 [chat] 同型的 [AiReply];若中途出错 reply 字段含错误描述。
+     */
+    @JvmStatic
+    fun chatStream(
+        messages: List<ChatMessage>,
+        context: String = "",
+        onPartialText: (String) -> Unit
+    ): AiReply {
+        val settings = AiSettingsService.getInstance().state
+        val protocol = AiProtocol.fromName(settings.protocol)
+        val endpoint = AiEndpoint.completeChatEndpoint(settings.url, protocol)
+        val model = settings.model.trim()
+        val apiKey = settings.apiKey.trim()
+
+        if (settings.url.isBlank()) return AiReply("Please configure the AI URL first.", emptyList())
+        if (apiKey.isBlank()) return AiReply("Please configure the AI API key first.", emptyList())
+        if (model.isBlank()) return AiReply("Please configure the AI model first.", emptyList())
+
+        return runCatching {
+            val body = when (protocol) {
+                AiProtocol.OPENAI -> openAiChatBody(model, messages, context, stream = true)
+                AiProtocol.ANTHROPIC -> anthropicChatBody(model, messages, context, stream = true)
+            }
+            val request = HttpRequest.newBuilder(URI.create(endpoint))
+                .timeout(Duration.ofSeconds(120))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .applyAuthHeaders(protocol, apiKey)
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build()
+            val response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream())
+            if (response.statusCode() !in 200..299) {
+                // 非 2xx 时 body 是普通 JSON,按 error 格式读
+                val errBody = response.body().readBytes().toString(Charsets.UTF_8)
+                response.body().close()
+                throw IllegalStateException("HTTP ${response.statusCode()}: ${errBody.limitForMessage()}")
+            }
+            val stream = response.body()
+            try {
+                val text = StringBuilder()
+                val parser = SseStreamParser(protocol) { deltaText ->
+                    if (deltaText.isNotEmpty()) {
+                        text.append(deltaText)
+                        onPartialText(text.toString())
+                    }
+                }
+                parser.parse(stream)
+                // 流结束后把累积的内容合成一个标准响应 JSON,复用 parseAiReply → toolCallToAction 全链路
+                val syntheticBody = when (protocol) {
+                    AiProtocol.OPENAI -> buildOpenAiSyntheticBody(text.toString(), parser.toolCalls)
+                    AiProtocol.ANTHROPIC -> buildAnthropicSyntheticBody(text.toString(), parser.toolCalls)
+                }
+                parseAiReply(syntheticBody)
+            } finally {
+                stream.close()
+            }
+        }.getOrElse {
+            AiReply(it.message ?: "AI chat failed.", emptyList())
+        }
+    }
+
+    /**
+     * 把流式累积的 OpenAI tool_call 片段组装成与 [openAiChatBody] 同型的完整响应 JSON,
+     * 供 [parseAiReply] 复用,避免为流式场景单独写一套 tool_call 解析逻辑。
+     */
+    private fun buildOpenAiSyntheticBody(
+        text: String,
+        streamedToolCalls: List<SseStreamParser.StreamedToolCall>
+    ): String {
+        val toolCallsArray = JsonArray().apply {
+            streamedToolCalls.forEach { tc ->
+                add(JsonObject().apply {
+                    addProperty("id", tc.id)
+                    addProperty("type", "function")
+                    add("function", JsonObject().apply {
+                        addProperty("name", tc.name)
+                        addProperty("arguments", tc.arguments)
+                    })
+                })
+            }
+        }
+        val message = JsonObject().apply {
+            addProperty("role", "assistant")
+            if (text.isNotEmpty()) addProperty("content", text)
+            if (toolCallsArray.size() > 0) add("tool_calls", toolCallsArray)
+        }
+        val choice = JsonObject().apply {
+            addProperty("index", 0)
+            add("message", message)
+            addProperty("finish_reason", "stop")
+        }
+        val root = JsonObject().apply {
+            add("choices", JsonArray().apply { add(choice) })
+        }
+        return root.toString()
+    }
+
+    /**
+     * 把流式累积的 Anthropic content block 组装成与 [anthropicChatBody] 同型的完整响应 JSON。
+     * text blocks 拼成单一 text block,tool_use blocks 保持原样。
+     */
+    private fun buildAnthropicSyntheticBody(
+        text: String,
+        streamedToolCalls: List<SseStreamParser.StreamedToolCall>
+    ): String {
+        val contentArray = JsonArray().apply {
+            if (text.isNotEmpty()) {
+                add(JsonObject().apply {
+                    addProperty("type", "text")
+                    addProperty("text", text)
+                })
+            }
+            streamedToolCalls.forEach { tc ->
+                add(JsonObject().apply {
+                    addProperty("type", "tool_use")
+                    addProperty("id", tc.id)
+                    addProperty("name", tc.name)
+                    add("input", runCatching {
+                        if (tc.arguments.isBlank()) JsonObject()
+                        else JsonParser.parseString(tc.arguments)
+                    }.getOrElse { JsonObject() })
+                })
+            }
+        }
+        val root = JsonObject().apply {
+            add("content", contentArray)
+            addProperty("stop_reason", if (streamedToolCalls.isNotEmpty()) "tool_use" else "end_turn")
+        }
+        return root.toString()
+    }
+
+    /**
      * 批量翻译审查/修正。使用独立的极简提示词与消息列表，不携带主聊天历史，
      * 以最小 token 完成对一段表格数据的检查或修正。
      *
@@ -757,10 +907,16 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         }
     }
 
-    private fun openAiChatBody(model: String, messages: List<ChatMessage>, context: String): String {
+    private fun openAiChatBody(
+        model: String,
+        messages: List<ChatMessage>,
+        context: String,
+        stream: Boolean = false
+    ): String {
         val root = JsonObject().apply {
             addProperty("model", model)
             add("tools", ToolDefinitions.openAiTools)
+            if (stream) addProperty("stream", true)
             add(
                 "messages",
                 JsonArray().apply {
@@ -781,7 +937,12 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         return root.toString()
     }
 
-    private fun anthropicChatBody(model: String, messages: List<ChatMessage>, context: String): String {
+    private fun anthropicChatBody(
+        model: String,
+        messages: List<ChatMessage>,
+        context: String,
+        stream: Boolean = false
+    ): String {
         val root = JsonObject().apply {
             addProperty("model", model)
             addProperty("max_tokens", 4096)
@@ -793,6 +954,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             }
             addProperty("system", systemParts)
             add("tools", ToolDefinitions.anthropicTools)
+            if (stream) addProperty("stream", true)
             add(
                 "messages",
                 JsonArray().apply { buildAnthropicMessages(messages).forEach { add(it) } }

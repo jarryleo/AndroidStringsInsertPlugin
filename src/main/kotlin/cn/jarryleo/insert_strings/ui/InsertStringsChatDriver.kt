@@ -238,46 +238,134 @@ internal class InsertStringsChatDriver(
             // invokeAndWait 异常不应阻塞 AI 调用,继续走原流程
         }
 
-        val reply: AiReply
-        try {
-            reply = AITranslator.chat(state.chatMessages.toList(), context)
+        // === 流式 AI 调用 ===
+        // 关键时序:
+        //  1) 在 EDT 上同步快照 chatMessages(此刻是「干净」的历史,不含本轮 assistant 占位),
+        //     并预占一条 assistant 空消息,拿到下标 placeholderIdx
+        //     (snapshot 必须在 EDT 上做,SnapshotStateList 在非 EDT 线程读可能拿到过期数据)
+        //  2) 后台线程发起 stream=true 请求,SSE 增量文本通过 onPartialText 回调
+        //     切到 EDT 实时更新 placeholderIdx 位置的消息 content
+        //  3) 流结束后用最终 AiReply(可能含 toolCalls)更新该消息的 toolCalls 字段,
+        //     然后继续走 processAiReply 分发
+        data class StreamSetup(val messages: List<ChatMessage>, val placeholderIdx: Int)
+        val setup: StreamSetup = try {
+            val captured = java.util.concurrent.atomic.AtomicReference<StreamSetup>()
+            SwingUtilities.invokeAndWait {
+                val snapshot = state.chatMessages.toList()
+                val newIdx = state.chatMessages.size
+                state.chatMessages.add(ChatMessage(role = "assistant", content = ""))
+                captured.set(StreamSetup(snapshot, newIdx))
+            }
+            captured.get() ?: return
+        } catch (e: Exception) {
+            // invokeAndWait 失败(中断/异常):退回非流式
+            val snapshot = state.chatMessages.toList()
+            val reply = runCatching { AITranslator.chat(snapshot, context) }
+                .getOrElse {
+                    SwingUtilities.invokeLater {
+                        state.chatMessages.add(
+                            ChatMessage(
+                                role = "assistant",
+                                content = "AI 请求失败:${it.message ?: "unknown"}"
+                            )
+                        )
+                        state.chatSending = false
+                    }
+                    return
+                }
+            finishWithReply(reply, context, iteration, snapshot, -1)
+            return
+        }
+        val messagesSnapshot = setup.messages
+        val placeholderIdx = setup.placeholderIdx
+
+        val reply: AiReply = try {
+            AITranslator.chatStream(
+                messages = messagesSnapshot,
+                context = context,
+                onPartialText = { fullText ->
+                    // 跑在后台线程,先做轻量 stop 检查
+                    if (state.stopRequested) return@chatStream
+                    // 把最新文本切回 EDT 写入 placeholder
+                    SwingUtilities.invokeLater {
+                        if (placeholderIdx < state.chatMessages.size) {
+                            val current = state.chatMessages[placeholderIdx]
+                            // 只在文本真的变化时赋值,避免重复触发 Compose recompose
+                            if (current.content != fullText) {
+                                state.chatMessages[placeholderIdx] = current.copy(content = fullText)
+                            }
+                        }
+                    }
+                }
+            )
         } catch (e: Exception) {
             SwingUtilities.invokeLater {
-                state.chatMessages.add(
-                    ChatMessage(
-                        role = "assistant",
-                        content = "AI 请求失败:${e.message ?: "unknown"}"
-                    )
-                )
+                if (placeholderIdx < state.chatMessages.size) {
+                    val current = state.chatMessages[placeholderIdx]
+                    val errText = "AI 请求失败:${e.message ?: "unknown"}"
+                    if (current.content.isEmpty()) {
+                        state.chatMessages[placeholderIdx] = current.copy(content = errText)
+                    }
+                }
                 state.chatSending = false
             }
             return
         }
 
-        // 用户在 AI 网络请求期间点击了 Stop:丢弃本次响应,不再处理 tool_calls,
+        // 用户在 AI 流式请求期间点击了 Stop:丢弃本次响应,不再处理 tool_calls,
         // 避免已请求到的 tool_use 在下次发送时因缺少 tool_result 而触发 Anthropic 报错。
         if (state.stopRequested) {
-            handleStoppedByUser()
+            handleStoppedByUserWithPlaceholder(placeholderIdx)
             return
         }
 
+        finishWithReply(reply, context, iteration, messagesSnapshot, placeholderIdx)
+    }
+
+    /**
+     * 把 AI 最终回复合并到流式生成的 placeholder 消息上,然后走 [processAiReply] 分发。
+     *
+     * @param reply             AI 最终回复(可能含 toolCalls / failedToolCalls)
+     * @param context           上下文 JSON
+     * @param iteration         tool loop 当前轮次
+     * @param messagesSnapshot  本轮请求时的消息快照(目前未使用,留作未来扩展)
+     * @param placeholderIdx    流式预占的 assistant 消息下标;非负表示流式分支,
+     *                          -1 表示非流式分支(直接 append 新消息)
+     */
+    private fun finishWithReply(
+        reply: AiReply,
+        context: String,
+        iteration: Int,
+        @Suppress("UNUSED_PARAMETER") messagesSnapshot: List<ChatMessage>,
+        placeholderIdx: Int = -1
+    ) {
         SwingUtilities.invokeLater {
-            // 1. 记入 assistant 消息,带 tool_calls(同时包含已解析与未解析的全部 tool_use)
-            //    若 AI 只返回 tool_calls 没文字,填充占位文案,避免空气泡
-            val assistantContent = when {
+            // 1) 把流式累积到的文本 / toolCalls 合并到 placeholder(或新建一条)
+            //    - 若 AI 只返回 tool_calls 没文字,填充占位文案,避免空气泡
+            val finalContent = when {
                 reply.reply.isNotBlank() -> reply.reply
                 reply.toolCalls.isNotEmpty() -> "执行操作: ${summarizeToolCalls(reply.toolCalls)}"
                 else -> ""
             }
-            state.chatMessages.add(
-                ChatMessage(
-                    role = "assistant",
-                    content = assistantContent,
-                    toolCalls = reply.toolCalls
+            if (placeholderIdx in 0 until state.chatMessages.size) {
+                val current = state.chatMessages[placeholderIdx]
+                if (current.content != finalContent || current.toolCalls != reply.toolCalls) {
+                    state.chatMessages[placeholderIdx] = current.copy(
+                        content = finalContent,
+                        toolCalls = reply.toolCalls
+                    )
+                }
+            } else {
+                state.chatMessages.add(
+                    ChatMessage(
+                        role = "assistant",
+                        content = finalContent,
+                        toolCalls = reply.toolCalls
+                    )
                 )
-            )
+            }
 
-            // 2. 为「解析失败」的 tool_use 补 tool_result(防止 Anthropic 报
+            // 2) 为「解析失败」的 tool_use 补 tool_result(防止 Anthropic 报
             //    "tool_use.id 'xxx' was found without a corresponding tool_result
             //    block immediately after")。这些 tool_use 占着 assistant 的位置,
             //    但 actions 中没有对应项,会被 processAiReply 漏掉,必须在此处补齐。
@@ -292,17 +380,17 @@ internal class InsertStringsChatDriver(
                 )
             }
 
-            // 3. 建立 action → toolCallId 的下标映射。
+            // 3) 建立 action → toolCallId 的下标映射。
             //    parseAiReply 已保证 reply.actions 与 reply.toolCalls 严格 1:1 对齐,
             //    这里的下标取 id 才是正确的(之前 mapNotNull 会丢项导致错位)。
             val actionToolCallIds = reply.actions.indices.map { i ->
                 reply.toolCalls.getOrNull(i)?.id.orEmpty()
             }
 
-            // 4. 分发处理
+            // 4) 分发处理
             processAiReply(reply, actionToolCallIds, context, iteration)
 
-            // 5. 解析失败兜底:如果本轮 AI 调用了 tool_use,但所有 tool_call 全部解析失败
+            // 5) 解析失败兜底:如果本轮 AI 调用了 tool_use,但所有 tool_call 全部解析失败
             //    (actions 为空、failedToolCalls 非空),processAiReply 会走到
             //    "没有任何可执行 tool call"的分支,把 chatSending = false 等待用户输入。
             //    这会让用户看到一个空气泡后对话卡死,直到手动重新发送。
@@ -602,6 +690,37 @@ internal class InsertStringsChatDriver(
             // 这覆盖了 ask_user 等待用户点选项、用户却点 Stop 等导致 tool_use 悬挂的场景。
             fillMissingToolResults("[已取消] 用户点击了停止按钮,该工具调用未执行。如需执行,请在下一轮重新发起。")
             state.chatMessages.add(ChatMessage(role = "assistant", content = "⏹ 已停止生成。"))
+            state.stopRequested = false
+        }
+    }
+
+    /**
+     * 流式场景下的停止收尾:与 [handleStoppedByUser] 类似,但因为 placeholder 已经把
+     * AI 正在写的文本实时渲染出来了,不需要再额外追加「⏹ 已停止」消息(避免重复占两行),
+     * 改为把 placeholder 内容拼接上停止提示并清空 toolCalls。
+     *
+     * 之所以丢弃 toolCalls:流被打断时,模型返回的 tool_use 块可能不完整(id/name/args 缺失),
+     * 把它原样写回 chatMessages 会导致下一轮 Anthropic 协议校验失败。
+     * 配合 [fillMissingToolResults] 的兜底,可确保下次发送新消息时无悬挂 tool_use。
+     */
+    private fun handleStoppedByUserWithPlaceholder(placeholderIdx: Int) {
+        SwingUtilities.invokeLater {
+            fillMissingToolResults("[已取消] 用户点击了停止按钮,该工具调用未执行。如需执行,请在下一轮重新发起。")
+            if (placeholderIdx in 0 until state.chatMessages.size) {
+                val current = state.chatMessages[placeholderIdx]
+                val baseContent = current.content.takeIf { it.isNotBlank() } ?: ""
+                val finalContent = if (baseContent.isEmpty()) {
+                    "⏹ 已停止生成。"
+                } else {
+                    "$baseContent\n\n⏹ 已停止生成。"
+                }
+                state.chatMessages[placeholderIdx] = current.copy(
+                    content = finalContent,
+                    toolCalls = emptyList()
+                )
+            } else {
+                state.chatMessages.add(ChatMessage(role = "assistant", content = "⏹ 已停止生成。"))
+            }
             state.stopRequested = false
         }
     }
