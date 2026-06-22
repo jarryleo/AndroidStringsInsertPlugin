@@ -348,7 +348,6 @@ private fun ChatBubble(
                 ) {
                     Box(
                         modifier = Modifier
-                            .widthIn(max = 500.dp)
                             .padding(start = if (isUser) 32.dp else 0.dp, end = if (isUser) 0.dp else 32.dp)
                             .background(bubbleColor, RoundedCornerShape(12.dp))
                             .then(border)
@@ -664,9 +663,10 @@ private fun ToolBubble(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 4.dp, vertical = 2.dp)
-            .background(colors.fieldBackground, RoundedCornerShape(6.dp))
-            .border(width = 1.dp, color = colors.border, RoundedCornerShape(6.dp)),
+            .padding(vertical = 2.dp)
+            .padding(end = 32.dp)
+            .background(colors.fieldBackground, RoundedCornerShape(12.dp))
+            .border(width = 1.dp, color = colors.border, RoundedCornerShape(12.dp)),
     ) {
         Row(
             modifier = Modifier
