@@ -302,11 +302,22 @@ private fun ChatBubble(
         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
     ) {
         if (isTool) {
-            ToolBubble(
-                content = message.content,
-                taskSummary = taskSummary,
-                colors = colors,
-            )
+            // 「解析失败」的工具结果(参数无法解析 / 工具名未注册)对用户没有可操作意义,
+            // 但又必须以 tool_result 形式返回给 AI 以满足 Anthropic 协议。
+            // 这里把它折叠成助手一侧的简短错误行,不再用 ToolBubble 渲染,
+            // 既避免空气泡,又让用户能看到具体是哪个工具调用出了问题。
+            if (isParseFailedToolResult(message.content)) {
+                ParseFailedInline(
+                    content = message.content,
+                    colors = colors,
+                )
+            } else {
+                ToolBubble(
+                    content = message.content,
+                    taskSummary = taskSummary,
+                    colors = colors,
+                )
+            }
         } else {
             Box(
                 modifier = Modifier.fillMaxWidth(),
@@ -558,6 +569,48 @@ private fun buildToolSummary(content: String): String {
             val firstLine = trimmed.lineSequence().firstOrNull { it.isNotBlank() } ?: ""
             if (firstLine.length > 60) firstLine.take(60) + "…" else firstLine
         }
+    }
+}
+
+/**
+ * 判断该 tool 消息是否为「解析失败」类型。
+ * 失败格式由 InsertStringsChatDriver 合成的:
+ *   [工具执行结果] 类型:unknown(xxx) 状态:解析失败 信息:该工具调用的参数无法解析或工具名未注册。请检查调用格式后重试。
+ * 对用户没有可操作价值,且会与正常 ToolBubble 视觉上雷同(空气泡),需要单独处理。
+ */
+private fun isParseFailedToolResult(content: String): Boolean {
+    val trimmed = content.trim()
+    return trimmed.startsWith("[工具执行结果]") && trimmed.contains("状态:解析失败")
+}
+
+/**
+ * 解析失败时的内联错误行:居左显示一行简短提示,
+ * 让用户知道 AI 调用了未识别的工具,而不是看到空气泡。
+ */
+@Composable
+private fun ParseFailedInline(
+    content: String,
+    colors: IdeColors,
+) {
+    val toolName = extractField(content.trim(), "类型")?.removePrefix("unknown(")?.removeSuffix(")")
+        ?.ifEmpty { null } ?: "未知工具"
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = "❌",
+            style = compactTextStyle(colors.secondaryText),
+        )
+        Text(
+            text = "AI 调用了未注册的工具: $toolName (参数无法解析,已自动忽略)",
+            color = colors.secondaryText,
+            style = compactTextStyle(colors.secondaryText),
+            modifier = Modifier.weight(1f),
+        )
     }
 }
 

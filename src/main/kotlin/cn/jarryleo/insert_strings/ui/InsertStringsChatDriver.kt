@@ -301,6 +301,16 @@ internal class InsertStringsChatDriver(
 
             // 4. 分发处理
             processAiReply(reply, actionToolCallIds, context, iteration)
+
+            // 5. 解析失败兜底:如果本轮 AI 调用了 tool_use,但所有 tool_call 全部解析失败
+            //    (actions 为空、failedToolCalls 非空),processAiReply 会走到
+            //    "没有任何可执行 tool call"的分支,把 chatSending = false 等待用户输入。
+            //    这会让用户看到一个空气泡后对话卡死,直到手动重新发送。
+            //    此场景下应当主动继续 tool loop,把错误 tool_result 喂回给 AI,
+            //    让 AI 看到失败信息后自动修正并重新调用合法工具,无需用户介入。
+            if (reply.actions.isEmpty() && reply.failedToolCalls.isNotEmpty()) {
+                continueToolLoopInBackground(context, iteration + 1)
+            }
         }
     }
 
