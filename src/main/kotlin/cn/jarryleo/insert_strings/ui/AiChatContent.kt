@@ -1,17 +1,30 @@
 package cn.jarryleo.insert_strings.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -95,8 +108,23 @@ private fun AiChatBody(
     messageListContentPadding: PaddingValues = PaddingValues(8.dp),
 ) {
     val listState = rememberLazyListState()
+    // 新消息加入时滚到末尾(用户期待看到刚发的内容)
     LaunchedEffect(chatMessages.size) {
         if (chatMessages.isNotEmpty()) {
+            listState.animateScrollToItem(chatMessages.size - 1)
+        }
+    }
+    // 流式生成中:最后一条消息的 thinking / content 会持续变化,需要保持滚到末尾,
+    // 否则用户看到的就是"卡住"的旧文本。但用户如果已经主动向上滚动阅读历史,
+    // 就不应该把视图强制拉回底部,否则会变成"追着他跑"的糟糕体验。
+    // 判定:仅当「最后一项已可见」时跟随滚动,否则让用户保留当前阅读位置。
+    val lastStreamingMessage = chatMessages.lastOrNull { it.streaming }
+    LaunchedEffect(lastStreamingMessage?.thinking, lastStreamingMessage?.content) {
+        if (lastStreamingMessage == null || chatMessages.isEmpty()) return@LaunchedEffect
+        val layout = listState.layoutInfo
+        val lastVisible = layout.visibleItemsInfo.lastOrNull()?.index ?: -1
+        val isAtBottom = lastVisible >= chatMessages.size - 1
+        if (isAtBottom) {
             listState.animateScrollToItem(chatMessages.size - 1)
         }
     }
@@ -182,27 +210,6 @@ private fun AiChatBody(
                             chatSending = chatSending,
                             colors = colors,
                         )
-                    }
-                    if (chatSending) {
-                        item {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .background(colors.fieldBackground, RoundedCornerShape(8.dp))
-                                        .border(BorderStroke(1.dp, colors.fieldBorder), RoundedCornerShape(8.dp))
-                                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                                ) {
-                                    Text(
-                                        text = "Thinking...",
-                                        color = colors.secondaryText,
-                                        style = compactTextStyle(colors.secondaryText),
-                                    )
-                                }
-                            }
-                        }
                     }
                 }
             }
@@ -319,23 +326,68 @@ private fun ChatBubble(
                 )
             }
         } else {
-            Box(
-                modifier = Modifier.fillMaxWidth(),
-                contentAlignment = alignment,
-            ) {
+            // === 助手气泡(assistant / user) ===
+            // 助手侧支持三段式结构:Thinking 区(可选) + content 回复区(可选) + options 区(可选)
+            // Thinking 区的展示规则:
+            //  - 始终在流式生成中展示(显示「Thinking」标题 + 动态脉动圆点,
+            //    如果还没有文本就只显示标题+圆点,让用户感知「模型正在思考」);
+            //  - 流式结束后,若积累了文本,就折叠成可点击展开的「Thought · N 行」区;
+            //  - 流式结束后若 thinking 为空(模型没产生思考文本),整个 Thinking 区消失,
+            //    只留下 content 回复区(简洁,不强行造占位)。
+            val showThinkingHeader = !isUser &&
+                (message.streaming || message.thinking.isNotBlank())
+            val showThinkingBox = !isUser && message.thinking.isNotBlank()
+            val showReply = !isUser && message.content.isNotBlank()
+            val showUserContent = isUser && message.content.isNotBlank()
+            // 只要有任何内容要展示,气泡外壳就要画出来
+            val hasAnyContent = showUserContent || showThinkingHeader || showReply
+            if (hasAnyContent) {
                 Box(
-                    modifier = Modifier
-                        .widthIn(max = 500.dp)
-                        .padding(start = if (isUser) 32.dp else 0.dp, end = if (isUser) 0.dp else 32.dp)
-                        .background(bubbleColor, RoundedCornerShape(12.dp))
-                        .then(border)
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = alignment,
                 ) {
-                    SelectionContainer {
-                        MarkdownContent(
-                            markdown = message.content,
-                            colors = colors,
-                        )
+                    Box(
+                        modifier = Modifier
+                            .widthIn(max = 500.dp)
+                            .padding(start = if (isUser) 32.dp else 0.dp, end = if (isUser) 0.dp else 32.dp)
+                            .background(bubbleColor, RoundedCornerShape(12.dp))
+                            .then(border)
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (showThinkingHeader) {
+                                ThinkingSection(
+                                    thinking = message.thinking,
+                                    streaming = message.streaming,
+                                    showTextBox = showThinkingBox,
+                                    colors = colors,
+                                )
+                            }
+                            if (showThinkingHeader && showReply) {
+                                // 思考区与回复区之间的细分隔线
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(1.dp)
+                                        .background(colors.grid)
+                                )
+                            }
+                            if (showReply) {
+                                SelectionContainer {
+                                    MarkdownContent(
+                                        markdown = message.content,
+                                        colors = colors,
+                                    )
+                                }
+                            } else if (showUserContent) {
+                                SelectionContainer {
+                                    MarkdownContent(
+                                        markdown = message.content,
+                                        colors = colors,
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -360,6 +412,145 @@ private fun ChatBubble(
             }
         }
     }
+}
+
+/**
+ * 助手气泡内的「Thinking」区块。
+ *
+ * 三种形态:
+ * - 流式中 + 有 thinking 文本:头部 "Thinking" + 脉动圆点 + 下方 3 行可滚动文本框,
+ *   实时显示思考内容。
+ * - 流式中 + 无 thinking 文本(模型没产生思考):头部 "Thinking" + 脉动圆点,
+ *   不展示空文本框(避免空气泡),仅用 loading 表达「正在思考」。
+ * - 已结束 + 有 thinking 文本:头部变成可点击的 "Thought · N 行" 折叠条,
+ *   点击展开后展示同样的 3 行滚动区,再点击折叠。默认折叠,避免长思考撑高气泡。
+ *
+ * 文字本身不参与协议,仅 UI 渲染。
+ */
+@Composable
+private fun ThinkingSection(
+    thinking: String,
+    streaming: Boolean,
+    showTextBox: Boolean,
+    colors: IdeColors,
+) {
+    // 只有在 (流式中) 或 (有文本且已被展开) 时才展示文本框
+    var userExpanded by remember { mutableStateOf(false) }
+    val expanded = streaming || (showTextBox && userExpanded)
+    val lineCount = remember(thinking) { thinking.count { it == '\n' } + 1 }
+    // 头部文案:
+    //  - 流式时统一叫 "Thinking"(若已有文本顺便带上行数)
+    //  - 已结束时若有文本则是 "Thought · N 行",否则是 "Thinking"(但此分支 ChatBubble 不会进入)
+    val summary = if (streaming) {
+        if (showTextBox) "Thinking · $lineCount 行" else "Thinking"
+    } else {
+        "Thought · $lineCount 行"
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        // 头部:左圆点 / 折叠指示 + 文案
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .let {
+                    if (showTextBox && !streaming) {
+                        it.clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { userExpanded = !userExpanded }
+                    } else it
+                }
+                .padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (streaming) {
+                ThinkingPulseDot(colors = colors)
+            } else if (showTextBox) {
+                Text(
+                    text = if (userExpanded) "▼" else "▶",
+                    color = colors.secondaryText,
+                    style = compactTextStyle(colors.secondaryText),
+                )
+            }
+            Text(
+                text = summary,
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText),
+                fontWeight = if (streaming) FontWeight.SemiBold else FontWeight.Normal,
+            )
+        }
+        if (showTextBox) {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically(),
+            ) {
+                ThinkingTextBox(
+                    text = thinking,
+                    streaming = streaming,
+                    colors = colors,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 思考文字滚动区:固定高度 3 行,超长可纵向滚动。
+ * 流式时(scrollToBottom=true)实时滚到最底;折叠展开后由用户自行滚动。
+ */
+@Composable
+private fun ThinkingTextBox(
+    text: String,
+    streaming: Boolean,
+    colors: IdeColors,
+) {
+    val scrollState = rememberScrollState()
+    LaunchedEffect(text) {
+        if (streaming) {
+            scrollState.animateScrollTo(scrollState.maxValue)
+        }
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp, max = 60.dp)
+            .background(colors.tableBackground, RoundedCornerShape(6.dp))
+            .border(BorderStroke(1.dp, colors.grid), RoundedCornerShape(6.dp))
+            .verticalScroll(scrollState)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+    ) {
+        Text(
+            text = text,
+            color = colors.secondaryText,
+            style = compactTextStyle(colors.secondaryText),
+        )
+    }
+}
+
+/**
+ * 「Thinking」头部左侧的动态脉动圆点:1.2s 一周期的呼吸效果,
+ * 通过 alpha 在 0.3~1.0 之间循环往复,提示用户 AI 仍在生成。
+ */
+@Composable
+private fun ThinkingPulseDot(colors: IdeColors) {
+    val transition = rememberInfiniteTransition(label = "thinking-pulse")
+    val alpha by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "thinking-pulse-alpha",
+    )
+    Box(
+        modifier = Modifier
+            .size(8.dp)
+            .alpha(alpha)
+            .background(colors.accent, CircleShape)
+    )
 }
 
 /**

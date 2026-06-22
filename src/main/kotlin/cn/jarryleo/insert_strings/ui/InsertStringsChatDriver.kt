@@ -5,6 +5,7 @@ import cn.jarryleo.insert_strings.ai.AiAction
 import cn.jarryleo.insert_strings.ai.AiReply
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.ai.ToolCall
+import cn.jarryleo.insert_strings.ai.ToolDefinitions
 import cn.jarryleo.insert_strings.sheets.SheetsManager
 import cn.jarryleo.insert_strings.xml.ContextManager
 import cn.jarryleo.insert_strings.xml.KeyedStringsInfo
@@ -253,7 +254,13 @@ internal class InsertStringsChatDriver(
             SwingUtilities.invokeAndWait {
                 val snapshot = state.chatMessages.toList()
                 val newIdx = state.chatMessages.size
-                state.chatMessages.add(ChatMessage(role = "assistant", content = ""))
+                // 预占流式 assistant 消息:
+                // - thinking = ""(流开始时为空,边流边塞)
+                // - content = ""(最终回复,留给 task_complete summary 或纯文本)
+                // - streaming = true(UI 据此显示「Thinking」+ loading + 滚动信息流)
+                state.chatMessages.add(
+                    ChatMessage(role = "assistant", content = "", streaming = true)
+                )
                 captured.set(StreamSetup(snapshot, newIdx))
             }
             captured.get() ?: return
@@ -263,6 +270,7 @@ internal class InsertStringsChatDriver(
             val reply = runCatching { AITranslator.chat(snapshot, context) }
                 .getOrElse {
                     SwingUtilities.invokeLater {
+                        // content 直接放错误文案,UI 端会作为回复区渲染(无 thinking 折叠区)
                         state.chatMessages.add(
                             ChatMessage(
                                 role = "assistant",
@@ -286,13 +294,13 @@ internal class InsertStringsChatDriver(
                 onPartialText = { fullText ->
                     // 跑在后台线程,先做轻量 stop 检查
                     if (state.stopRequested) return@chatStream
-                    // 把最新文本切回 EDT 写入 placeholder
+                    // 把最新思考文本切回 EDT 写入 placeholder 的 thinking 字段
+                    // (注意:不写 content,留给最终 task_complete summary 或纯文本回复用)
                     SwingUtilities.invokeLater {
                         if (placeholderIdx < state.chatMessages.size) {
                             val current = state.chatMessages[placeholderIdx]
-                            // 只在文本真的变化时赋值,避免重复触发 Compose recompose
-                            if (current.content != fullText) {
-                                state.chatMessages[placeholderIdx] = current.copy(content = fullText)
+                            if (current.thinking != fullText) {
+                                state.chatMessages[placeholderIdx] = current.copy(thinking = fullText)
                             }
                         }
                     }
@@ -302,10 +310,12 @@ internal class InsertStringsChatDriver(
             SwingUtilities.invokeLater {
                 if (placeholderIdx < state.chatMessages.size) {
                     val current = state.chatMessages[placeholderIdx]
-                    val errText = "AI 请求失败:${e.message ?: "unknown"}"
-                    if (current.content.isEmpty()) {
-                        state.chatMessages[placeholderIdx] = current.copy(content = errText)
-                    }
+                    // 错误时把错误文案放在 content(回复区),thinking 清空避免与 content 重复
+                    state.chatMessages[placeholderIdx] = current.copy(
+                        content = "AI 请求失败:${e.message ?: "unknown"}",
+                        thinking = "",
+                        streaming = false
+                    )
                 }
                 state.chatSending = false
             }
@@ -325,12 +335,14 @@ internal class InsertStringsChatDriver(
     /**
      * 把 AI 最终回复合并到流式生成的 placeholder 消息上,然后走 [processAiReply] 分发。
      *
-     * @param reply             AI 最终回复(可能含 toolCalls / failedToolCalls)
-     * @param context           上下文 JSON
-     * @param iteration         tool loop 当前轮次
-     * @param messagesSnapshot  本轮请求时的消息快照(目前未使用,留作未来扩展)
-     * @param placeholderIdx    流式预占的 assistant 消息下标;非负表示流式分支,
-     *                          -1 表示非流式分支(直接 append 新消息)
+     * 关键设计:
+     * - 思考文本(thinking)由流式回调实时写入,本方法不再动它;
+     * - content 只有在「纯文本回复」或「task_complete summary」时才有值,
+     *   「带真实工具调用」的中间回合 content 保持为空,仅由 thinking + 后续 tool 气泡承担展示;
+     * - 过滤掉 task_complete 后再决定「执行操作:」占位文案,避免终止信号被显示成工具名;
+     * - 末尾把 processAiReply 跑一遍,其中的 handleTaskComplete 会通过
+     *   state.chatMessages.indexOfLast 定位当前流式消息并把 summary 原地写进去,
+     *   不再追加新消息造成重复气泡。
      */
     private fun finishWithReply(
         reply: AiReply,
@@ -341,18 +353,50 @@ internal class InsertStringsChatDriver(
     ) {
         SwingUtilities.invokeLater {
             // 1) 把流式累积到的文本 / toolCalls 合并到 placeholder(或新建一条)
-            //    - 若 AI 只返回 tool_calls 没文字,填充占位文案,避免空气泡
-            val finalContent = when {
-                reply.reply.isNotBlank() -> reply.reply
-                reply.toolCalls.isNotEmpty() -> "执行操作: ${summarizeToolCalls(reply.toolCalls)}"
-                else -> ""
+            //    字段布局原则:
+            //      - thinking: 模型在调用工具前的中间发言(「思考」语义),
+            //        流式时实时显示,流结束后折叠为可展开区。
+            //      - content: 给用户看的「最终回复」——纯文本对话回合就是模型全文,
+            //        function-calling 回合则是「执行操作:xxx」或 task_complete summary。
+            //    两者在纯文本回合里会重复,所以这种场景下 thinking 清空、只留 content;
+            //    在 function-calling 回合里两者互补。
+            val realToolCalls = reply.toolCalls.filter { it.name != ToolDefinitions.TOOL_TASK_COMPLETE }
+            val hasTaskComplete = reply.toolCalls.any { it.name == ToolDefinitions.TOOL_TASK_COMPLETE }
+            val (finalContent, finalToolCalls, finalThinking) = when {
+                // 情况 A:模型纯文本回复(无工具调用)——内容就是回复本身,不要重复展示
+                reply.toolCalls.isEmpty() && reply.failedToolCalls.isEmpty() -> {
+                    Triple(reply.reply, emptyList<ToolCall>(), "")
+                }
+                // 情况 B:只有 task_complete 终止信号
+                // content 留空,由 handleTaskComplete 写入 summary;
+                // thinking 保留流式累积文本,作为「思考过程」展示
+                realToolCalls.isEmpty() && hasTaskComplete -> {
+                    Triple("", emptyList<ToolCall>(), reply.reply)
+                }
+                // 情况 C:有真实工具调用(可叠加 task_complete,但 task_complete 之后会被前面分支截走,
+                //    所以这里只可能是纯真实工具调用)
+                else -> {
+                    val summary = if (realToolCalls.isNotEmpty()) {
+                        "执行操作: ${summarizeToolCalls(realToolCalls)}"
+                    } else {
+                        ""
+                    }
+                    Triple(summary, realToolCalls, reply.reply)
+                }
             }
+
             if (placeholderIdx in 0 until state.chatMessages.size) {
                 val current = state.chatMessages[placeholderIdx]
-                if (current.content != finalContent || current.toolCalls != reply.toolCalls) {
+                if (current.content != finalContent ||
+                    current.toolCalls != finalToolCalls ||
+                    current.thinking != finalThinking ||
+                    current.streaming
+                ) {
                     state.chatMessages[placeholderIdx] = current.copy(
                         content = finalContent,
-                        toolCalls = reply.toolCalls
+                        toolCalls = finalToolCalls,
+                        thinking = finalThinking,
+                        streaming = false
                     )
                 }
             } else {
@@ -360,7 +404,8 @@ internal class InsertStringsChatDriver(
                     ChatMessage(
                         role = "assistant",
                         content = finalContent,
-                        toolCalls = reply.toolCalls
+                        toolCalls = finalToolCalls,
+                        thinking = finalThinking,
                     )
                 )
             }
@@ -388,6 +433,8 @@ internal class InsertStringsChatDriver(
             }
 
             // 4) 分发处理
+            //    handleTaskComplete 内部会通过 state.chatMessages.indexOfLast 定位当前流式消息,
+            //    把 summary 原地写进去,避免再追加一条 assistant 消息造成重复气泡
             processAiReply(reply, actionToolCallIds, context, iteration)
 
             // 5) 解析失败兜底:如果本轮 AI 调用了 tool_use,但所有 tool_call 全部解析失败
@@ -671,7 +718,21 @@ internal class InsertStringsChatDriver(
                 append("\n\n").append(complete.notes)
             }
         }
-        state.chatMessages.add(ChatMessage(role = "assistant", content = text))
+        // 把 task_complete summary 写入当前流式 assistant 气泡(同一条消息),
+        // 而不是再追加一条新消息——这样思考(流式累积的 thinking)和回复(content)
+        // 会落在同一个气泡内,符合"思考和回复在同一个气泡内"的设计。
+        // 若对话历史里没有 assistant 消息(理论上不会发生,只是兜底),才追加新消息。
+        val lastIdx = state.chatMessages.indexOfLast { it.role == "assistant" }
+        if (lastIdx >= 0) {
+            val current = state.chatMessages[lastIdx]
+            state.chatMessages[lastIdx] = current.copy(
+                content = text,
+                streaming = false,
+                toolCalls = emptyList()
+            )
+        } else {
+            state.chatMessages.add(ChatMessage(role = "assistant", content = text))
+        }
         state.chatSending = false
     }
 
@@ -708,15 +769,12 @@ internal class InsertStringsChatDriver(
             fillMissingToolResults("[已取消] 用户点击了停止按钮,该工具调用未执行。如需执行,请在下一轮重新发起。")
             if (placeholderIdx in 0 until state.chatMessages.size) {
                 val current = state.chatMessages[placeholderIdx]
-                val baseContent = current.content.takeIf { it.isNotBlank() } ?: ""
-                val finalContent = if (baseContent.isEmpty()) {
-                    "⏹ 已停止生成。"
-                } else {
-                    "$baseContent\n\n⏹ 已停止生成。"
-                }
+                val stopMarker = "\n\n⏹ 已停止生成。"
+                val finalContent = current.content + stopMarker
                 state.chatMessages[placeholderIdx] = current.copy(
                     content = finalContent,
-                    toolCalls = emptyList()
+                    toolCalls = emptyList(),
+                    streaming = false
                 )
             } else {
                 state.chatMessages.add(ChatMessage(role = "assistant", content = "⏹ 已停止生成。"))

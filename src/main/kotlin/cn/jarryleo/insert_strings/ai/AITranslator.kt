@@ -35,7 +35,25 @@ data class ChatMessage(
     val content: String,
     val options: List<String> = emptyList(),
     val toolCalls: List<ToolCall> = emptyList(),
-    val toolCallId: String? = null
+    val toolCallId: String? = null,
+    /**
+     * 模型的「思考/推理」文本(流式累积)。
+     *
+     * 与 [content] 的区别:
+     * - [thinking] 是 SSE 增量推送时实时累积的文本(模型在调用工具/给出最终答案之前的中间发言),
+     *   UI 上以「Thinking」区块呈现,流式生成中持续滚动,生成完毕后折叠成可展开的细节区。
+     * - [content] 是给用户看的最终答复(对应 task_complete 的 summary,或纯对话回合的全部文本)。
+     *
+     * 这个字段仅由 driver / UI 维护,不会随消息历史发到 AI 协议(toOpenAiMessage / toAnthropicMessage 都不读它)。
+     */
+    val thinking: String = "",
+    /**
+     * 标记本条消息是否正处于 SSE 流式生成中。
+     * 期间 UI 应在 Thinking 区块左上角显示动态 loading,文本区持续滚动;
+     * 流结束后 driver 会置为 false,UI 转为「可折叠的思考详情」形态。
+     * 同上,本字段仅 UI 维护,不参与协议序列化。
+     */
+    val streaming: Boolean = false
 )
 
 object AITranslator {
@@ -979,15 +997,16 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 addProperty("content", content)
             }
         }
+        // assistant 消息的协议文本 = 模型的真实发言。
+        // UI 层把模型的流式文本放在 [thinking],把衍生的「执行操作:xxx」/task_complete summary
+        // 放在 [content]。发回 AI 时必须用 [thinking](没有才退回 [content]),
+        // 否则 AI 会看到自己没写过的「执行操作:」前缀,污染下一轮上下文。
+        val protocolText = if (role == "assistant") thinking.ifEmpty { content } else content
         // assistant message with tool calls (function calling)
         if (role == "assistant" && toolCalls.isNotEmpty()) {
             return JsonObject().apply {
                 addProperty("role", "assistant")
-                if (content.isNotEmpty()) {
-                    addProperty("content", content)
-                } else {
-                    addProperty("content", "")
-                }
+                addProperty("content", protocolText)
                 add("tool_calls", JsonArray().apply {
                     toolCalls.forEach { tc ->
                         add(JsonObject().apply {
@@ -1005,7 +1024,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         // plain text message
         return JsonObject().apply {
             addProperty("role", role)
-            addProperty("content", content)
+            addProperty("content", protocolText)
         }
     }
 
@@ -1162,15 +1181,18 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 })
             }
         }
+        // assistant 消息的协议文本 = 模型的真实发言:优先用 [thinking](流式累积的模型原文),
+        // 没有(纯文本回合)时退回 [content]。详见 [toOpenAiMessage] 的注释。
+        val protocolText = if (role == "assistant") thinking.ifEmpty { content } else content
         if (role == "assistant") {
             if (toolCalls.isNotEmpty()) {
                 return JsonObject().apply {
                     addProperty("role", "assistant")
                     add("content", JsonArray().apply {
-                        if (content.isNotEmpty()) {
+                        if (protocolText.isNotEmpty()) {
                             add(JsonObject().apply {
                                 addProperty("type", "text")
-                                addProperty("text", content)
+                                addProperty("text", protocolText)
                             })
                         }
                         toolCalls.forEach { tc ->
@@ -1188,12 +1210,12 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             }
             return JsonObject().apply {
                 addProperty("role", "assistant")
-                addProperty("content", content)
+                addProperty("content", protocolText)
             }
         }
         return JsonObject().apply {
             addProperty("role", role)
-            addProperty("content", content)
+            addProperty("content", protocolText)
         }
     }
 
