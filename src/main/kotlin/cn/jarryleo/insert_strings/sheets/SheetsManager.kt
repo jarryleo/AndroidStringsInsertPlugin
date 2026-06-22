@@ -423,12 +423,20 @@ object SheetsManager {
         }
     }
 
-    fun readRange(project: Project, spreadsheetId: String, range: String): Result<List<List<String>>> {
+    fun readRange(
+        project: Project,
+        spreadsheetId: String,
+        range: String,
+        defaultSheetName: String? = null
+    ): Result<List<List<String>>> {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         return runCatching {
             val service = createSheetsService(project)
+            // 若 range 不含 sheet 前缀(没有 '!'),且传入了 defaultSheetName,
+            // 主动拼上,避免 Google Sheets API 退回到工作簿第一个工作表(经常不是用户期望的)。
+            val effectiveRange = ensureSheetPrefix(range, defaultSheetName)
             val response = service.spreadsheets().values()
-                .get(spreadsheetId, range)
+                .get(spreadsheetId, effectiveRange)
                 .execute()
             val values = response.getValues() ?: emptyList<List<Any?>>()
             val maxCols = values.maxOfOrNull { it.size } ?: 0
@@ -724,7 +732,7 @@ object SheetsManager {
         if (spreadsheetId.isBlank()) return Result.failure(IllegalArgumentException("Spreadsheet ID is empty."))
         if (sheetName.isBlank()) return Result.failure(IllegalArgumentException("Sheet name is empty."))
         val safeSheet = sanitizeSheetName(sheetName)
-        return readRange(project, spreadsheetId, "$safeSheet!A1:Z100000")
+        return readRange(project, spreadsheetId, "$safeSheet!A1:Z100000", defaultSheetName = null)
     }
 
     /**
@@ -975,6 +983,26 @@ object SheetsManager {
         if (key.isBlank()) return Result.failure(IllegalArgumentException("Search key is empty."))
         val safeSheet = sanitizeSheetName(sheetName)
         return searchRowByKey(project, spreadsheetId, "$safeSheet!A1:Z100000", key)
+    }
+
+    /**
+     * 把 A1 range 文本拼上 sheet 前缀(若原 range 已经有 '!',则不重复添加)。
+     * - defaultSheetName 为空/纯空白时直接返回原 range。
+     * - 拼好后再次走 [sanitizeSheetName] 处理工作表名本身的转义/加引号。
+     *
+     * 设计目的:Google Sheets API 在收到 `get(spreadsheetId, "A1:D10")`(无 sheet 前缀)时,
+     * 会使用**该电子表格的第一个工作表**,而不是用户在插件中配置的 defaultSheetName。
+     * AI 经常习惯只写 "A1:D10" 而省略 sheet 前缀,这会读到错的工作表。
+     * 在这里补上 sheet 前缀,可以保证与「不传 sheetName 时走 defaultSheetName」的语义一致。
+     */
+    private fun ensureSheetPrefix(range: String, defaultSheetName: String?): String {
+        val trimmed = range.trim()
+        if (trimmed.isEmpty()) return trimmed
+        if (trimmed.contains('!')) return trimmed
+        val name = defaultSheetName?.trim().orEmpty()
+        if (name.isEmpty()) return trimmed
+        val safeSheet = sanitizeSheetName(name)
+        return "$safeSheet!$trimmed"
     }
 
     // ==================== 冻结行列 ====================
@@ -1901,9 +1929,10 @@ object SheetsManager {
             .setIncludeGridData(false)
             .execute()
         // sanitizeSheetName 会对含空格 / 特殊字符的工作表名加单引号(如 "'XXXX 1.0.4'")
-        // 以便拼装 A1 range,但实际工作表 title 没有引号——匹配时必须先把引号剥掉,
-        // 否则 "Sheet 'XXXX 1.0.4' not found in spreadsheet." 会出现但工作表其实存在。
-        val target = sheetName.trim('\'')
+        // 并把名字里的单引号转义成两个("Foo's" → "'Foo''s'"),以便拼装 A1 range。
+        // 但实际工作表 title 没有外层引号、转义也只保留一个单引号 ——
+        // 匹配时必须先去掉外层引号,再把 '' 还原为 ',否则会找不到工作表。
+        val target = sheetName.trim('\'').replace("''", "'")
         return spreadsheet.sheets?.firstOrNull {
             it.properties?.title?.equals(target, ignoreCase = true) == true
         }?.properties?.sheetId
@@ -1912,8 +1941,31 @@ object SheetsManager {
     private fun sanitizeSheetName(sheetName: String): String {
         val trimmed = sheetName.trim()
         if (trimmed.isEmpty()) return "Sheet1"
-        // 包含空格或特殊字符时需要用单引号包裹
-        return if (trimmed.any { it.isWhitespace() || it in "'!#$%" }) "'$trimmed'" else trimmed
+        // Google Sheets A1 表示法要求:工作表名包含空格/特殊字符,或形似单元格引用
+        // (数字开头 + 字母/数字/点的组合),必须用单引号包裹。漏掉这一规则会导致
+        // 类似 "1.0.3.0" 这种带点的版本号工作表被解析为单元格引用,读到错的工作表。
+        // 参考:https://developers.google.com/sheets/api/guides/concepts#sheet_name
+        val needsQuoting = trimmed.any { ch ->
+            ch.isWhitespace() || ch in "'!#$%&()*+,-/:;<=>?@[]^{|}~`.\\"
+        } || looksLikeCellReference(trimmed)
+        if (!needsQuoting) return trimmed
+        // A1 范围内单引号需要转义为两个单引号
+        val escaped = trimmed.replace("'", "''")
+        return "'$escaped'"
+    }
+
+    /**
+     * 判断字符串是否形似单元格引用(A1、B12、AB1、A1.5 这类),
+     * 形似的话 A1 表示法必须用单引号包裹工作表名,否则会被解析成单元格地址。
+     * 规则:以数字开头(可选),后接字母+数字,或字母+数字+点+数字(版本号形态)。
+     */
+    private fun looksLikeCellReference(name: String): Boolean {
+        if (name.isEmpty()) return false
+        // 典型版本号: 1.0.3.0 / 1.0 / v1.2.3 等
+        if (name.matches(Regex("^v?\\d+(\\.\\d+)+$"))) return true
+        // 以数字开头的混合字符(可能带下划线/字母): 1abc / 2024_plan
+        if (name[0].isDigit() && name.any { it.isLetter() || it == '_' }) return true
+        return false
     }
 
     private fun columnIndexToLetter(index: Int): String {
@@ -2082,6 +2134,7 @@ object SheetsManager {
     /**
      * 拆分 "Sheet1!A1:D10" → ("Sheet1", "A1:D10")。sheet 名带单引号包裹时去壳。
      * 找不到 '!' 时返回 (null, range)。对特殊 sheet 名("'1.0.3.0'!A1")也兼容。
+     * 拆分后会把 '' 还原为 ',以便后续按真实工作表名查找。
      */
     private fun splitSheetAndA1(range: String): Pair<String?, String> {
         val trimmed = range.trim()
@@ -2089,7 +2142,7 @@ object SheetsManager {
         if (bangIdx < 0) return null to trimmed
         val rawSheet = trimmed.substring(0, bangIdx).trim()
         val a1 = trimmed.substring(bangIdx + 1).trim()
-        val sheet = rawSheet.trim('\'')
+        val sheet = rawSheet.trim('\'').replace("''", "'")
         return sheet to a1
     }
 

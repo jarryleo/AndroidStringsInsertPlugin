@@ -925,15 +925,34 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         }
     }
 
+    /**
+     * 从项目上下文 JSON 中解析 googleSheets 段,抽出 [ToolDefinitions.SheetContext]。
+     * 用于把当前默认工作表 / 可用工作表列表注入到 tools 的 description 里,
+     * 避免 AI 在多 sheet 的表格里猜错工作表。
+     */
+    private fun extractSheetContext(context: String): ToolDefinitions.SheetContext {
+        if (context.isBlank()) return ToolDefinitions.SheetContext(null, emptyList())
+        return runCatching {
+            val root = JsonParser.parseString(context).asJsonObject
+            val sheets = root.getAsJsonObject("googleSheets") ?: return@runCatching ToolDefinitions.SheetContext(null, emptyList())
+            val defaultName = sheets.get("defaultSheetName")?.takeIf { !it.isJsonNull }?.asString
+            val available = sheets.getAsJsonArray("availableSheets")?.mapNotNull { el ->
+                if (el.isJsonPrimitive) el.asString else null
+            } ?: emptyList()
+            ToolDefinitions.SheetContext(defaultName, available)
+        }.getOrDefault(ToolDefinitions.SheetContext(null, emptyList()))
+    }
+
     private fun openAiChatBody(
         model: String,
         messages: List<ChatMessage>,
         context: String,
         stream: Boolean = false
     ): String {
+        val sheetCtx = extractSheetContext(context)
         val root = JsonObject().apply {
             addProperty("model", model)
-            add("tools", ToolDefinitions.openAiTools)
+            add("tools", ToolDefinitions.openAiTools(sheetCtx))
             if (stream) addProperty("stream", true)
             add(
                 "messages",
@@ -961,6 +980,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         context: String,
         stream: Boolean = false
     ): String {
+        val sheetCtx = extractSheetContext(context)
         val root = JsonObject().apply {
             addProperty("model", model)
             addProperty("max_tokens", 4096)
@@ -971,7 +991,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 }
             }
             addProperty("system", systemParts)
-            add("tools", ToolDefinitions.anthropicTools)
+            add("tools", ToolDefinitions.anthropicTools(sheetCtx))
             if (stream) addProperty("stream", true)
             add(
                 "messages",

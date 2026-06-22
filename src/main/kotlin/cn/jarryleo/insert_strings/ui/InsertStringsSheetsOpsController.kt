@@ -164,7 +164,15 @@ internal class InsertStringsSheetsOpsController(
 
             AiAction.SheetsOperation.Operation.READ -> {
                 val result = if (!action.range.isNullOrBlank()) {
-                    SheetsManager.readRange(project, spreadsheetId, action.range)
+                    // range 可能带 sheet 前缀 (例如 "1.0.3.0!A1:D10"),也可能只写 "A1:D10"。
+                    // 后面这种情况若不补 sheet 前缀,Google Sheets 会用工作簿第一个工作表,
+                    // 经常不是用户配置的默认工作表 — 传 defaultSheetName 进去让 readRange 自动补。
+                    SheetsManager.readRange(
+                        project,
+                        spreadsheetId,
+                        action.range,
+                        defaultSheetName = sheetName
+                    )
                 } else if (!action.key.isNullOrBlank()) {
                     SheetsManager.searchRowInSheet(project, spreadsheetId, sheetName, action.key).map { listOf(it.second) }
                 } else {

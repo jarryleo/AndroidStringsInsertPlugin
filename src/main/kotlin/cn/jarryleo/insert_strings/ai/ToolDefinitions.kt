@@ -14,11 +14,28 @@ import com.google.gson.JsonObject
  */
 object ToolDefinitions {
 
-    /** OpenAI / OpenAI 兼容协议的 tools 数组(放在 request body 的 `tools` 字段)。 */
-    val openAiTools: JsonArray = buildOpenAiTools()
+    /**
+     * 每次 AI 调用时携带的 Google Sheets 上下文快照。
+     * 注入到 sheets_operation / find_rows_by_text 的 description 里,
+     * 让 AI 在调用前能直接看到「当前默认 sheet 是哪个、表格里还有哪些 sheet 可用」,
+     * 避免它猜错 sheet(尤其是同名相似/带点带空格的 sheet)。
+     */
+    data class SheetContext(
+        val defaultSheetName: String?,
+        val availableSheets: List<String>,
+    )
+
+    /**
+     * OpenAI / OpenAI 兼容协议的 tools 数组(放在 request body 的 `tools` 字段)。
+     * 每次构建都重新生成,这样 [sheetContext] 能把当前 defaultSheetName / availableSheets
+     * 拼到 sheets_operation / find_rows_by_text 的 description 里,AI 一眼看到当前工作表名。
+     */
+    fun openAiTools(sheetContext: SheetContext = SheetContext(null, emptyList())): JsonArray =
+        buildOpenAiTools(sheetContext)
 
     /** Anthropic Messages API 的 tools 数组(放在 request body 的 `tools` 字段)。 */
-    val anthropicTools: JsonArray = buildAnthropicTools()
+    fun anthropicTools(sheetContext: SheetContext = SheetContext(null, emptyList())): JsonArray =
+        buildAnthropicTools(sheetContext)
 
     /** 工具名 → JSON Schema 的 properties 引用,供 driver 在解析 tool_call.arguments 时复用。 */
     val toolNames: List<String> = listOf(
@@ -87,13 +104,17 @@ object ToolDefinitions {
     private const val DESC_FIND_ROWS_BY_TEXT =
         "Google Sheets 反查:在表格中按文本搜索行,返回行号+列名+整行内容。" +
             "支持 exact/ contains(默认)/ regex 三种匹配模式,可选 column(只查指定列名)。" +
-            "适用场景:用户问「这个翻译对应表格里哪一行」,查重,定位某文案在 sheet 中的位置。"
+            "适用场景:用户问「这个翻译对应表格里哪一行」,查重,定位某文案在 sheet 中的位置。" +
+            "注意:sheetName 参数必须**原样**使用下方工作表名(包含点、空格等特殊字符,不要加单引号)," +
+            "系统会按 Google Sheets A1 规则自动处理转义。"
 
     private const val DESC_SHEETS_OPERATION =
         "执行 Google 表格操作。operation 决定具体动作类型。" +
             "不确定用法时先调用 load_tool_doc(\"sheets_basic\"/\"sheets_row_ops\"/...) 获取详细文档。" +
             "需要一次性对大量单元格做混合修改(改值+填色+改文字色+删行…)时,优先用 batch_modify,把多个子操作合并到一次工具调用,后端自动分组成最少 Google API 请求,避免逐格调用触发工具调用次数上限。" +
-            "安全约束:修改/删除行前先用 search 定位行号;列操作需用户确认;全表检查/修正用 check_translations/fix_translations。"
+            "安全约束:修改/删除行前先用 search 定位行号;列操作需用户确认;全表检查/修正用 check_translations/fix_translations。" +
+            "重要:sheetName 参数必须**原样**使用下方工作表名(包含点、空格等特殊字符,不要加单引号)," +
+            "系统会按 Google Sheets A1 规则自动处理转义。省略时使用默认工作表。"
 
     private const val DESC_ASK_USER =
         "向用户提问并等待用户回复。options 非空时显示按钮供用户点击;options 为空时用户可在聊天输入框中输入回复内容。" +
@@ -112,7 +133,28 @@ object ToolDefinitions {
 
     // endregion
 
-    private fun buildOpenAiTools(): JsonArray {
+    /**
+     * 把当前 Google Sheets 上下文拼到 description 后面。
+     * 让 AI 在调用工具前能直接看到默认 sheet 和可用 sheet 列表,避免读错 sheet。
+     */
+    private fun appendSheetContext(base: String, ctx: SheetContext): String {
+        if (ctx.defaultSheetName.isNullOrBlank() && ctx.availableSheets.isEmpty()) return base
+        val parts = mutableListOf<String>()
+        if (!ctx.defaultSheetName.isNullOrBlank()) {
+            parts += "默认工作表:「${ctx.defaultSheetName}」"
+        }
+        if (ctx.availableSheets.isNotEmpty()) {
+            val shown = ctx.availableSheets.take(20)
+            val more = (ctx.availableSheets.size - shown.size).coerceAtLeast(0)
+            val list = if (more > 0) shown.joinToString("、") + " 等 $more 个" else shown.joinToString("、")
+            parts += "可用工作表:[$list]"
+        }
+        return "$base\n\n[当前 Google Sheets 上下文] ${parts.joinToString("; ")}。"
+    }
+
+    private fun buildOpenAiTools(ctx: SheetContext): JsonArray {
+        val descSheets = appendSheetContext(DESC_SHEETS_OPERATION, ctx)
+        val descFindRows = appendSheetContext(DESC_FIND_ROWS_BY_TEXT, ctx)
         return JsonArray().apply {
             add(openAiTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
             add(openAiTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
@@ -120,15 +162,17 @@ object ToolDefinitions {
             add(openAiTool(TOOL_QUERY_KEYS, DESC_QUERY_KEYS, openAiQueryKeysParams()))
             add(openAiTool(TOOL_READ_STRING, DESC_READ_STRING, openAiReadStringParams()))
             add(openAiTool(TOOL_FIND_KEYS_BY_TEXT, DESC_FIND_KEYS_BY_TEXT, openAiFindKeysByTextParams()))
-            add(openAiTool(TOOL_SHEETS_OPERATION, DESC_SHEETS_OPERATION, openAiSheetsOperationParams()))
-            add(openAiTool(TOOL_FIND_ROWS_BY_TEXT, DESC_FIND_ROWS_BY_TEXT, openAiFindRowsByTextParams()))
+            add(openAiTool(TOOL_SHEETS_OPERATION, descSheets, openAiSheetsOperationParams()))
+            add(openAiTool(TOOL_FIND_ROWS_BY_TEXT, descFindRows, openAiFindRowsByTextParams()))
             add(openAiTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(openAiTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(openAiTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
         }
     }
 
-    private fun buildAnthropicTools(): JsonArray {
+    private fun buildAnthropicTools(ctx: SheetContext): JsonArray {
+        val descSheets = appendSheetContext(DESC_SHEETS_OPERATION, ctx)
+        val descFindRows = appendSheetContext(DESC_FIND_ROWS_BY_TEXT, ctx)
         return JsonArray().apply {
             add(anthropicTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
             add(anthropicTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
@@ -136,8 +180,8 @@ object ToolDefinitions {
             add(anthropicTool(TOOL_QUERY_KEYS, DESC_QUERY_KEYS, openAiQueryKeysParams()))
             add(anthropicTool(TOOL_READ_STRING, DESC_READ_STRING, openAiReadStringParams()))
             add(anthropicTool(TOOL_FIND_KEYS_BY_TEXT, DESC_FIND_KEYS_BY_TEXT, openAiFindKeysByTextParams()))
-            add(anthropicTool(TOOL_SHEETS_OPERATION, DESC_SHEETS_OPERATION, openAiSheetsOperationParams()))
-            add(anthropicTool(TOOL_FIND_ROWS_BY_TEXT, DESC_FIND_ROWS_BY_TEXT, openAiFindRowsByTextParams()))
+            add(anthropicTool(TOOL_SHEETS_OPERATION, descSheets, openAiSheetsOperationParams()))
+            add(anthropicTool(TOOL_FIND_ROWS_BY_TEXT, descFindRows, openAiFindRowsByTextParams()))
             add(anthropicTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(anthropicTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(anthropicTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
