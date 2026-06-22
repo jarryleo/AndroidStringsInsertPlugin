@@ -1900,8 +1900,12 @@ object SheetsManager {
         val spreadsheet = service.spreadsheets().get(spreadsheetId)
             .setIncludeGridData(false)
             .execute()
+        // sanitizeSheetName 会对含空格 / 特殊字符的工作表名加单引号(如 "'XXXX 1.0.4'")
+        // 以便拼装 A1 range,但实际工作表 title 没有引号——匹配时必须先把引号剥掉,
+        // 否则 "Sheet 'XXXX 1.0.4' not found in spreadsheet." 会出现但工作表其实存在。
+        val target = sheetName.trim('\'')
         return spreadsheet.sheets?.firstOrNull {
-            it.properties?.title?.equals(sheetName, ignoreCase = true) == true
+            it.properties?.title?.equals(target, ignoreCase = true) == true
         }?.properties?.sheetId
     }
 
