@@ -86,6 +86,11 @@ internal fun InsertStringsContent(
     onCloseContext: () -> Unit,
     showContextPopup: Boolean,
     chatContextText: String,
+    /**
+     * 当前用户在 strings.xml 中选中的 key 列表,用于聊天面板顶部展示「已选择翻译(N)」。
+     * 由父组件从 keyEntries 派生(随用户重新选 key 同步更新)。
+     */
+    selectedKeys: List<String> = emptyList(),
 ) {
     val colors = rememberIdeColors()
 
@@ -156,6 +161,7 @@ internal fun InsertStringsContent(
                         showContextPopup = showContextPopup,
                         chatContextText = chatContextText,
                         quickPhrases = phrases,
+                        selectedKeys = selectedKeys,
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )

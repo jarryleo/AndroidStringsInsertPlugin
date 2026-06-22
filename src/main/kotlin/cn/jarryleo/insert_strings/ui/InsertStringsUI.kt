@@ -195,6 +195,11 @@ class InsertStringsUI(
                     onCloseContext = chatDriver::closeContextPopup,
                     showContextPopup = showContextPopup,
                     chatContextText = chatContextText,
+                    // 把当前已选 key 列表传给聊天面板顶部展示。
+                    // keyEntries 本身是 mutableStateListOf,这里每次重组都会拿到最新快照,
+                    // 用户在 strings.xml 中重新选 key 时,updateUI 会重建 keyEntries,
+                    // 派生出的 selectedKeys 自动同步到聊天 UI。
+                    selectedKeys = keyEntries.map { it.key },
                 )
             }
         }

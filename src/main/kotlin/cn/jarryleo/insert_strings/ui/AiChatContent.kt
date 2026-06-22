@@ -15,6 +15,7 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -66,6 +67,13 @@ fun AiChatContent(
      * 主面板等标准场景保持默认 8.dp。
      */
     messageListContentPadding: PaddingValues = PaddingValues(8.dp),
+    /**
+     * 当前用户在 strings.xml 中已选择的 key 列表。
+     * - 在消息列表上方展示,左侧标题「已选择翻译(N)」,右侧是高度约 3 行的滚动列表。
+     * - 列表为空(未选 key)时不显示整个区域,不占用聊天空间。
+     * - 该列表会随着用户重新选 key 同步更新(由外部传入最新值即可)。
+     */
+    selectedKeys: List<String> = emptyList(),
 ) {
     Box(modifier = modifier) {
         AiChatBody(
@@ -86,6 +94,7 @@ fun AiChatContent(
             quickPhrases = quickPhrases,
             showEnterHint = showEnterHint,
             messageListContentPadding = messageListContentPadding,
+            selectedKeys = selectedKeys,
         )
         if (showContextPopup) {
             ContextPopupOverlay(
@@ -116,6 +125,7 @@ private fun AiChatBody(
     quickPhrases: List<QuickPhrase> = emptyList(),
     showEnterHint: Boolean = true,
     messageListContentPadding: PaddingValues = PaddingValues(8.dp),
+    selectedKeys: List<String> = emptyList(),
 ) {
     val listState = rememberLazyListState()
     // 新消息加入时滚到末尾(用户期待看到刚发的内容)
@@ -174,6 +184,14 @@ private fun AiChatBody(
                     colors = colors,
                 )
             }
+        }
+
+        // 已选 key 列表:仅在非空时展示,高度约 3 行可滚动。
+        if (selectedKeys.isNotEmpty()) {
+            SelectedKeysPanel(
+                keys = selectedKeys,
+                colors = colors,
+            )
         }
 
         Box(
@@ -285,6 +303,59 @@ private fun AiChatBody(
                 style = compactTextStyle(colors.secondaryText),
                 modifier = Modifier.padding(start = 2.dp),
             )
+        }
+    }
+}
+
+/**
+ * 「已选择翻译」面板:显示在聊天列表上方,用来给用户一个「我现在到底在跟 AI 聊哪些 key」的视觉锚。
+ *
+ * 布局:
+ *  - 顶部小标题:`已选择翻译(N)`,N 为 key 总数,会随 keyEntries 变化而自动同步。
+ *  - 下方滚动列表:固定高度 ≈ 3 行(超过 3 行可纵向滚动),单行展示一个 key,长 key 截断省略。
+ *  - 整体外框、背景与消息区一致,不喧宾夺主。
+ *
+ * 注意:本组件不直接持有状态,所有数据由父组件 `selectedKeys` 传入,
+ * 这样无论用户何时在 strings.xml 中重新选择,父组件把最新 List 传进来,UI 就自动更新。
+ */
+@Composable
+private fun SelectedKeysPanel(
+    keys: List<String>,
+    colors: IdeColors,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(BorderStroke(1.dp, colors.border), RoundedCornerShape(4.dp))
+            .background(colors.tableBackground, RoundedCornerShape(4.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        // 小标题:左侧文案 + 右侧数量
+        Text(
+            text = "已选择翻译(${keys.size})",
+            color = colors.secondaryText,
+            style = compactTextStyle(colors.secondaryText),
+            fontWeight = FontWeight.Bold,
+        )
+        // key 列表:固定高度 ~ 3 行(每行约 24dp,加 padding 约 80~90dp),超长可纵向滚动
+        val listState = rememberLazyListState()
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 84.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            items(keys) { key ->
+                Text(
+                    text = key,
+                    color = colors.text,
+                    style = compactTextStyle(colors.text),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
