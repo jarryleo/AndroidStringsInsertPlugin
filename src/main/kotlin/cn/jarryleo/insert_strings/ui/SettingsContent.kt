@@ -52,9 +52,11 @@ fun SettingsContent(
     editingPhrase: QuickPhrase?,
     onAddPhrase: () -> Unit,
     onEditPhrase: (QuickPhrase) -> Unit,
-    onDeletePhrase: (QuickPhrase) -> Unit,
+    onDeletePhrase: (QuickPhrase) -> Boolean,
+    onMovePhrase: (fromIndex: Int, toIndex: Int) -> Unit,
     onSavePhraseEdit: (title: String, text: String, color: String?) -> Boolean,
     onCancelPhraseEdit: () -> Unit,
+    onResetDefaultPhrases: () -> Unit,
     modifier: Modifier = Modifier,
     colors: IdeColors,
 ) {
@@ -153,8 +155,10 @@ fun SettingsContent(
                 onAdd = onAddPhrase,
                 onEdit = onEditPhrase,
                 onDelete = onDeletePhrase,
+                onMove = onMovePhrase,
                 onSaveEdit = onSavePhraseEdit,
                 onCancelEdit = onCancelPhraseEdit,
+                onResetDefaults = onResetDefaultPhrases,
                 modifier = Modifier.fillMaxSize(),
                 colors = colors,
             )

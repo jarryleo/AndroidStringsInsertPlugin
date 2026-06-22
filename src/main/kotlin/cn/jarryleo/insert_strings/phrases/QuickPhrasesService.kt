@@ -46,6 +46,19 @@ class QuickPhrasesService : PersistentStateComponent<QuickPhrasesState> {
     }
 
     /**
+     * 把 [fromIndex] 处的元素移到 [toIndex] 位置。
+     * - 越界或 from == to 时 no-op,避免越界异常;
+     * - 用户拖拽排序时调用,持久化顺序就是列表顺序。
+     */
+    fun move(fromIndex: Int, toIndex: Int) {
+        val list = state.phrases
+        if (fromIndex == toIndex) return
+        if (fromIndex !in list.indices || toIndex !in list.indices) return
+        val item = list.removeAt(fromIndex)
+        list.add(toIndex, item)
+    }
+
+    /**
      * 新增或更新一条短语(按 [QuickPhrase.id] 匹配)。
      * 编辑时复用 [QuickPhrase.id],新增时会分配新 id。
      */
