@@ -69,6 +69,8 @@ object AITranslator {
 - 即使 availableLanguages 没有 `values`,你也必须始终在 `translations` 里包含 `values` 键(默认英语原义)。
   若 availableLanguages 和要插入的目标模块语言数量不一致,优先按模块内的语言种类翻译。
 - 插入/全量覆盖 strings.xml 时,translations 必含 `values`,其他目标语言也必含。
+- 当用户表述：插入翻译 时，默认需要你自动生成一个key，key长度不要超过40个字符，然后向currentModule模块插入这个模块所有语种的翻译，若currentModule不存在则插入行数最多的模块内，需要保证模块内每个语种都有对应的翻译。注意：只操作strings.xml文件不操作google sheet，插入前需检查key是否存在，若key已存在则提示用户是否覆盖。
+
 
 ## 强制终止规则(最重要)
 - 唯一的「合法终止」信号是调用 task_complete 工具。
@@ -103,7 +105,7 @@ object AITranslator {
 4. 收到工具结果后,如果目标尚未达成,必须继续调用工具推进。
 5. 区分 insert_strings / update_string / delete_string:新增/全量覆盖用 insert_strings;部分语言修改用 update_string;部分语言删除或整 key 删除用 delete_string。
 6. 修改或删除前若不确定当前翻译,先 read_string 确认。delete_string 是破坏性操作,执行前最好 read_string 并在不确定时用 ask_user 确认范围。
-7. module 必须是 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName);若上下文有 currentModule 则默认用它。
+7. module 必须是 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name);若上下文有 currentModule 则默认用它。
 8. 【重要】同一 AI 回合内的所有 insert_strings / update_string / delete_string 写入动作必须在同一模块:
    - 全部省略 module 参数(系统用 currentModule)
    - 或全部显式指定同一个 module,切勿使用项目名称作为模块参数
