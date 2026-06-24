@@ -69,6 +69,18 @@ internal interface ChatStateHolder {
     var editorSelection: EditorSelectionContext?
 
     /**
+     * 当前 chat 入口标识。由各 state 实现写入固定值,经 [cn.jarryleo.insert_strings.ui.InsertStringsChatContextBuilder]
+     * 暴露给 AI,让 AI 在收到「使用现有 key:」选项时能可靠判断是否需要 replace_selection,
+     * 不再依赖「自行判断」这种不可靠逻辑。
+     *
+     * 取值:
+     *  - "mainPanel"        主面板聊天视图(InsertStringsUI)。无编辑器上下文。
+     *  - "extractStrings"   Extract strings.xml 弹框。已捕获编辑器选中的硬编码文本。
+     *  - "askAi"            Ask AI 弹框。若打开时编辑器有选区,会一并通过 [editorSelection] 暴露。
+     */
+    val chatEntry: String
+
+    /**
      * 标记「编辑器选区已被替换为对 key 的引用」,防止 insert_strings 触发的自动替换与
      * AI 后续显式调用 [AiAction.ReplaceSelection] 工具时发生双重替换。
      *

@@ -38,6 +38,7 @@ internal class InsertStringsChatContextBuilder(
         val availableSheetNames = state.sheetsAvailableSheets.map { it.title }
             .takeIf { it.isNotEmpty() }
 
+        val editorSel = state.editorSelection
         val root = JsonObject().apply {
             addProperty("projectBase", state.project.basePath)
             add("androidProject", JsonObject().apply {
@@ -47,6 +48,36 @@ internal class InsertStringsChatContextBuilder(
                     "Android 工程名,仅用于展示。module 参数必须用 modules[].moduleName,不要传这个 name。"
                 )
             })
+            // chatEntry:当前 chat 入口标识。AI 必须根据这个字段判断 replace_selection
+            // 是否必做 —— 见 system prompt 中「选择『使用现有 key:』后第一步」一节。
+            //  - "mainPanel"        主面板聊天视图(InsertStringsUI)。无编辑器上下文。
+            //  - "extractStrings"   用户从右键菜单触发 "Extract strings.xml" 打开的弹框,
+            //                       已捕获编辑器选中的硬编码文本,driver/AI 完成 insert /
+            //                       用户选「使用现有 key」时**必须** replace_selection。
+            //  - "askAi"            用户从右键菜单触发 "Ask AI" 打开的弹框,若打开时编辑器
+            //                       有选区,则同样捕获;与 extractStrings 相同的 replace 规则。
+            addProperty("chatEntry", state.chatEntry)
+            // editorSelection:把入口打开时捕获的编辑器选区快照暴露给 AI —— 取代之前要求
+            // AI「自行判断」的不可靠逻辑。AI 在收到「使用现有 key」选项时,**直接看
+            // editorSelection 是否为 null**:非 null 表示有硬编码文本待替换,必须先
+            // replace_selection 才能继续。
+            if (editorSel != null) {
+                add("editorSelection", JsonObject().apply {
+                    addProperty("text", editorSel.selectedText)
+                    addProperty("file", editorSel.file?.path)
+                    addProperty("selectionStart", editorSel.selectionStart)
+                    addProperty("selectionEnd", editorSel.selectionEnd)
+                    addProperty(
+                        "note",
+                        "用户在 chat 入口打开时从编辑器中选中的硬编码文本。" +
+                            "如果当前任务是「插入翻译」且 chatEntry=extractStrings/askAi," +
+                            "AI 应把这段文本视为待翻译的原文,并在用户选「使用现有 key:<key>」时" +
+                            "**必须**先调 replace_selection(key=<key>) 把这段选区替换为对 key 的引用。"
+                    )
+                })
+            } else {
+                add("editorSelection", null)
+            }
             add("currentModule", contextInfo.currentModule?.let { moduleToJson(it) })
             add("modules", JsonArray().apply {
                 contextInfo.modules.forEach { add(moduleToJson(it)) }

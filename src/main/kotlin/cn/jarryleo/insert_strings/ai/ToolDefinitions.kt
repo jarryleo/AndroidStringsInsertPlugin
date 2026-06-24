@@ -107,13 +107,15 @@ object ToolDefinitions {
             "  - **「取消操作」** — 放弃本次插入。" +
             "**用户选择后的处理流程(由 AI 自行驱动,系统不再自动触发替换)**:" +
             "  - 选「使用现有 key:<existing_key>」—— ⚠️ **强约束:必须按顺序执行以下两步,不可跳过第一步** ⚠️:" +
-            "    - **第一步(必做)**:先判断本次插入是否来自用户从布局/代码中选中的硬编码文本" +
-            "(Extract strings.xml 入口 / AskAi 入口选中了代码)。若是," +
-            "**必须先调用 replace_selection(key=<existing_key>)** 工具把选区替换为" +
+            "    - **第一步(必做)**:**直接读上下文 JSON 里的 `chatEntry` 字段,不要再自己「判断」**:" +
+            "      - `chatEntry == \"extractStrings\"` 或 `chatEntry == \"askAi\"` 且 `editorSelection` 非 null" +
+            " —— 入口已捕获用户从布局/代码中选中的硬编码文本," +
+            "**必须先调用 replace_selection(key=<existing_key>)** 把该选区替换为" +
             "`@string/<existing_key>`(XML 布局)或 `R.string/<existing_key>`(其它文件);" +
-            "工具返回成功后**才**进入第二步。若不是(用户直接给出译文文本,无选区),跳过本步。" +
-            "**常见错误:不要在用户选择「使用现有 key」后直接调 read_string 跳过 replace_selection** ——" +
-            "这会让硬编码文本保留在文件中,违反用户提取字符串的初衷。" +
+            "工具返回成功后**才**进入第二步。" +
+            "      - `chatEntry == \"mainPanel\"` 或 `editorSelection == null` —— 跳过本步。" +
+            "      **常见错误:不要在 chatEntry=extractStrings/askAi 且 editorSelection 非 null 时" +
+            "直接调 read_string 跳过 replace_selection** —— 这会让硬编码文本保留在文件中。" +
             "    - **第二步(必做)**:调用 read_string(<existing_key>) 取现有 key 的全语种翻译," +
             "逐项检查是否准确、是否缺漏;若有修正需求,先 ask_user 询问用户是否修正," +
             "得到肯定答复后用 update_string 精准补全;若已完整准确,直接 task_complete 结束。" +

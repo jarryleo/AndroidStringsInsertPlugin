@@ -316,6 +316,9 @@ private class AskAiChatHolder(
     override val chatMessages: SnapshotStateList<ChatMessage> = mutableStateListOf()
     override var chatInput: String by mutableStateOf("")
     override var chatSending: Boolean by mutableStateOf(false)
+    // 当前 chat 入口标识 —— AskAi 弹框固定 "askAi",由 ChatStateHolder.chatEntry 写入上下文
+    // 让 AI 知道入口类型,避免「使用现有 key」后跳过 replace_selection。
+    override val chatEntry: String = "askAi"
 
     @Volatile
     override var stopRequested: Boolean = false

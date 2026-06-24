@@ -98,19 +98,23 @@ object AITranslator {
        - "插入新 key" — 忽略查重,按原计划新增 key(可能产生重复文案的不同 key)
        - "取消操作" — 放弃本次插入
        例:`{"options":["使用现有 key:hello_world","插入新 key","取消操作"]}`
-    4. **用户选择后的标准流程(由 AI 自行驱动,系统不再自动触发替换)**:
-       - **选择「使用现有 key:<existing_key>」** —— ⚠️ **强约束:必须按顺序执行以下两步,不可跳过第一步** ⚠️:
-         - **第一步(必做)**:先判断本次插入是否来自用户从布局/代码中选中的硬编码文本
-           (典型场景:Extract strings.xml 入口,或 AskAi 入口下用户选中了一段代码)。若是,
-           **必须先调用 replace_selection(key=<existing_key>)** 工具把选区替换为
-           `@string/<existing_key>`(XML 布局)或 `R.string/<existing_key>`(其它文件);
-           工具返回成功后**才**进入第二步。若不是(用户直接给出译文文本,无选区),跳过本步。
-           **常见错误:不要在用户选择「使用现有 key」后直接调 read_string 跳过 replace_selection** —
-           这会让硬编码文本保留在文件中,违反用户提取字符串的初衷。
-         - **第二步(必做)**:调用 read_string(<existing_key>) 取现有 key 的全语种翻译,逐项检查是否准确、是否缺漏;
-           若有修正需求,先 ask_user 询问用户是否修正,得到肯定答复后用 update_string 精准补全;
-           若已完整准确,直接 task_complete 结束。
-         - **不要**再调用 insert_strings(那个待插入的新 key 已被忽略)。
+     4. **用户选择后的标准流程(由 AI 自行驱动,系统不再自动触发替换)**:
+        - **选择「使用现有 key:<existing_key>」** —— ⚠️ **强约束:必须按顺序执行以下两步,不可跳过第一步** ⚠️:
+          - **第一步(必做)**:**直接看上下文中的 `chatEntry` 字段,不要再自己「判断」**:
+            - `chatEntry == "extractStrings"` 或 `chatEntry == "askAi"` 且 `editorSelection` 非 null
+              —— 入口打开时已捕获用户从布局/代码中选中的硬编码文本,
+              **必须先调用 replace_selection(key=<existing_key>)** 工具把该选区替换为
+              `@string/<existing_key>`(XML 布局)或 `R.string/<existing_key>`(其它文件);
+              工具返回成功后**才**进入第二步。
+            - `chatEntry == "mainPanel"` 或 `editorSelection == null` —— 用户没有选区,跳过本步。
+            **常见错误:不要在 chatEntry=extractStrings/askAi 且 editorSelection 非 null 时
+            直接调 read_string 跳过 replace_selection** —— 这会让硬编码文本保留在文件中,
+            违反用户提取字符串的初衷。系统会在每轮 AI 调用的上下文 JSON 里把
+            `chatEntry` 与 `editorSelection` 暴露给你,直接读字段判断即可。
+          - **第二步(必做)**:调用 read_string(<existing_key>) 取现有 key 的全语种翻译,逐项检查是否准确、是否缺漏;
+            若有修正需求,先 ask_user 询问用户是否修正,得到肯定答复后用 update_string 精准补全;
+            若已完整准确,直接 task_complete 结束。
+          - **不要**再调用 insert_strings(那个待插入的新 key 已被忽略)。
        - **选择「插入新 key」**:
          - 先用 query_keys 查你准备生成的 key 名是否已存在(可结合正则约束);
          - 若存在,**重新生成一个不冲突的 key**(长度仍不超过 40 字符),直到唯一;
@@ -204,13 +208,15 @@ object AITranslator {
               - `取消操作` — 放弃本次插入。
             - **用户选择后的处理流程(由 AI 自行驱动,系统不再自动触发替换)**:
               - 选「使用现有 key:<existing_key>」—— ⚠️ **强约束:必须按顺序执行以下两步,不可跳过第一步** ⚠️:
-                - **第一步(必做)**:先判断本次插入是否来自用户从布局/代码中选中的硬编码文本
-                  (典型场景:Extract strings.xml 入口,或 AskAi 入口下用户选中了一段代码)。若是,
-                  **必须先调用 replace_selection(key=<existing_key>)** 工具把选区替换为
-                  `@string/<existing_key>`(XML 布局)或 `R.string/<existing_key>`(其它文件);
-                  工具返回成功后**才**进入第二步。若不是(用户直接给出译文文本,无选区),跳过本步。
-                  **常见错误:不要在用户选择「使用现有 key」后直接调 read_string 跳过 replace_selection** —
-                  这会让硬编码文本保留在文件中,违反用户提取字符串的初衷。
+                - **第一步(必做)**:**直接读上下文 JSON 里的 `chatEntry` 字段,不要再自己「判断」**:
+                  - `chatEntry == "extractStrings"` 或 `chatEntry == "askAi"` 且 `editorSelection` 非 null
+                    —— 入口已捕获用户从布局/代码中选中的硬编码文本,
+                    **必须先调用 replace_selection(key=<existing_key>)** 把该选区替换为
+                    `@string/<existing_key>`(XML 布局)或 `R.string/<existing_key>`(其它文件);
+                    工具返回成功后**才**进入第二步。
+                  - `chatEntry == "mainPanel"` 或 `editorSelection == null` —— 跳过本步。
+                  **常见错误:不要在 chatEntry=extractStrings/askAi 且 editorSelection 非 null 时
+                  直接调 read_string 跳过 replace_selection** —— 这会让硬编码文本保留在文件中。
                 - **第二步(必做)**:调用 read_string(<existing_key>) 取现有 key 的全语种翻译,
                   逐项检查是否准确、是否缺漏;若有修正需求,先 ask_user 询问用户是否修正,
                   得到肯定答复后用 update_string 精准补全;若已完整准确,直接 task_complete 结束。

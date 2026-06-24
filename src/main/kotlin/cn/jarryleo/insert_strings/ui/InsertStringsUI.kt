@@ -134,6 +134,8 @@ class InsertStringsUI(
     override var chatContextText by mutableStateOf("")
     // 主面板聊天视图无编辑器上下文,本字段始终为 null;extract/askai 弹框的 ChatHolder 会覆写。
     override var editorSelection: EditorSelectionContext? = null
+    // 当前 chat 入口标识 —— 主面板固定 "mainPanel",见 ChatStateHolder.chatEntry 注释。
+    override val chatEntry: String = "mainPanel"
 
     /**
      * 「重复 key 插入」二次确认时持有的状态。

@@ -223,15 +223,12 @@ class ExtractStringsAction : AnAction() {
         // 预置首条 user 消息 —— 把"插入翻译"的标准提示词按现有 system prompt 的约定发给 AI。
         // 注意:提示词中明确「只操作 strings.xml 不操作 google sheet」「自动生成 key,
         // 长度不超过 40 字符」「向 currentModule 插入,没有就用行数最多模块」,与 system prompt 一致。
+        // 关键:首条消息中显式告诉 AI "我来自 Extract strings.xml 入口,选中的就是
+        // 布局/代码里的硬编码文本",防止 AI 误判为"用户直接给译文"而跳过
+        // replace_selection 步骤(chatEntry=extractStrings 也会在上下文 JSON 中冗余告知)。
         val firstMessage = buildString {
-            append("请插入翻译:").append(selectedText)
-            /*appendLine()
-            appendLine("默认需要你自动生成一个 key,key 长度不要超过 40 个字符。")
-            appendLine("然后向 currentModule 模块插入这个模块所有语种的翻译;")
-            appendLine("若 currentModule 不存在则插入行数最多的模块内。")
-            appendLine("需要保证模块内每个语种都有对应的翻译。")
-            appendLine("注意:只操作 strings.xml 文件不操作 google sheet。")
-            appendLine("插入前需检查 key 是否存在;若 key 已存在则提示用户是否覆盖。")*/
+            append("[入口:Extract strings.xml] 我从布局/代码中选中了以下硬编码文本,请把它提取为 strings.xml 翻译条目:")
+            append(selectedText)
         }
         ApplicationManager.getApplication().executeOnPooledThread {
             driver.sendChatMessage(firstMessage)
@@ -364,6 +361,10 @@ private class ExtractStringsChatHolder(
     override val chatMessages: SnapshotStateList<ChatMessage> = mutableStateListOf()
     override var chatInput: String by mutableStateOf("")
     override var chatSending: Boolean by mutableStateOf(false)
+    // 当前 chat 入口标识 —— Extract strings.xml 弹框固定 "extractStrings",
+    // 由 ChatStateHolder.chatEntry 写入上下文让 AI 知道:在用户选「使用现有 key:」时
+    // **必须**先调 replace_selection 把 editorSelection 选中的硬编码文本替换掉。
+    override val chatEntry: String = "extractStrings"
 
     @Volatile
     override var stopRequested: Boolean = false
