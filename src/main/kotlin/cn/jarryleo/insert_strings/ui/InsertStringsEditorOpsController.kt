@@ -39,6 +39,11 @@ internal class InsertStringsEditorOpsController(
      * 把 chat 入口捕获的编辑器选区替换为对 [AiAction.ReplaceSelection.key] 的引用。
      *
      * 返回标准化工具结果文本(成功 / 失败 + 原因),driver 直接回传给 AI。
+     *
+     * 防双重替换:检查 [ChatStateHolder.editorReplacementTriggered];若已被前序
+     * onInsertStringsInserted 自动替换(或者本入口多次调用工具)处理,直接返回
+     * 「已跳过」而不做任何写入。同步块保证 check-and-set 的原子性(后台 tool loop
+     * 路径与 EDT 上的 onAutoReplace 回调路径并发时不会双重执行)。
      */
     fun runReplaceSelection(action: AiAction.ReplaceSelection): String {
         val key = action.key.trim()
@@ -49,17 +54,42 @@ internal class InsertStringsEditorOpsController(
             "信息:当前聊天入口没有可替换的编辑器选区(主面板聊天视图无编辑器上下文);" +
             "本工具仅在 ExtractStrings / AskAi 弹框入口有效"
 
-        // 在后台线程上同步等待 EDT 执行完毕。SwingUtilities.invokeAndWait 本身是阻塞的,
-        // 所以我们直接在当前线程(后台 tool loop)上 invokeAndWait 等到 EDT 跑完,
-        // 把结果作为 String 返回给 driver 的 tool result 装配。
-        val resultHolder = arrayOfNulls<String>(1)
-        return try {
-            SwingUtilities.invokeAndWait { resultHolder[0] = replaceOnEdt(ctx, key) }
-            resultHolder[0] ?: "[工具执行结果] 类型:replace_selection 状态:失败 信息:EDT 未返回结果"
-        } catch (e: Exception) {
-            "[工具执行结果] 类型:replace_selection 状态:失败 信息:执行异常:${e.message ?: "unknown"}"
+        return synchronized(replaceLock) {
+            if (state.editorReplacementTriggered) {
+                return@synchronized "[工具执行结果] 类型:replace_selection 状态:已跳过 " +
+                    "信息:编辑器选区已被前序自动替换处理(insert_strings 触发的 onInsertStringsInserted " +
+                    "或本入口之前的 replace_selection 调用),本次工具调用被忽略以防止双重替换"
+            }
+
+            // performReplace 需要在 EDT 上跑(WriteCommandAction 必须在 EDT)。
+            // 工具路径通常在后台 tool loop 上调用,用 invokeAndWait 同步等待;
+            // 自动替换路径已在 EDT 上 invokeLater 调用,直接执行避免嵌套 invokeAndWait 异常。
+            val resultHolder = arrayOfNulls<Pair<Boolean, String>>(1)
+            val runnable = { resultHolder[0] = performReplace(ctx, key) }
+            val message = try {
+                if (SwingUtilities.isEventDispatchThread()) {
+                    runnable()
+                } else {
+                    SwingUtilities.invokeAndWait(runnable)
+                }
+                val (success, msg) = resultHolder[0]
+                    ?: (false to "[工具执行结果] 类型:replace_selection 状态:失败 信息:EDT 未返回结果")
+                // 仅在替换成功后才置位标志 —— 失败时允许后续重试
+                if (success) state.editorReplacementTriggered = true
+                msg
+            } catch (e: Exception) {
+                "[工具执行结果] 类型:replace_selection 状态:失败 信息:执行异常:${e.message ?: "unknown"}"
+            }
+            message
         }
     }
+
+    /**
+     * 保证 runReplaceSelection 多次并发调用(check-and-set 标志)与 performReplace
+     * 写入之间的原子性,避免后台 tool loop 路径与 EDT 上的 onAutoReplace 回调路径
+     * 同时进入 performReplace 造成双重写入。
+     */
+    private val replaceLock = Any()
 
     /**
      * 在 EDT 上执行实际的编辑器替换:用 [EditorSelectionContext] 里的 editor / file /
@@ -71,22 +101,38 @@ internal class InsertStringsEditorOpsController(
      *  2. 入口打开时捕获的 offset 仍对应原文 → 用旧 offset;
      *  3. 文档中原选中文本只出现一次 → 用该唯一位置;
      *  0 / >1 处匹配 → 返回失败,让 AI 重新决策。
+     *
+     * 附加安全检查:
+     *  - 入口打开时的 [EditorSelectionContext.file] 与当前 editor.virtualFile 一致:
+     *    用户若在 AI 回复期间切换到别的文件,直接拒绝(避免把替换写到错误的文件)。
+     *  - 原始文本长度/位置变化时(用户在 AI 思考过程中编辑文档),三层定位策略会兜底
+     *    校验,确保不会替换错位置。
+     *
+     * 返回 (success, message):success=false 时调用方不置位 [ChatStateHolder.editorReplacementTriggered],
+     * 允许后续重试。
      */
-    private fun replaceOnEdt(ctx: EditorSelectionContext, key: String): String {
+    private fun performReplace(ctx: EditorSelectionContext, key: String): Pair<Boolean, String> {
         val project = state.project
         val editor = ctx.editor
         if (editor.isDisposed) {
-            return "[工具执行结果] 类型:replace_selection 状态:失败 信息:编辑器已关闭"
+            return false to "[工具执行结果] 类型:replace_selection 状态:失败 信息:编辑器已关闭"
+        }
+        // 安全检查 1:用户切换了文件 —— 拒绝,避免把替换写到错误的文件
+        val currentFile = editor.virtualFile
+        if (ctx.file != null && currentFile != null && ctx.file != currentFile) {
+            return false to "[工具执行结果] 类型:replace_selection 状态:失败 " +
+                "信息:用户已切换到其它文件(入口打开时文件=${ctx.file.path},当前=${currentFile.path})," +
+                "为防止误替换已拒绝"
         }
         val document = editor.document
         val textLength = document.textLength
         val currentSelection = editor.selectionModel
         val originalText = ctx.selectedText.takeIf { it.isNotBlank() }
-            ?: return "[工具执行结果] 类型:replace_selection 状态:失败 信息:原始选区文本为空,无法定位"
+            ?: return false to "[工具执行结果] 类型:replace_selection 状态:失败 信息:原始选区文本为空,无法定位"
 
         val range = locateRange(document, originalText, currentSelection, ctx, textLength)
-            ?: return "[工具执行结果] 类型:replace_selection 状态:失败 " +
-                "信息:无法定位原始选中文本(可能已变更,或文档中存在多处匹配)"
+            ?: return false to "[工具执行结果] 类型:replace_selection 状态:失败 " +
+                "信息:无法定位原始选中文本(可能已变更,或文档中存在多处匹配),为防止误替换已拒绝"
 
         val replacement = if (isLayoutXmlFile(ctx.file)) "@string/$key" else "R.string.$key"
 
@@ -107,7 +153,7 @@ internal class InsertStringsEditorOpsController(
             }
         }
         if (!replaced) {
-            return "[工具执行结果] 类型:replace_selection 状态:失败 信息:写入失败:${errorMsg ?: "unknown"}"
+            return false to "[工具执行结果] 类型:replace_selection 状态:失败 信息:写入失败:${errorMsg ?: "unknown"}"
         }
         // 触发文件重读(让 IDE 反映最新内容)
         ctx.file?.let { f ->
@@ -116,8 +162,8 @@ internal class InsertStringsEditorOpsController(
         // **不关闭聊天视图**:翻译查重的完整流程是 replace_selection → read_string → (可选)
         // ask_user 询问是否修正 → update_string。若此处关闭聊天视图,AI 无法继续推进
         // 后续工作(主面板会切回表格,AskAi/ExtractStrings 弹框保持打开,都依赖对话上下文)。
-        return "[工具执行结果] 类型:replace_selection 状态:成功 " +
-            "信息:已将选区替换为 $replacement(原长度 ${range.second - range.first} 字符),聊天视图保持打开"
+        return true to ("[工具执行结果] 类型:replace_selection 状态:成功 " +
+            "信息:已将选区替换为 $replacement(原长度 ${range.second - range.first} 字符),聊天视图保持打开")
     }
 
     private fun locateRange(

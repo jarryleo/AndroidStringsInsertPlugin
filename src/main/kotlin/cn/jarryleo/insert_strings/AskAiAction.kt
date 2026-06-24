@@ -12,6 +12,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.ComposePanel
 import androidx.compose.ui.unit.dp
+import cn.jarryleo.insert_strings.ai.AiAction
 import cn.jarryleo.insert_strings.ai.AiSettingsService
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.sheets.SheetsManager
@@ -134,6 +135,11 @@ class AskAiAction : AnAction() {
         val sheetsOps = InsertStringsSheetsOpsController(state)
         val fileOps = InsertStringsFileOpsController(state)
         val editorOps = InsertStringsEditorOpsController(state)
+        // 把 driver 触发的 onInsertStringsInserted 自动替换路由到 controller 的 runReplaceSelection,
+        // 与 AI 显式调用 replace_selection 工具走同一条路径,保证三层定位 + 防双重替换行为一致。
+        state.bindOnAutoReplace { key ->
+            editorOps.runReplaceSelection(AiAction.ReplaceSelection(key))
+        }
         val contextBuilder = InsertStringsChatContextBuilder(state)
         val driver = InsertStringsChatDriver(
             state = state,
@@ -320,6 +326,8 @@ private class AskAiChatHolder(
     override var showContextPopup: Boolean by mutableStateOf(false)
     override var chatContextText: String by mutableStateOf("")
     override var editorSelection: EditorSelectionContext? = null
+    @Volatile
+    override var editorReplacementTriggered: Boolean = false
 
     // 弹框无表格 —— 提供空容器,controllers 写入即丢弃
     override val keyEntries: MutableList<KeyedStringsInfo> = mutableListOf()
@@ -330,8 +338,7 @@ private class AskAiChatHolder(
     private var toastLabel: JBLabel? = null
     private var toastTimer: Timer? = null
 
-    @Volatile
-    private var editorReplacementTriggered: Boolean = false
+    private var onAutoReplace: ((String) -> Unit)? = null
 
     fun bindToastLabel(label: JBLabel) {
         toastLabel = label
@@ -373,64 +380,27 @@ private class AskAiChatHolder(
     }
 
     /**
+     * 注入「driver 完成 insert_strings 后自动触发的替换回调」。
+     * 由 [AskAiAction.showChatDialog] 在构造完 [cn.jarryleo.insert_strings.ui.InsertStringsEditorOpsController]
+     * 后调用,内部走 controller 的 [cn.jarryleo.insert_strings.ui.InsertStringsEditorOpsController.runReplaceSelection]
+     * 与 replace_selection 工具完全相同的替换/防双重替换路径,避免在此处维护重复实现。
+     */
+    fun bindOnAutoReplace(callback: (String) -> Unit) {
+        this.onAutoReplace = callback
+    }
+
+    /**
      * AskAi 入口的 [onInsertStringsInserted] 实现:把 [editorSelection] 选中的硬编码文本
-     * 替换为 `@string/<key>`(XML 布局)或 `R.string.<key>`(其它)。
-     * 若 [editorSelection] 为 null 或已被替换过,静默 no-op(AI 通过
-     * [AiAction.ReplaceSelection] 工具调用时由 controller 走显式路径并返回详细结果)。
+     * 替换为对 key 的引用。
+     *
+     * 替换 / 防双重替换 / 弹框保持打开等逻辑全部委托给 [cn.jarryleo.insert_strings.ui.InsertStringsEditorOpsController]
+     * (由 [bindOnAutoReplace] 注入),与 AI 显式调用 [AiAction.ReplaceSelection] 工具
+     * 走同一条路径 —— 保证两条路径行为一致、不会双重替换。
      */
     override fun onInsertStringsInserted(key: String, module: String?) {
-        if (editorReplacementTriggered) return
-        val ctx = editorSelection ?: return
-        editorReplacementTriggered = true
+        val cb = onAutoReplace ?: return
         SwingUtilities.invokeLater {
-            replaceEditorSelectionInternal(ctx, key)
+            cb(key)
         }
-    }
-
-    private fun replaceEditorSelectionInternal(ctx: EditorSelectionContext, key: String) {
-        val editor = ctx.editor
-        if (editor.isDisposed) return
-        val document = editor.document
-        val textLength = document.textLength
-        val originalText = ctx.selectedText.takeIf { it.isNotBlank() } ?: return
-        val currentSelection = editor.selectionModel
-        val range: Pair<Int, Int> = when {
-            currentSelection.hasSelection() -> {
-                val s = currentSelection.selectionStart
-                val e = currentSelection.selectionEnd
-                if (s in 0 until e && e <= textLength &&
-                    document.charsSequence.subSequence(s, e).toString() == originalText
-                ) s to e else null
-            }
-
-            else -> null
-        } ?: when {
-            ctx.selectionStart in 0 until ctx.selectionEnd && ctx.selectionEnd <= textLength &&
-                    document.charsSequence.subSequence(ctx.selectionStart, ctx.selectionEnd).toString() == originalText
-                -> ctx.selectionStart to ctx.selectionEnd
-
-            else -> null
-        } ?: run {
-            val first = document.text.indexOf(originalText)
-            if (first < 0) return
-            val second = document.text.indexOf(originalText, first + originalText.length)
-            if (second < 0) first to (first + originalText.length) else return
-        }
-        if (range !is Pair<Int, Int>) return
-        val replacement = if (isLayoutXmlFile(ctx.file)) "@string/$key" else "R.string.$key"
-        try {
-            com.intellij.openapi.command.WriteCommandAction.runWriteCommandAction(project) {
-                document.replaceString(range.first, range.second, replacement)
-                editor.selectionModel.removeSelection()
-                editor.caretModel.moveToOffset(range.first + replacement.length)
-                editor.scrollingModel.scrollToCaret(com.intellij.openapi.editor.ScrollType.MAKE_VISIBLE)
-            }
-        } catch (_: Exception) {
-            // 写入失败时静默 — 调用方(AI 工具或 driver)会基于结果继续推进
-        }
-    }
-
-    private fun isLayoutXmlFile(file: com.intellij.openapi.vfs.VirtualFile?): Boolean {
-        return (file?.extension?.lowercase() == "xml")
     }
 }

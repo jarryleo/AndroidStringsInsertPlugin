@@ -79,11 +79,19 @@ object AITranslator {
   - 若用户**明确指定了模块**(在消息里说"插到 feature 模块"或选了某行翻译),就用用户指定的模块(module 参数显式传)。
   - 需要保证模块内每个语种都有对应的翻译。
   - 注意:只操作 strings.xml 文件不操作 google sheet。
-  - 插入翻译前需要检查你生成的key在strings.xml是否存在,若存在请生成新的key.
-  - **插入翻译前的两道查重均由 AI 自助完成,系统不再自动跑**:
-    1. **译文查重**:用 find_keys_by_text 工具扫描待插入的 values 译文(**默认英语**,values/ 目录是 Android 默认英语源),
-       看目标模块或全项目中是否已存在对应 key。建议同时跑一次 query_keys(searchIn=text / both) 提高命中率。
-    2. **Key 名查重**:生成 key 后,用 query_keys(searchIn=key) 检查你打算用的 key 名是否已存在,避免无意中撞名。
+   - 插入翻译前需要检查你生成的key在strings.xml是否存在,若存在请生成新的key.
+   - **插入翻译前的两道查重均由 AI 自助完成,系统不再自动跑**:
+     1. **原文查重(必做,主要查重依据)**:用 find_keys_by_text 扫描**用户消息中的原始文本**
+        (用户从布局/代码中选中的硬编码文本,或用户在消息中直接输入的待翻译文本)——
+        **不传 language 参数**(跨所有语言目录搜,不限 values/),
+        matchType=exact 跑一次、再 contains 兜底;
+        看目标模块或全项目中是否已存在「任何语言翻译」与该原文完全一致或高度相似。
+        原因:用户从布局/代码中选中的硬编码文本通常**就是目标语言翻译**(例如中文「登录」),
+        而非默认英语。若仅用 AI 自己翻译后的 values 译文(英语)做查重,会漏掉「原文已存在、但
+        values/ 英语译文用词不同」的场景(例:`values-zh-rCN` 已有「登录」,values/ 译文是
+        「Sign in」,按「Login」查就漏了)。建议同时跑一次 query_keys(searchIn=text / both)
+        跨多语种翻译文本搜索,提高命中率。
+     2. **Key 名查重**:生成 key 后,用 query_keys(searchIn=key) 检查你打算用的 key 名是否已存在,避免无意中撞名。
     3. 若两道查重中有任一命中,**用一次 ask_user 列出全部命中项**。question 中**明确写出找到的现有 key 名称与所在模块**。
        options **必须**使用以下统一格式(便于你后续按选项文本判断用户的决策):
        - **"使用现有 key:<existing_key>"**(冒号后紧跟 key 名,key 名只允许 `[A-Za-z_][A-Za-z0-9_]*`;允许在结尾追加说明)
@@ -181,9 +189,14 @@ object AITranslator {
             - 可以同时返回多个 insert_strings 动作插入多个字符串。
             - 翻译内容中 XML 特殊字符需转义：&amp; &lt; &gt; &quot; &apos;。
             - **插入前的两道查重均由 AI 自助完成,系统不再自动跑**:
-              1. **译文查重**:用 find_keys_by_text 按 values 译文(**默认英语**,values/ 目录是 Android 默认英语源)扫目标模块/全项目,
-                 看是否存在与待插入译文完全一致或高度相似的现有 key。
-                 建议同时跑一次 query_keys(searchIn=text / both),跨多语种翻译文本搜索,提高命中率。
+              1. **原文查重(必做,主要查重依据)**:用 find_keys_by_text 扫描**用户消息中的原始文本**
+                 (用户从布局/代码中选中的硬编码文本,或用户在消息中直接输入的待翻译文本)——
+                 **不传 language 参数**(跨所有语言目录搜,不限 values/),matchType=exact 跑一次、
+                 再 contains 兜底;看是否存在与该原文完全一致或高度相似的现有 key。
+                 原因:用户选中的硬编码文本通常**就是目标语言翻译**(例如中文「登录」),
+                 若仅用 AI 自己翻译后的 values 译文(英语)查重,会漏掉「原文已存在、但
+                 values/ 英语译文用词不同」的场景。建议同时跑一次 query_keys(searchIn=text / both)
+                 跨多语种翻译文本搜索,提高命中率。
               2. **Key 名查重**:用 query_keys(searchIn=key) 查你打算生成的 key 名是否已存在(避免无意中撞名)。
             - **若两道查重中有任一命中,用 ask_user 询问用户**。options 统一格式(便于你后续按选项文本判断用户决策):
               - `使用现有 key:<existing_key>` — key 名只允许 `[A-Za-z_][A-Za-z0-9_]*`,允许在结尾追加说明;沿用现有 key,**跳过本次写入**。
@@ -294,7 +307,8 @@ object AITranslator {
             字段：
             - text（必填）：要查找的翻译文本。
             - module（可选）：限定 Android 模块名。省略时搜索项目中**所有模块**的所有 strings.xml。
-            - language（可选）：限定语言目录（如 values-zh-rTW）。省略时搜索所有语言。
+            - language（可选）：限定语言目录（如 values-zh-rTW）。**插入查重时务必省略**,
+              跨所有语言目录搜才能命中「原文已存在但 values/ 英语译文用词不同」的场景。
             - matchType（可选）：匹配模式，exact（完全相等）/ contains（子串，默认）/ regex（正则）。
             - caseSensitive（可选，默认 false）：是否区分大小写。
             - limit（可选）：最大返回条数，默认 30，最大 200。
@@ -302,10 +316,14 @@ object AITranslator {
             典型场景：
             - 看到一段文字想反查是哪个 key。
             - 排查重复翻译、跨语言确认某文本对应哪个 key。
-            - **insert_strings 前必跑**:作为翻译查重入口,先把待插入的 values 译文(默认英语)用 matchType=exact 跑一次,
+            - **insert_strings 前必跑(查重入口)**:用**用户消息中的原始文本**(用户从布局/代码中选中的
+              硬编码文本,或在消息中直接输入的待翻译文本)**不传 language 参数**、matchType=exact 跑一次,
               再用 matchType=contains 跑一次兜底,把命中的 key 放进 ask_user 询问用户。
+              ⚠️ 不要用 AI 自己翻译后的 values 译文(英语)查重 —— 用户选中的硬编码文本通常
+              **就是目标语言翻译**(如中文「登录」),values/ 译文用词可能与原文不一致,会漏命中。
             示例：
-            {"type":"find_keys_by_text","text":"登录","language":"values-zh-rCN"}
+            {"type":"find_keys_by_text","text":"登录"}
+            {"type":"find_keys_by_text","text":"登录","matchType":"contains"}
             {"type":"find_keys_by_text","text":"^Hello.*$","module":"app","matchType":"regex"}
         """.trimIndent(),
 

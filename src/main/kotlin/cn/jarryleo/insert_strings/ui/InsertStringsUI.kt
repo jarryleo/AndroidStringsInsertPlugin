@@ -126,6 +126,9 @@ class InsertStringsUI(
     // 用户点击「停止」时置为 true,tool loop 看到就退出
     @Volatile
     override var stopRequested: Boolean = false
+    // 编辑器选区是否已被替换(主面板无编辑器上下文,始终为 false;由 controller 在替换成功后写入)
+    @Volatile
+    override var editorReplacementTriggered: Boolean = false
     // AI 上下文弹窗
     override var showContextPopup by mutableStateOf(false)
     override var chatContextText by mutableStateOf("")

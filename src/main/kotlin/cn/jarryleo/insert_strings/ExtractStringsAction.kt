@@ -12,6 +12,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.ComposePanel
 import androidx.compose.ui.unit.dp
+import cn.jarryleo.insert_strings.ai.AiAction
 import cn.jarryleo.insert_strings.ai.AiSettingsService
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.sheets.SheetsManager
@@ -23,9 +24,7 @@ import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.editor.Editor
-import com.intellij.openapi.editor.ScrollType
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.vfs.VirtualFile
@@ -44,14 +43,18 @@ import javax.swing.*
  * 2. 打开与 AskAi 同款的轻量 chat 弹框,自动把「把选中文本插入 strings.xml 并要求
  *    AI 全语种翻译」的提示词作为首条 user 消息发出,AI 会用 [AiAction.InsertStrings]
  *    把翻译写入 currentModule(没有就用行数最多的模块)。
- * 3. AI 完成 insert_strings 后:
+ * 3. AI 完成 insert_strings / 复用 existing key 后:
  *    - 拿到刚写入的 key(由 [InsertStringsChatDriver] 通过
  *      [ChatStateHolder.onInsertStringsInserted] 回调传回)
- *    - 把编辑器选区替换成引用:
+ *    - 把编辑器选区替换成引用(委托给 [cn.jarryleo.insert_strings.ui.InsertStringsEditorOpsController]):
  *      - XML 布局(res/layout*):  `@string/key`
  *      - Kotlin / Java:          `R.string.key`
  *      - 其它文件:               默认走 `R.string.key`(代码优先)
  * 4. 弹框保持打开(用户可继续与 AI 交互,或手动点 Close 按钮关闭)。
+ * 5. AI 后续可显式调用 [AiAction.ReplaceSelection] 工具再次替换 — 实际替换由
+ *    [cn.jarryleo.insert_strings.ui.InsertStringsEditorOpsController.runReplaceSelection]
+ *    统一执行,带三层定位策略 + 防双重替换校验,与上一步自动替换走同一路径,
+ *    行为完全一致。
  *
  * 「若 key 已存在则提示用户是否覆盖」由 AI 按 system prompt 中的规则通过 ask_user
  * 自然处理(已在 AITranslator.CHAT_SYSTEM_PROMPT 中说明),不在本类里重复实现。
@@ -124,30 +127,15 @@ class ExtractStringsAction : AnAction() {
             isResizable = true
         }
 
-        val state = ExtractStringsChatHolder(
-            project = project,
-            onKeyInserted = { key ->
-                // AI 完成 insert_strings / 复用 existing key 后,立即回到编辑器替换硬编码文本。
-                // 注意:此处不再关闭弹框 —— AI 后续可能继续推进翻译查重(read_string /
-                // ask_user / update_string),弹框需保持打开以维持对话上下文。
-                val doReplace = {
-                    replaceSelection(
-                        editor = editor,
-                        project = project,
-                        file = currentFile,
-                        selectedText = selectedText,
-                        selectionStart = selectionStart,
-                        selectionEnd = selectionEnd,
-                        key = key,
-                    )
-                }
-                if (SwingUtilities.isEventDispatchThread()) {
-                    doReplace()
-                } else {
-                    SwingUtilities.invokeLater { doReplace() }
-                    true
-                }
-            },
+        val state = ExtractStringsChatHolder(project = project)
+        // 注入 chat 入口打开时的编辑器选区,使 AI 显式调用 replace_selection 工具时
+        // 也能正确替换硬编码文本(与 AskAi 入口行为一致)。
+        state.bindEditorSelection(
+            editor = editor,
+            file = currentFile,
+            selectedText = selectedText,
+            selectionStart = selectionStart,
+            selectionEnd = selectionEnd,
         )
 
         val composePanel = ComposePanel()
@@ -185,6 +173,13 @@ class ExtractStringsAction : AnAction() {
         val sheetsOps = InsertStringsSheetsOpsController(state)
         val fileOps = InsertStringsFileOpsController(state)
         val editorOps = InsertStringsEditorOpsController(state)
+        // 把 driver 触发的 onInsertStringsInserted 自动替换路由到 controller 的 runReplaceSelection,
+        // 与 AI 显式调用 replace_selection 工具走同一条路径,保证三层定位 + 防双重替换行为一致。
+        // 注意:此处不再关闭弹框 —— AI 后续可能继续推进翻译查重(read_string /
+        // ask_user / update_string),弹框需保持打开以维持对话上下文。
+        state.bindOnAutoReplace { key ->
+            editorOps.runReplaceSelection(AiAction.ReplaceSelection(key))
+        }
         val contextBuilder = InsertStringsChatContextBuilder(state)
         val driver = InsertStringsChatDriver(
             state = state,
@@ -244,113 +239,12 @@ class ExtractStringsAction : AnAction() {
     }
 
     /**
-     * 把编辑器中 [selectionStart, selectionEnd) 这段选区替换成对应引用。
-     * - XML layout 文件(在 res/layout* 下): `@string/key`
-     * - Kotlin / Java / 其它:              `R.string.key`
-     *
-     * 在 WriteCommandAction 中执行,确保 IDE 撤销/重做栈能正确记录本次修改。
+     * 编辑器选区替换/定位/`isLayoutXmlFile` 逻辑已统一迁到
+     * [cn.jarryleo.insert_strings.ui.InsertStringsEditorOpsController](见
+     * [cn.jarryleo.insert_strings.ui.InsertStringsEditorOpsController.runReplaceSelection]
+     * 与 [cn.jarryleo.insert_strings.ui.InsertStringsEditorOpsController.performReplace])。
+     * 本类不再保留重复实现,所有替换都通过绑定的 auto-replace 回调走 controller。
      */
-    private fun replaceSelection(
-        editor: Editor,
-        project: Project,
-        file: VirtualFile?,
-        selectedText: String,
-        selectionStart: Int,
-        selectionEnd: Int,
-        key: String,
-    ): Boolean {
-        if (key.isBlank()) return false
-        val document = editor.document
-        val range = findReplacementRange(
-            editor = editor,
-            selectedText = selectedText,
-            selectionStart = selectionStart,
-            selectionEnd = selectionEnd,
-        ) ?: run {
-            Messages.showMessageDialog(
-                "Unable to locate the original selected text. Please select it again and retry.",
-                "Extract strings.xml",
-                Messages.getWarningIcon()
-            )
-            return false
-        }
-
-        val replacement = if (isLayoutXmlFile(file)) "@string/$key" else "R.string.$key"
-
-        var replaced = false
-        WriteCommandAction.runWriteCommandAction(project) {
-            try {
-                document.replaceString(range.first, range.second, replacement)
-                editor.selectionModel.removeSelection()
-                val caret = range.first + replacement.length
-                editor.caretModel.moveToOffset(caret)
-                editor.scrollingModel.scrollToCaret(ScrollType.MAKE_VISIBLE)
-                replaced = true
-            } catch (e: Exception) {
-                Messages.showMessageDialog(
-                    "Failed to replace selection: ${e.message ?: "unknown"}",
-                    "Extract strings.xml",
-                    Messages.getErrorIcon()
-                )
-            }
-        }
-        return replaced
-    }
-
-    /**
-     * 用户可能在 AI 生成 / 重复 key 二次确认期间改变了编辑器选区或文档内容。
-     * 因此替换时按三层策略定位:
-     * 1) 当前仍选中同一段文本,优先用当前选区;
-     * 2) action 触发时捕获的 offset 仍然对应原文,使用旧 offset;
-     * 3) 文档中原选中文本只出现一次,使用该唯一位置。
-     */
-    private fun findReplacementRange(
-        editor: Editor,
-        selectedText: String,
-        selectionStart: Int,
-        selectionEnd: Int,
-    ): Pair<Int, Int>? {
-        val document = editor.document
-        val textLength = document.textLength
-        val currentSelection = editor.selectionModel
-        val originalText = selectedText.takeIf { it.isNotBlank() } ?: return null
-
-        if (currentSelection.hasSelection()) {
-            val start = currentSelection.selectionStart
-            val end = currentSelection.selectionEnd
-            if (start >= 0 && end <= textLength && start < end) {
-                val currentText = document.text.substring(start, end)
-                if (currentText == originalText) return start to end
-            }
-        }
-
-        if (selectionStart >= 0 && selectionEnd <= textLength && selectionStart < selectionEnd) {
-            val capturedText = document.text.substring(selectionStart, selectionEnd)
-            if (capturedText == originalText) return selectionStart to selectionEnd
-        }
-
-        val fullText = document.text
-        val first = fullText.indexOf(originalText)
-        if (first < 0) return null
-        val second = fullText.indexOf(originalText, first + originalText.length)
-        return if (second < 0) first to (first + originalText.length) else null
-    }
-
-    /**
-     * 判断文件是否位于 Android 模块的 res/layout* 目录(布局 XML)。
-     * res/values* 下的 strings.xml / colors.xml 等也算 XML,但语义上是"被插入",
-     * 不是"被引用",所以走 R.string.key 路径反而更安全 —— 这里严格按 layout 判断。
-     */
-    private fun isLayoutXmlFile(file: VirtualFile?): Boolean {
-        if (file == null) return false
-        if (file.extension?.lowercase() != "xml") return false
-        val path = file.path
-        return path.contains("/src/main/res/layout") ||
-            path.contains("/src/test/res/layout") ||
-            path.contains("/src/androidTest/res/layout") ||
-            path.contains("/src/debug/res/layout") ||
-            path.contains("/src/release/res/layout")
-    }
 
     // ====== 与 AskAiAction 一致的弹框外观(标题栏 / resize grip) ======
     // 复制而不复用 AskAiAction 的 private 方法,避免两个 action 互相耦合;
@@ -453,13 +347,16 @@ class ExtractStringsAction : AnAction() {
 /**
  * Extract strings.xml 弹框使用的 [ChatStateHolder] 轻量实现。
  *
- * 与 [AskAiChatHolder] 几乎一致,只在 [onInsertStringsInserted] 上覆写:
- * 把 driver 拿到的 key 转发到构造时传入的回调,由 [ExtractStringsAction] 在 EDT
- * 上完成选区替换。
+ * 与 [AskAiChatHolder] 几乎一致:
+ * - 持有一个 [cn.jarryleo.insert_strings.ui.InsertStringsEditorOpsController.runReplaceSelection]
+ *   回调 [onAutoReplace],由 [ExtractStringsAction] 在构造完 controller 后注入。
+ * - [onInsertStringsInserted] 把 driver 拿到的 key 转发到 [onAutoReplace],
+ *   由 controller 走与 replace_selection 工具完全相同的替换/防双重替换路径。
+ * - [editorSelection] 通过 [bindEditorSelection] 注入,使 AI 显式调用 replace_selection
+ *   工具时也能正确替换硬编码文本。
  */
 private class ExtractStringsChatHolder(
-    override val project: Project,
-    private val onKeyInserted: (String) -> Boolean,
+    override val project: Project
 ) : ChatStateHolder {
     override val insertStringsManager: InsertStringsManager =
         InsertStringsManager.getInstance(project)
@@ -477,6 +374,8 @@ private class ExtractStringsChatHolder(
     override var showContextPopup: Boolean by mutableStateOf(false)
     override var chatContextText: String by mutableStateOf("")
     override var editorSelection: EditorSelectionContext? = null
+    @Volatile
+    override var editorReplacementTriggered: Boolean = false
 
     override val keyEntries: MutableList<KeyedStringsInfo> = mutableListOf()
     override var selectedKeyIndex: Int = 0
@@ -485,10 +384,43 @@ private class ExtractStringsChatHolder(
 
     private var toastLabel: JBLabel? = null
     private var toastTimer: Timer? = null
-    private var replacementTriggered: Boolean = false
+    private var onAutoReplace: ((String) -> Unit)? = null
 
     fun bindToastLabel(label: JBLabel) {
         toastLabel = label
+    }
+
+    /**
+     * 注入 chat 入口打开时的编辑器选区(由 [ExtractStringsAction.showExtractDialog]
+     * 在构造后立即调用)。用于 AI 通过 [AiAction.ReplaceSelection] 工具或 driver
+     * 触发 [onInsertStringsInserted] 时,把硬编码选区替换为对 key 的引用。
+     */
+    fun bindEditorSelection(
+        editor: com.intellij.openapi.editor.Editor,
+        file: com.intellij.openapi.vfs.VirtualFile?,
+        selectedText: String,
+        selectionStart: Int,
+        selectionEnd: Int
+    ) {
+        editorSelection = EditorSelectionContext(
+            editor = editor,
+            file = file,
+            selectedText = selectedText,
+            selectionStart = selectionStart,
+            selectionEnd = selectionEnd,
+        )
+        editorReplacementTriggered = false
+    }
+
+    /**
+     * 注入「driver 完成 insert_strings 后自动触发的替换回调」。
+     * 由 [ExtractStringsAction.showExtractDialog] 在构造完
+     * [cn.jarryleo.insert_strings.ui.InsertStringsEditorOpsController] 后调用,
+     * 内部走 controller 的 runReplaceSelection —— 与 replace_selection 工具
+     * 完全相同的替换/防双重替换路径。
+     */
+    fun bindOnAutoReplace(callback: (String) -> Unit) {
+        this.onAutoReplace = callback
     }
 
     override fun showToast(message: String) {
@@ -504,10 +436,18 @@ private class ExtractStringsChatHolder(
         }
     }
 
+    /**
+     * Extract 入口的 [onInsertStringsInserted] 实现:把 [editorSelection] 选中的硬编码文本
+     * 替换为对 key 的引用。
+     *
+     * 替换 / 防双重替换 / 弹框保持打开等逻辑全部委托给 [cn.jarryleo.insert_strings.ui.InsertStringsEditorOpsController]
+     * (由 [bindOnAutoReplace] 注入),与 AI 显式调用 [AiAction.ReplaceSelection] 工具
+     * 走同一条路径 —— 保证两条路径行为一致、不会双重替换。
+     */
     override fun onInsertStringsInserted(key: String, module: String?) {
-        if (replacementTriggered) return
-        if (onKeyInserted(key)) {
-            replacementTriggered = true
+        val cb = onAutoReplace ?: return
+        SwingUtilities.invokeLater {
+            cb(key)
         }
     }
 }

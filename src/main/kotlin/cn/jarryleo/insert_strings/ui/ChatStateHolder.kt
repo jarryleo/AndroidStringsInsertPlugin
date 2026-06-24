@@ -68,6 +68,16 @@ internal interface ChatStateHolder {
      */
     var editorSelection: EditorSelectionContext?
 
+    /**
+     * 标记「编辑器选区已被替换为对 key 的引用」,防止 insert_strings 触发的自动替换与
+     * AI 后续显式调用 [AiAction.ReplaceSelection] 工具时发生双重替换。
+     *
+     * 由 [cn.jarryleo.insert_strings.ui.InsertStringsEditorOpsController] 在替换成功后
+     * 写入,弹框场景(AskAi / ExtractStrings)有效;主面板始终为 false(无编辑器上下文)。
+     * 实现必须保证跨线程(后台 tool loop vs EDT)访问的内存可见性(Java volatile 语义)。
+     */
+    var editorReplacementTriggered: Boolean
+
     // ===== 表格状态(由 controllers 读写) =====
     /**
      * 当前编辑的 key 列表。
