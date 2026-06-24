@@ -110,7 +110,7 @@ internal class InsertStringsChatDriver(
                 // 用 assistant role 渲染为左侧气泡;⏳ emoji + "失败/重试" 文本已能让用户一眼区分这是系统提示,
                 // 而不是 AI 的真实回复(后者通常是正常段落或 "执行操作:xxx")。
                 state.chatMessages.add(
-                    ChatMessage(role = "assistant", content = content)
+                    ChatMessage(role = "assistant", content = content, protocolVisible = false)
                 )
             }
         }
@@ -948,18 +948,21 @@ internal class InsertStringsChatDriver(
         // 2) 助手查名字表(toolCallId -> 工具名),用于合成 tool_result 的内容描述
         val nameById = mutableMapOf<String, String>()
         state.chatMessages.forEach { msg ->
-            if (msg.role == "assistant") {
+            if (msg.protocolVisible && msg.role == "assistant") {
                 msg.toolCalls.forEach { tc -> nameById.putIfAbsent(tc.id, tc.name) }
             }
         }
 
         // 3) 遍历每个含 tool_uses 的 assistant,计算其 block 与插入点
         state.chatMessages.forEachIndexed { idx, msg ->
-            if (msg.role != "assistant" || msg.toolCalls.isEmpty()) return@forEachIndexed
+            if (!msg.protocolVisible || msg.role != "assistant" || msg.toolCalls.isEmpty()) return@forEachIndexed
 
-            // block = [idx+1, endOfBlock),endOfBlock 是下一个 assistant 或 chatMessages 末尾
+            // block = [idx+1, endOfBlock),endOfBlock 是下一个参与协议的 assistant 或 chatMessages 末尾
             var endOfBlock = idx + 1
-            while (endOfBlock < state.chatMessages.size && state.chatMessages[endOfBlock].role != "assistant") {
+            while (
+                endOfBlock < state.chatMessages.size &&
+                !(state.chatMessages[endOfBlock].protocolVisible && state.chatMessages[endOfBlock].role == "assistant")
+            ) {
                 endOfBlock++
             }
 
@@ -967,6 +970,7 @@ internal class InsertStringsChatDriver(
             val pairedIds = mutableSetOf<String>()
             for (i in (idx + 1) until endOfBlock) {
                 val m = state.chatMessages[i]
+                if (!m.protocolVisible) continue
                 if (m.role == "tool" || (m.role == "user" && m.toolCallId != null)) {
                     m.toolCallId?.let { pairedIds.add(it) }
                 }
@@ -980,6 +984,7 @@ internal class InsertStringsChatDriver(
             var insertAt = endOfBlock
             for (i in (idx + 1) until endOfBlock) {
                 val m = state.chatMessages[i]
+                if (!m.protocolVisible) continue
                 val isToolResult = m.role == "tool" || (m.role == "user" && m.toolCallId != null)
                 if (!isToolResult) {
                     insertAt = i

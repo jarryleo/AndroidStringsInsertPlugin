@@ -37,6 +37,11 @@ data class ChatMessage(
     val toolCalls: List<ToolCall> = emptyList(),
     val toolCallId: String? = null,
     /**
+     * 是否参与 AI 协议历史。重试提示/本地状态气泡只用于 UI 展示,
+     * 不能发回模型,否则会插进 assistant(tool_calls) 与 tool_result 之间。
+     */
+    val protocolVisible: Boolean = true,
+    /**
      * 模型的「思考/推理」文本(流式累积)。
      *
      * 与 [content] 的区别:
@@ -1398,7 +1403,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                             addProperty("content", "## 当前项目上下文（JSON）\n$context")
                         })
                     }
-                    messages.forEach { msg -> add(msg.toOpenAiMessage()) }
+                    messages.filter { it.protocolVisible }.forEach { msg -> add(msg.toOpenAiMessage()) }
                 }
             )
         }
@@ -1427,7 +1432,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             if (stream) addProperty("stream", true)
             add(
                 "messages",
-                JsonArray().apply { buildAnthropicMessages(messages).forEach { add(it) } }
+                JsonArray().apply { buildAnthropicMessages(messages.filter { it.protocolVisible }).forEach { add(it) } }
             )
         }
         return root.toString()
