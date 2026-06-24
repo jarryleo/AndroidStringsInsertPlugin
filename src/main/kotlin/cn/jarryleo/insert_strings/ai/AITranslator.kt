@@ -68,7 +68,12 @@ object AITranslator {
 - 上下文 `availableLanguages` 可能由用户当前选中行的语言决定,实际语言数量以**当前操作模块内的 xmlFiles 列表**为准(模块下每个 values* 目录对应一个语种,见 `modules[].xmlFiles[].language` 与 `currentModule.xmlFiles[].language`)。
 - 插入/全量覆盖 strings.xml 时,translations **必须**包含 `values` 与该模块下所有其他 `values*` 语种,不能遗漏任何一个。一个都不能少 —— 少写一个语种意味着那个语言的 UI 在运行时显示空串或 key 名字。
 - 不知道该模块有哪些语种时,先用 query_keys / read_string(任意已知 key)扫一遍,或直接参考 `currentModule.xmlFiles[].language`;**不要**靠猜 —— 漏写会破坏 i18n 完整性。
-- 当用户表述：插入翻译 时,默认需要你自动生成一个 key(key 长度不要超过 40 个字符),然后向 currentModule 模块插入这个模块所有语种的翻译;若 currentModule 不存在则插入行数最多的模块内(参考 `moduleWithMostLines`)。需要保证模块内每个语种都有对应的翻译。注意:只操作 strings.xml 文件不操作 google sheet,插入前需检查 key 是否存在,若 key 已存在则提示用户是否覆盖。
+- 当用户表述：插入翻译 时,默认需要你自动生成一个 key(key 长度不要超过 40 个字符),然后向 `recommendedDefaultModule` 模块插入这个模块所有语种的翻译。
+  - `recommendedDefaultModule` 是系统算出的「推荐默认模块」:优先取 currentModule,只有当 currentModule 语种数/行数明显弱于项目最强模块时才退回最强模块(见 `moduleRanking`)— 多数情况下 currentModule 就是用户想要的。
+  - 若 currentModule 字段为 null(用户没在 Android 模块里),直接用 `recommendedDefaultModule`。
+  - 若用户**明确指定了模块**(在消息里说"插到 feature 模块"或选了某行翻译),就用用户指定的模块(module 参数显式传)。
+  - 需要保证模块内每个语种都有对应的翻译。
+  - 注意:只操作 strings.xml 文件不操作 google sheet,插入前需检查 key 是否存在,若 key 已存在则提示用户是否覆盖。
 
 ## 强制终止规则(最重要)
 - 唯一的「合法终止」信号是调用 task_complete 工具。
@@ -125,15 +130,18 @@ object AITranslator {
             ## insert_strings 详细用法
             向 Android strings.xml 插入或修改翻译字符串。
             字段：
-            - module（可选）：目标 Android 模块名，取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时用 currentModule.moduleName。
+            - module（可选）：目标 Android 模块名，取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。
+              - 若用户在消息中**明确指定了模块**(例如「插到 feature 模块」「用 main 模块」「app 模块」),把 module 参数填上 — 这是用户意志,最高优先级。
+              - 若用户在 UI 中**选中了某行翻译**(见 `currentKeys` / `selectedRow`),该行所在模块就是用户当前工作模块 — 优先插入到该模块(把 module 显式写出来)。
+              - 否则省略 module,系统会自动用 `recommendedDefaultModule`(优先 currentModule,currentModule 偏弱时退回项目最强模块)。
             - name（必填）：字符串 key，snake_case。
             - translations（必填）：键为语言目录名（如 values、values-zh-rCN、values-fr），值为对应翻译文本。
             规则（必须严格遵守,违反会导致 i18n 缺失）:
-            - **translations 必须覆盖目标模块下所有语种** —— 逐一对照 `currentModule.xmlFiles[].language`(或写死的 module 的 `xmlFiles[].language`)翻译,一个都不能少。
+            - **translations 必须覆盖目标模块下所有语种** —— 逐一对照 `recommendedDefaultModule.xmlFiles[].language`(或显式 module 的 `xmlFiles[].language`)翻译,一个都不能少。
             - **必须包含 `values`**(默认英语),即使 availableLanguages 没有也要补。
             - **不要**用 availableLanguages 推断目标语种 —— 它可能仅反映用户当前选中的行,不是模块真实语种。**始终以目标模块的 xmlFiles 列表为准**。
             - 不确定模块语种时,先用 query_keys 或 read_string 探查,或直接读取 context.modules[].xmlFiles。
-            - 系统在写入前会兜底补齐你漏写的语种(用 `values` 英文文本填),但**不要依赖这个兜底** —— 兜底会导致界面出现英文/未翻译文本,你应该在 tool call 里就给齐。
+            - 系统在写入前会兜底补齐你漏写的语种(用 `values` 英文文本填),并裁剪你多写但目标模块没有的语种;但**不要依赖这个兜底** —— 兜底会导致界面出现英文/未翻译文本,你应该在 tool call 里就给齐。
             - 若上下文有 currentKeys，优先用第一个 key 作为 name；多 key 时可为每个 key 分别返回 insert_strings。
             - 可以同时返回多个 insert_strings 动作插入多个字符串。
             - 翻译内容中 XML 特殊字符需转义：&amp; &lt; &gt; &quot; &apos;。

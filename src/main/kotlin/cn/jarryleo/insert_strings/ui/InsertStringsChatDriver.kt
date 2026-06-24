@@ -1349,6 +1349,7 @@ internal class InsertStringsChatDriver(
         val contextInfo = ContextManager.getInstance(project).contextInfo
         val currentModuleName = contextInfo?.currentModule?.moduleName
         val moduleWithMostLines = contextInfo?.moduleWithMostLines
+        val recommendedDefault = contextInfo?.recommendedDefaultModule
         val moduleList = contextInfo?.modules?.map { it.moduleName }
 
         // 决定本批次的统一目标模块(模块一致性已由 processAiReply 校验过,此处安全取第一个非空 module)
@@ -1429,7 +1430,8 @@ internal class InsertStringsChatDriver(
             // 兜底:确保 values(默认英语)一定存在,避免漏写导致 values/strings.xml 被清空
             if (DEFAULT_LANGUAGE !in merged) merged[DEFAULT_LANGUAGE] = ""
 
-            // 全语种兜底:以目标模块实际 xmlFiles 为准,补齐 AI 漏写的语种。
+            // 语种裁剪 + 兜底:以目标模块实际 xmlFiles 为准,删除模块中不存在的语种,
+            // 并补齐 AI 漏写的语种,确保最终写入 = 模块的完整语种集合。
             // 兜底文本按以下优先级选取 —— 确保所有语种都有非空值,UI 不会显示空白:
             //   1) values(默认英语)译文
             //   2) AI 提供的任何其他语种译文
@@ -1438,35 +1440,68 @@ internal class InsertStringsChatDriver(
             // 这样既不会让任何语种"完全没条目"(导致运行时 key 不存在),
             // 也不会清空用户/AI 已提供的翻译。
             val targetModuleLanguages = contextMgr.getModuleFiles(targetModule).map { it.first.name }
+            val droppedLanguages = mutableListOf<String>()
+            val filledLanguages = mutableListOf<String>()
             if (targetModuleLanguages.isNotEmpty()) {
-                val fallbackSource = merged[DEFAULT_LANGUAGE]
+                // 1) 裁剪:删掉 AI 提供但目标模块没有的语种(避免写入到不存在的文件)
+                val keysToRemove = merged.keys - targetModuleLanguages.toSet() - DEFAULT_LANGUAGE
+                keysToRemove.forEach { droppedLanguages.add(it); merged.remove(it) }
+                // 2) 兜底:补齐 AI 漏写的语种
+                val fallbackSource = merged[DEFAULT_LANGUAGE]?.takeIf { it.isNotBlank() }
                     ?: action.translations.values.firstOrNull { it.isNotBlank() }
                     ?: existingTranslations.values.firstOrNull { it.isNotBlank() }
                     ?: ""
-                val filledLanguages = mutableListOf<String>()
                 for (lang in targetModuleLanguages) {
                     if (lang !in merged) {
                         merged[lang] = fallbackSource
                         filledLanguages.add(lang)
                     }
                 }
-                if (filledLanguages.isNotEmpty()) {
+                if (filledLanguages.isNotEmpty() || droppedLanguages.isNotEmpty()) {
                     DebugLog.log(
                         "InsertStringsChatDriver",
                         "insert_strings key=${action.name} module=$targetModule " +
-                            "auto-filled missing languages: $filledLanguages (source length=${fallbackSource.length})"
+                            "filled=$filledLanguages dropped=$droppedLanguages " +
+                            "(fallback source length=${fallbackSource.length})"
                     )
                 }
             }
 
+            // 写入文件
+            var writeOk: Boolean
+            var writeErr: String?
             try {
                 state.insertStringsManager.insertIntoModule(
                     project, targetModule, mapOf(action.name to merged)
                 )
-                "成功" to true
+                writeOk = true
+                writeErr = null
             } catch (e: Exception) {
-                "失败:${e.message ?: "unknown"}" to false
+                writeOk = false
+                writeErr = e.message ?: "unknown"
             }
+
+            // 组装 result 描述,后续透传给 AI,让它看到:
+            //   - 实际生效的模块 + 该模块已有的全部语种
+            //   - 自己漏写被兜底的语种(以及兜底来源)
+            //   - 自己多写被丢弃的语种(目标模块没有对应文件)
+            val targetLangsDesc = if (targetModuleLanguages.isEmpty()) "(无)" else targetModuleLanguages.joinToString(",")
+            val msg = buildString {
+                if (writeOk) {
+                    append("成功")
+                } else {
+                    append("失败:").append(writeErr ?: "unknown")
+                }
+                append(" 目标模块:").append(targetModule)
+                append(" 语种(").append(targetModuleLanguages.size).append("):").append(targetLangsDesc)
+                if (filledLanguages.isNotEmpty()) {
+                    append(" 兜底补语种:").append(filledLanguages.joinToString(","))
+                }
+                if (droppedLanguages.isNotEmpty()) {
+                    append(" 丢弃(模块无文件):").append(droppedLanguages.joinToString(","))
+                }
+            }
+            msg to writeOk
         }
 
         // 刷新 UI(全部用 batchModule,保证一致性)

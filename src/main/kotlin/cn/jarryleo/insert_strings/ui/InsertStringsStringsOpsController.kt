@@ -23,19 +23,30 @@ internal class InsertStringsStringsOpsController(
     private val project: Project get() = state.project
 
     /**
-     * 解析 "AI 显式 module / currentModule / 行数最多模块" 的优先级,得到本次操作的目标模块。
-     * 处理了项目名误传、模块名拼写错误两种边界情况。
+     * 解析目标模块的统一入口。
+     *
+     * 优先级(对应产品需求 1-3):
+     * 1. [explicitModule] — AI 显式传入,代表用户**指定**的翻译模块(最高优先级)。
+     * 2. [contextInfo] 中的 `recommendedDefaultModule` — 智能推荐默认模块
+     *    (见 [cn.jarryleo.insert_strings.xml.ContextInfo.recommendedDefaultModule]):
+     *    优先 currentModule,currentModule 语种/行数明显不足时退回语种最多+行数最多模块。
+     * 3. 兜底 [fallbackModuleName] — 行数最多模块,保证一定拿到一个可用模块。
+     *
+     * 处理边界:
+     * - AI 误传项目名(应作为显式 module 失败,降级到推荐)
+     * - AI 传错拼写(通过 [ContextManager.resolveDisplayModuleName] 模糊匹配)
+     * - currentModule 缺失(未打开 Android 文件)
      */
     fun resolveTargetModule(
-        actionModule: String?,
+        explicitModule: String?,
         currentModuleName: String?,
-        moduleWithMostLinesName: String?
+        fallbackModuleName: String?
     ): String? {
         val context = ContextManager.getInstance(project)
         val contextInfo = context.contextInfo
         val projectName = contextInfo?.projectName
         val realModuleNames = contextInfo?.modules?.map { it.moduleName }?.toSet().orEmpty()
-        val actionModuleSanitized = actionModule?.trim()?.takeIf { it.isNotBlank() }?.let { candidate ->
+        val explicitSanitized = explicitModule?.trim()?.takeIf { it.isNotBlank() }?.let { candidate ->
             if (candidate == projectName) {
                 null
             } else if (candidate in realModuleNames) {
@@ -44,9 +55,50 @@ internal class InsertStringsStringsOpsController(
                 context.resolveDisplayModuleName(candidate)
             }
         }
-        return actionModuleSanitized
+        if (explicitSanitized != null) return explicitSanitized
+        return contextInfo?.recommendedDefaultModule?.moduleName
             ?: currentModuleName?.takeIf { it.isNotBlank() }
-            ?: moduleWithMostLinesName?.takeIf { it.isNotBlank() }
+            ?: fallbackModuleName?.takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * 推断"用户从选中行里指定的翻译语种所在的模块"。
+     *
+     * 适用场景:用户从 AI 聊天输入框上方表格里**选中了一行翻译**(某条 [StringRow]),
+     * 但没有在 AI 消息中显式说"插到 module X" — 这种情况下,我们需要猜测
+     * "用户选择的那行翻译来自哪个模块",优先插入到该模块。
+     *
+     * 思路:扫描所有模块,看谁的 `xmlFiles[].filePath` 包含用户选中的语种,
+     * 同时该文件有非空翻译。
+     * 找不到(用户选中的语种是 AI 翻译产生/临时行)时返回 null,由上层走推荐默认模块。
+     */
+    fun guessModuleForSelectedTranslation(
+        language: String,
+        text: String
+    ): String? {
+        if (language.isBlank() || text.isBlank()) return null
+        val context = ContextManager.getInstance(project)
+        val contextInfo = context.contextInfo ?: return null
+        contextInfo.modules.forEach { module ->
+            module.xmlFiles.firstOrNull { it.language == language }?.let { fileInfo ->
+                val key = context.scanModuleForKey(module.moduleName, "").firstOrNull()
+                // 不能用 key="" 读,改用直接读文件
+                if (containsExactText(fileInfo.filePath, text)) {
+                    return module.moduleName
+                }
+            }
+        }
+        return null
+    }
+
+    private fun containsExactText(filePath: String, text: String): Boolean {
+        val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance()
+            .findFileByPath(filePath) ?: return false
+        return try {
+            vf.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText().contains(text) }
+        } catch (_: Exception) {
+            false
+        }
     }
 
     fun runQueryKeys(action: AiAction.QueryKeys): String {

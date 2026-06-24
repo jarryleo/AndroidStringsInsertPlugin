@@ -88,7 +88,8 @@ object ToolDefinitions {
     private const val DESC_INSERT_STRINGS =
         "向 Android strings.xml 插入或修改翻译字符串。" +
             "可同时调用多次以插入多个字符串。" +
-            "translations 必须始终包含 \"values\"(默认英语),并覆盖模块内的所有语言。" +
+            "translations 必须始终包含 \"values\"(默认英语),并覆盖模块内的所有语言 —— 一字不差对照 `recommendedDefaultModule.xmlFiles[].language`(或显式 module 的 `xmlFiles[].language`)。" +
+            "module 优先级:用户在消息中**明确指定** > 用户在 UI 中**选中行所在的模块** > 省略让系统用 `recommendedDefaultModule`(优先 currentModule,偏弱时退回最强模块)。" +
             "若只想修改个别语言,请改用 update_string(部分语言更新,不覆写其他语言)。"
 
     private const val DESC_UPDATE_STRING =
@@ -331,7 +332,8 @@ object ToolDefinitions {
                     addProperty("type", "string")
                     addProperty(
                         "description",
-                        "目标 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时使用 currentModule.moduleName。"
+                        "目标 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。" +
+                            "省略时按以下顺序自动选择:用户在消息中明确指定 > 用户在 UI 选中行所在模块 > `recommendedDefaultModule`(系统计算:优先 currentModule,currentModule 语种/行数偏弱时退回项目最强模块)。"
                     )
                 })
                 add("name", obj {
@@ -344,7 +346,7 @@ object ToolDefinitions {
                         "description",
                         "键为语言目录名(values / values-zh-rCN / values-fr 等)," +
                             "值为对应翻译文本。必须始终包含 \"values\"(默认英语)," +
-                            "并覆盖 availableLanguages 中的所有其他语言。"
+                            "并覆盖目标模块 xmlFiles 中的所有其他语言(以 `recommendedDefaultModule.xmlFiles[].language` 为准 — 不要用 availableLanguages 推断)。"
                     )
                 })
             })

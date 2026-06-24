@@ -52,6 +52,15 @@ internal class InsertStringsChatContextBuilder(
                 contextInfo.modules.forEach { add(moduleToJson(it)) }
             })
             add("moduleWithMostLines", contextInfo.moduleWithMostLines?.let { moduleToJson(it) })
+            add("recommendedDefaultModule", contextInfo.recommendedDefaultModule?.let { moduleToJson(it) })
+            add(
+                "moduleRanking",
+                JsonArray().apply {
+                    contextInfo.modules
+                        .sortedByDescending { it.xmlFiles.size * 1_000_000 + it.totalLines }
+                        .forEach { add(moduleToJson(it)) }
+                }
+            )
             add("availableLanguages", JsonArray().apply {
                 availableLanguages.forEach { add(it) }
             })
