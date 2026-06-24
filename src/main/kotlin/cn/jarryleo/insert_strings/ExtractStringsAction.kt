@@ -129,7 +129,14 @@ class ExtractStringsAction : AnAction() {
             onKeyInserted = { key ->
                 // AI 完成 insert_strings 后,弹回 EDT 替换选区
                 SwingUtilities.invokeLater {
-                    replaceSelection(editor, currentFile, selectionStart, selectionEnd, key)
+                    replaceSelection(
+                        editor = editor,
+                        file = currentFile,
+                        selectedText = selectedText,
+                        selectionStart = selectionStart,
+                        selectionEnd = selectionEnd,
+                        key = key,
+                    )
                 }
             },
         )
@@ -235,22 +242,34 @@ class ExtractStringsAction : AnAction() {
     private fun replaceSelection(
         editor: Editor,
         file: VirtualFile?,
+        selectedText: String,
         selectionStart: Int,
         selectionEnd: Int,
         key: String,
     ) {
         if (key.isBlank()) return
-        if (selectionStart < 0 || selectionEnd <= selectionStart) return
         val document = editor.document
-        if (selectionEnd > document.textLength) return
+        val range = findReplacementRange(
+            editor = editor,
+            selectedText = selectedText,
+            selectionStart = selectionStart,
+            selectionEnd = selectionEnd,
+        ) ?: run {
+            Messages.showMessageDialog(
+                "Unable to locate the original selected text. Please select it again and retry.",
+                "Extract strings.xml",
+                Messages.getWarningIcon()
+            )
+            return
+        }
 
         val replacement = if (isLayoutXmlFile(file)) "@string/$key" else "R.string.$key"
 
         WriteCommandAction.runWriteCommandAction(editor.project) {
             try {
-                document.replaceString(selectionStart, selectionEnd, replacement)
+                document.replaceString(range.first, range.second, replacement)
                 editor.selectionModel.removeSelection()
-                val caret = selectionStart + replacement.length
+                val caret = range.first + replacement.length
                 editor.caretModel.moveToOffset(caret)
                 editor.scrollingModel.scrollToCaret(ScrollType.MAKE_VISIBLE)
             } catch (e: Exception) {
@@ -261,6 +280,45 @@ class ExtractStringsAction : AnAction() {
                 )
             }
         }
+    }
+
+    /**
+     * 用户可能在 AI 生成 / 重复 key 二次确认期间改变了编辑器选区或文档内容。
+     * 因此替换时按三层策略定位:
+     * 1) 当前仍选中同一段文本,优先用当前选区;
+     * 2) action 触发时捕获的 offset 仍然对应原文,使用旧 offset;
+     * 3) 文档中原选中文本只出现一次,使用该唯一位置。
+     */
+    private fun findReplacementRange(
+        editor: Editor,
+        selectedText: String,
+        selectionStart: Int,
+        selectionEnd: Int,
+    ): Pair<Int, Int>? {
+        val document = editor.document
+        val textLength = document.textLength
+        val currentSelection = editor.selectionModel
+        val originalText = selectedText.takeIf { it.isNotBlank() } ?: return null
+
+        if (currentSelection.hasSelection()) {
+            val start = currentSelection.selectionStart
+            val end = currentSelection.selectionEnd
+            if (start >= 0 && end <= textLength && start < end) {
+                val currentText = document.text.substring(start, end)
+                if (currentText == originalText) return start to end
+            }
+        }
+
+        if (selectionStart >= 0 && selectionEnd <= textLength && selectionStart < selectionEnd) {
+            val capturedText = document.text.substring(selectionStart, selectionEnd)
+            if (capturedText == originalText) return selectionStart to selectionEnd
+        }
+
+        val fullText = document.text
+        val first = fullText.indexOf(originalText)
+        if (first < 0) return null
+        val second = fullText.indexOf(originalText, first + originalText.length)
+        return if (second < 0) first to (first + originalText.length) else null
     }
 
     /**

@@ -29,6 +29,12 @@ data class PendingStringsInsert(
      * 方便决定是否使用现有翻译。
      */
     val existingKeys: List<ExistingKeyMatch>,
+    /**
+     * 按待插入 action.name 记录的命中列表。保留这个映射后，
+     * 用户选择「使用现有翻译」时可以为每个待插入 key 选中对应的现有 key，
+     * 而不是从整批命中里随便取第一条。
+     */
+    val existingKeysByAction: Map<String, List<ExistingKeyMatch>> = emptyMap(),
     val targetModule: String,
     val context: String,
     val iteration: Int,

@@ -1504,6 +1504,7 @@ internal class InsertStringsChatDriver(
                 actions = actions,
                 actionToolCallIds = entries.map { it.toolCallId },
                 existingKeys = existing,
+                existingKeysByAction = duplicateMap,
                 targetModule = batchModule,
                 context = context,
                 iteration = iteration,
@@ -1717,6 +1718,20 @@ internal class InsertStringsChatDriver(
     }
 
     /**
+     * 用户选择复用现有 key 时,为单个待插入 action 找到最合适的命中项。
+     * 优先复用目标模块内的 key,避免 Extract 场景把当前文件替换成其它模块才有的 key。
+     */
+    private fun selectExistingKeyForAction(
+        pending: PendingStringsInsert,
+        action: AiAction.InsertStrings
+    ): ExistingKeyMatch {
+        val matches = pending.existingKeysByAction[action.name].orEmpty()
+            .ifEmpty { pending.existingKeys }
+        return matches.firstOrNull { it.module == pending.targetModule }
+            ?: matches.first()
+    }
+
+    /**
      * 处理 strings.xml 重复 key 询问的用户选择:
      *  - "使用现有翻译":跳过 insert_strings 的写操作,但仍要:
      *      1) 触发 onInsertStringsInserted 回调(让 ExtractStrings 等入口把选区替换为现有 key)
@@ -1730,27 +1745,29 @@ internal class InsertStringsChatDriver(
                 state.chatSending = true
                 SwingUtilities.invokeLater {
                     val contextMgr = ContextManager.getInstance(project)
-                    val info = pending.existingKeys.first()
-                    val existingKey = info.key
-                    val existingModule = info.module
+                    val firstAction = pending.actions.firstOrNull()
+                    val firstMatch = firstAction?.let { selectExistingKeyForAction(pending, it) }
+                        ?: pending.existingKeys.first()
+                    val existingKey = firstMatch.key
+                    val existingModule = firstMatch.module
 
                     // 把现有 key 的全语种翻译回读给 AI,让 AI 比对并修正缺漏
                     val existingTranslations = contextMgr.scanModuleForKey(existingModule, existingKey)
                         .associate { it.language to it.text }
                         .filter { it.value.isNotEmpty() }
-                    val userNewKey = pending.actions.firstOrNull()?.name
 
                     // 为每个 pending tool_call 添加成功 tool result(语义:沿用现有 key)
                     pending.actionToolCallIds.forEachIndexed { i, toolCallId ->
                         if (toolCallId.isNotEmpty()) {
                             val action = pending.actions.getOrNull(i)
+                            val actionMatch = action?.let { selectExistingKeyForAction(pending, it) } ?: firstMatch
                             val actionName = action?.name ?: "?"
                             val content = buildString {
                                 append("[工具执行结果] insert_strings module=${pending.targetModule} ")
-                                append("name=$actionName 状态:跳过(使用现有 key=$existingKey @模块=$existingModule) ")
+                                append("name=$actionName 状态:跳过(使用现有 key=${actionMatch.key} @模块=${actionMatch.module}) ")
                                 append("理由:用户选择「使用现有翻译」")
-                                if (userNewKey != null && userNewKey != existingKey) {
-                                    append(" 待插入新 key=$userNewKey 已忽略")
+                                if (actionName != actionMatch.key) {
+                                    append(" 待插入新 key=$actionName 已忽略")
                                 }
                             }
                             state.chatMessages.add(
@@ -1765,7 +1782,8 @@ internal class InsertStringsChatDriver(
 
                     // 触发入口回调(让 ExtractStrings 把选区替换为 @string/$existingKey)
                     pending.actions.forEach { a ->
-                        state.onInsertStringsInserted(existingKey, existingModule)
+                        val actionMatch = selectExistingKeyForAction(pending, a)
+                        state.onInsertStringsInserted(actionMatch.key, actionMatch.module)
                     }
                     state.closeChatView()
 
@@ -1856,7 +1874,20 @@ internal class InsertStringsChatDriver(
         if (!skipDuplicateCheck) {
             // 理论上只有 skipDuplicateCheck=true 才会调到这里,这里做兜底
             val dup = stringsOps.checkDuplicateKeys(actions, targetModule)
-            if (dup.isNotEmpty()) return resolveDuplicateStringsInsert("取消", PendingStringsInsert(actions, actionToolCallIds, dup.values.flatten(), targetModule, context, iteration))
+            if (dup.isNotEmpty()) {
+                return resolveDuplicateStringsInsert(
+                    "取消",
+                    PendingStringsInsert(
+                        actions = actions,
+                        actionToolCallIds = actionToolCallIds,
+                        existingKeys = dup.values.flatten(),
+                        existingKeysByAction = dup,
+                        targetModule = targetModule,
+                        context = context,
+                        iteration = iteration,
+                    )
+                )
+            }
         }
 
         val results = actions.map { action ->
