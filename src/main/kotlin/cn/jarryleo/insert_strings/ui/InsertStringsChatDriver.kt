@@ -432,10 +432,15 @@ internal class InsertStringsChatDriver(
             //        流式时实时显示,流结束后折叠为可展开区。
             //      - content: 给用户看的「最终回复」——纯文本对话回合就是模型全文,
             //        function-calling 回合则是「执行操作:xxx」或 task_complete summary。
-            //    两者在纯文本回合里会重复,所以这种场景下 thinking 清空、只留 content;
-            //    在 function-calling 回合里两者互补。
+            //    在纯文本回合里两者可能重复,但 Thinking 区默认折叠,保留它能让用户
+            //    在每个 AI 回复气泡里回看流式思考文字。
             val realToolCalls = reply.toolCalls.filter { it.name != ToolDefinitions.TOOL_TASK_COMPLETE }
             val hasTaskComplete = reply.toolCalls.any { it.name == ToolDefinitions.TOOL_TASK_COMPLETE }
+            val existingThinking = if (placeholderIdx in 0 until state.chatMessages.size) {
+                state.chatMessages[placeholderIdx].thinking
+            } else {
+                ""
+            }
             // 关键修复:必须把「解析失败」的 tool_call 一起写入 assistant 消息的 toolCalls 字段,
             // 否则下一轮 OpenAI/DeepSeek 协议校验会失败:
             //   "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"
@@ -446,9 +451,10 @@ internal class InsertStringsChatDriver(
             // reply.actions(只含解析成功的),所以混入 failed 不会重复执行。
             val finalToolCalls = realToolCalls + reply.failedToolCalls
             val (finalContent, finalThinking) = when {
-                // 情况 A:模型纯文本回复(无工具调用)——内容就是回复本身,不要重复展示
+                // 情况 A:模型纯文本回复(无工具调用)——内容就是回复本身,
+                // 流式累积文本保留在折叠 Thought 区。
                 finalToolCalls.isEmpty() -> {
-                    Pair(reply.reply, "")
+                    Pair(reply.reply, existingThinking)
                 }
                 // 情况 B:只有 task_complete 终止信号
                 // content 留空,由 handleTaskComplete 写入 summary;
@@ -621,24 +627,22 @@ internal class InsertStringsChatDriver(
                 // options 挂到 options 字段(让 UI 渲染按钮)。记录 toolCallId,等待用户点击。
                 // 修复:之前只挂 options,question 文本被吞掉,用户只看到「执行操作: ask_user」+ 按钮,
                 //      完全不知道 AI 在问什么(流式累积的 thinking 在回合结束后被折叠,看不到)。
-                // 同时清空 thinking:summary("执行操作: ask_user")和流式 thinking 内容都会被
-                // ThinkingSection 折叠区渲染,会和 question 重复 + 挤占视觉空间,影响可读性。
+                // 保留 thinking:用户希望每个 AI 回复气泡都能展开查看思考文字。
+                // question 写入 content 后,折叠态仍以问题本身为主,思考只在用户展开时出现。
                 val lastIdx = state.chatMessages.lastIndex
                 if (lastIdx >= 0) {
                     state.chatMessages[lastIdx] = state.chatMessages[lastIdx].copy(
                         content = askAction.question,
-                        thinking = "",
                         options = askAction.options
                     )
                 }
             } else {
                 // 无 options:把 question 写入 assistant 消息的 content,
-                // 提示用户到输入框中回复;toast 作为辅助提示。同时清空 thinking(同上)。
+                // 提示用户到输入框中回复;toast 作为辅助提示。thinking 保留为可展开详情。
                 val lastIdx = state.chatMessages.lastIndex
                 if (lastIdx >= 0) {
                     state.chatMessages[lastIdx] = state.chatMessages[lastIdx].copy(
-                        content = askAction.question,
-                        thinking = ""
+                        content = askAction.question
                     )
                 }
                 state.showToast(askAction.question)

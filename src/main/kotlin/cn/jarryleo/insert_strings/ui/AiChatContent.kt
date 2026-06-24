@@ -32,7 +32,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.ai.ChatMessage
+import cn.jarryleo.insert_strings.ai.ToolCall
 import cn.jarryleo.insert_strings.phrases.QuickPhrase
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 
 @Composable
 fun AiChatContent(
@@ -128,10 +131,11 @@ private fun AiChatBody(
     selectedKeys: List<String> = emptyList(),
 ) {
     val listState = rememberLazyListState()
+    val renderItems = buildChatRenderItems(chatMessages)
     // 新消息加入时滚到末尾(用户期待看到刚发的内容)
     LaunchedEffect(chatMessages.size) {
-        if (chatMessages.isNotEmpty()) {
-            listState.animateScrollToItem(chatMessages.size - 1)
+        if (renderItems.isNotEmpty()) {
+            listState.animateScrollToItem(renderItems.size - 1)
         }
     }
     // 流式生成中:最后一条消息的 thinking / content 会持续变化,需要保持滚到末尾,
@@ -143,9 +147,9 @@ private fun AiChatBody(
         if (lastStreamingMessage == null || chatMessages.isEmpty()) return@LaunchedEffect
         val layout = listState.layoutInfo
         val lastVisible = layout.visibleItemsInfo.lastOrNull()?.index ?: -1
-        val isAtBottom = lastVisible >= chatMessages.size - 1
+        val isAtBottom = lastVisible >= renderItems.size - 1
         if (isAtBottom) {
-            listState.animateScrollToItem(chatMessages.size - 1)
+            listState.animateScrollToItem(renderItems.size - 1)
         }
     }
     Column(
@@ -219,25 +223,26 @@ private fun AiChatBody(
                     contentPadding = messageListContentPadding,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    itemsIndexed(chatMessages) { index, msg ->
-                        // 工具气泡携带任务摘要:取前一条 assistant 消息的文本作为 AI 意图
-                        val taskSummary = if (msg.role == "tool" && index > 0) {
-                            val prev = chatMessages.getOrNull(index - 1)
-                            if (prev?.role == "assistant" &&
-                                prev.toolCalls.isNotEmpty() &&
-                                prev.content.isNotBlank()
-                            ) {
-                                prev.content
-                            } else null
-                        } else null
-                        ChatBubble(
-                            message = msg,
-                            taskSummary = taskSummary,
-                            messageIndex = index,
-                            onOptionClick = onOptionClick,
-                            chatSending = chatSending,
-                            colors = colors,
-                        )
+                    itemsIndexed(renderItems) { _, item ->
+                        when (item) {
+                            is ChatRenderItem.Message -> {
+                                ChatBubble(
+                                    message = item.message,
+                                    messageIndex = item.sourceIndex,
+                                    onOptionClick = onOptionClick,
+                                    chatSending = chatSending,
+                                    colors = colors,
+                                )
+                            }
+                            is ChatRenderItem.ToolGroup -> {
+                                ToolGroupBubble(
+                                    messages = item.messages,
+                                    toolCallsById = item.toolCallsById,
+                                    taskSummary = item.taskSummary,
+                                    colors = colors,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -305,6 +310,56 @@ private fun AiChatBody(
             )
         }
     }
+}
+
+private sealed class ChatRenderItem {
+    data class Message(
+        val sourceIndex: Int,
+        val message: ChatMessage
+    ) : ChatRenderItem()
+
+    data class ToolGroup(
+        val sourceIndex: Int,
+        val messages: List<ChatMessage>,
+        val toolCallsById: Map<String, ToolCall>,
+        val taskSummary: String?
+    ) : ChatRenderItem()
+}
+
+/**
+ * UI-only grouping: adjacent tool_result messages are stacked into one visual bubble.
+ * The underlying [chatMessages] list stays unchanged so function-calling protocol
+ * pairing remains intact.
+ */
+private fun buildChatRenderItems(chatMessages: List<ChatMessage>): List<ChatRenderItem> {
+    val items = mutableListOf<ChatRenderItem>()
+    var i = 0
+    while (i < chatMessages.size) {
+        val msg = chatMessages[i]
+        if (msg.role != "tool") {
+            items += ChatRenderItem.Message(i, msg)
+            i++
+            continue
+        }
+
+        val start = i
+        val group = mutableListOf<ChatMessage>()
+        while (i < chatMessages.size && chatMessages[i].role == "tool") {
+            group += chatMessages[i]
+            i++
+        }
+        val prev = chatMessages.getOrNull(start - 1)
+        val toolCallsById = prev
+            ?.takeIf { it.role == "assistant" }
+            ?.toolCalls
+            ?.associateBy { it.id }
+            .orEmpty()
+        val taskSummary = prev
+            ?.takeIf { it.role == "assistant" && it.content.isNotBlank() }
+            ?.content
+        items += ChatRenderItem.ToolGroup(start, group, toolCallsById, taskSummary)
+    }
+    return items
 }
 
 /**
@@ -719,6 +774,392 @@ private fun ContextPopupOverlay(
 }
 
 @Composable
+private fun ToolGroupBubble(
+    messages: List<ChatMessage>,
+    toolCallsById: Map<String, ToolCall>,
+    colors: IdeColors,
+    taskSummary: String? = null,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val summaries = messages.map { msg ->
+        buildToolDisplaySummary(
+            content = msg.content,
+            toolCall = msg.toolCallId?.let { toolCallsById[it] },
+        )
+    }
+    val failedCount = summaries.count { it.success == false }
+    val skippedCount = summaries.count { it.success == null }
+    val headerStatus = when {
+        failedCount > 0 -> "$failedCount 失败"
+        skippedCount > 0 -> "$skippedCount 跳过"
+        else -> "完成"
+    }
+    val displayTaskSummary = taskSummary?.takeIf { it.isNotBlank() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+            .padding(end = 32.dp)
+            .background(colors.fieldBackground, RoundedCornerShape(12.dp))
+            .border(width = 1.dp, color = colors.border, RoundedCornerShape(12.dp)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) { expanded = !expanded }
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = if (expanded) "▼" else "▶",
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "工具调用 · ${messages.size} 条",
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText),
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = headerStatus,
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText),
+            )
+        }
+
+        if (displayTaskSummary != null) {
+            Text(
+                text = "任务: ${truncateSummary(displayTaskSummary, 80)}",
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 24.dp, end = 10.dp, bottom = 5.dp),
+            )
+        }
+
+        Column(
+            modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            summaries.forEachIndexed { idx, summary ->
+                ToolSummaryRow(
+                    index = idx + 1,
+                    summary = summary,
+                    colors = colors,
+                )
+            }
+        }
+
+        AnimatedVisibility(
+            visible = expanded,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                messages.forEachIndexed { idx, msg ->
+                    val toolCall = msg.toolCallId?.let { toolCallsById[it] }
+                    val summary = summaries.getOrNull(idx)
+                    ToolDetailBlock(
+                        index = idx + 1,
+                        summary = summary,
+                        content = msg.content,
+                        toolCall = toolCall,
+                        colors = colors,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolSummaryRow(
+    index: Int,
+    summary: ToolDisplaySummary,
+    colors: IdeColors,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(colors.tableBackground, RoundedCornerShape(5.dp))
+            .border(BorderStroke(1.dp, colors.grid), RoundedCornerShape(5.dp))
+            .padding(horizontal = 7.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Text(
+            text = "$index.",
+            color = colors.secondaryText,
+            style = compactTextStyle(colors.secondaryText),
+        )
+        Text(
+            text = summary.statusLabel,
+            color = colors.secondaryText,
+            style = compactTextStyle(colors.secondaryText),
+        )
+        Text(
+            text = summary.name,
+            color = colors.text,
+            style = compactTextStyle(colors.text),
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(min = 72.dp, max = 132.dp),
+        )
+        Text(
+            text = summary.target,
+            color = colors.secondaryText,
+            style = compactTextStyle(colors.secondaryText),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(0.9f),
+        )
+        Text(
+            text = summary.result,
+            color = colors.secondaryText,
+            style = compactTextStyle(colors.secondaryText),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1.1f),
+        )
+    }
+}
+
+@Composable
+private fun ToolDetailBlock(
+    index: Int,
+    summary: ToolDisplaySummary?,
+    content: String,
+    toolCall: ToolCall?,
+    colors: IdeColors,
+) {
+    val detailScroll = rememberScrollState()
+    val args = toolCall?.arguments?.takeIf { it.isNotBlank() }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(colors.tableBackground, RoundedCornerShape(6.dp))
+            .border(BorderStroke(1.dp, colors.grid), RoundedCornerShape(6.dp))
+            .padding(8.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Text(
+            text = "$index. ${summary?.name ?: "tool"} · ${summary?.target ?: "对象:-"} · ${summary?.result ?: "结果:-"}",
+            color = colors.secondaryText,
+            style = compactTextStyle(colors.secondaryText),
+            fontWeight = FontWeight.SemiBold,
+        )
+        SelectionContainer {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 160.dp)
+                    .verticalScroll(detailScroll),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                if (args != null) {
+                    Text(
+                        text = "参数:\n${formatJsonForDisplay(args)}",
+                        color = colors.secondaryText,
+                        style = compactTextStyle(colors.secondaryText).copy(fontFamily = FontFamily.Monospace),
+                    )
+                }
+                Text(
+                    text = "结果:\n$content",
+                    color = colors.secondaryText,
+                    style = compactTextStyle(colors.secondaryText).copy(fontFamily = FontFamily.Monospace),
+                )
+            }
+        }
+    }
+}
+
+private data class ToolDisplaySummary(
+    val name: String,
+    val target: String,
+    val result: String,
+    val statusLabel: String,
+    val success: Boolean?,
+)
+
+private fun buildToolDisplaySummary(
+    content: String,
+    toolCall: ToolCall?,
+): ToolDisplaySummary {
+    val rawName = toolCall?.name
+        ?: extractField(content, "类型")
+        ?: inferToolNameFromContent(content)
+        ?: "tool"
+    val args = toolCall?.arguments?.parseJsonObjectOrNull()
+    val operation = args?.getString("operation")
+        ?: extractField(content, "操作")
+    val name = compactToolName(rawName, operation)
+    val target = targetFromArgs(rawName, args)
+        ?: targetFromContent(content)
+        ?: "对象:-"
+    val success = when {
+        content.contains("状态:成功") -> true
+        content.contains("状态:失败") ||
+            content.contains("状态:解析失败") ||
+            content.contains("[工具执行异常]") ||
+            content.contains("[工具文档加载失败]") -> false
+        content.contains("状态:已跳过") ||
+            content.contains("[用户取消]") ||
+            content.contains("[已取消]") -> null
+        else -> null
+    }
+    val statusLabel = when (success) {
+        true -> "OK"
+        false -> "ERR"
+        null -> "SKIP"
+    }
+    val result = buildToolResultText(content, success)
+    return ToolDisplaySummary(name, target, result, statusLabel, success)
+}
+
+private fun compactToolName(name: String, operation: String?): String {
+    val base = when (name.removePrefix("unknown(").removeSuffix(")")) {
+        "insert_strings" -> "strings.insert"
+        "update_string" -> "strings.update"
+        "delete_string" -> "strings.delete"
+        "query_keys" -> "strings.query"
+        "read_string" -> "strings.read"
+        "find_keys_by_text" -> "strings.find"
+        "sheets_operation" -> "sheets"
+        "find_rows_by_text" -> "sheets.find"
+        "get_editor_file" -> "editor.file"
+        "read_file" -> "file.read"
+        "edit_file" -> "file.edit"
+        "create_file" -> "file.create"
+        "search_in_files" -> "file.search"
+        "find_references" -> "file.refs"
+        "list_files" -> "file.list"
+        "load_tool_doc" -> "tool.doc"
+        "ask_user" -> "ask_user"
+        "task_complete" -> "done"
+        else -> name
+    }
+    return if (base == "sheets" && !operation.isNullOrBlank()) {
+        "sheets.${operation.lowercase()}"
+    } else {
+        base
+    }
+}
+
+private fun targetFromArgs(toolName: String, args: JsonObject?): String? {
+    if (args == null) return null
+    fun moduleSuffix(): String = args.getString("module")?.let { " @$it" }.orEmpty()
+    return when (toolName) {
+        "insert_strings", "update_string", "delete_string", "read_string" ->
+            args.getString("name")?.let { "key:$it${moduleSuffix()}" }
+        "query_keys" ->
+            args.getString("pattern")?.let { "pattern:$it${moduleSuffix()}" }
+                ?: args.getString("module")?.let { "module:$it" }
+        "find_keys_by_text" ->
+            args.getString("text")?.let { "text:${truncateText(it, 36)}" }
+        "sheets_operation" -> {
+            val sheet = args.getString("sheetName")?.let { "sheet:$it" }
+            val range = args.getString("range")?.let { "range:$it" }
+            val key = args.getString("key")?.let { "key:$it" }
+            val row = args.getString("rowNumber")?.let { "row:$it" }
+            val col = args.getString("columnIndex")?.let { "col:$it" }
+            listOfNotNull(sheet, range, key, row, col).joinToString(" ").takeIf { it.isNotBlank() }
+        }
+        "find_rows_by_text" ->
+            args.getString("text")?.let { "text:${truncateText(it, 36)}" }
+        "read_file", "edit_file", "create_file" ->
+            args.getString("path")?.let { "path:${truncateText(it, 48)}" }
+        "search_in_files" ->
+            args.getString("pattern")?.let { "pattern:${truncateText(it, 36)}" }
+        "find_references" ->
+            args.getString("symbol")?.let { "symbol:$it" }
+        "list_files" ->
+            args.getString("relativeDir")?.let { "dir:$it" }
+        "load_tool_doc" ->
+            args.getString("tool")?.let { "doc:$it" }
+        "ask_user" ->
+            args.getString("question")?.let { "question:${truncateText(it, 36)}" }
+        else -> null
+    }
+}
+
+private fun targetFromContent(content: String): String? {
+    val module = extractField(content, "模块") ?: extractField(content, "module")
+    val key = extractField(content, "key") ?: extractField(content, "name")
+    val path = extractField(content, "path")
+    val range = extractField(content, "range")
+    val sheet = extractField(content, "工作表") ?: extractField(content, "sheetName")
+    return when {
+        key != null -> "key:$key${module?.let { " @$it" }.orEmpty()}"
+        path != null -> "path:${truncateText(path, 48)}"
+        range != null -> "range:$range"
+        sheet != null -> "sheet:$sheet"
+        module != null -> "module:$module"
+        else -> null
+    }
+}
+
+private fun buildToolResultText(content: String, success: Boolean?): String {
+    val info = extractTextAfter(content, "信息:")
+        ?: extractTextAfter(content, "失败:")
+        ?: content.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
+    val prefix = when (success) {
+        true -> "成功"
+        false -> "失败"
+        null -> if (content.contains("已跳过")) "跳过" else "结果"
+    }
+    return "$prefix: ${truncateSummary(info, 58)}"
+}
+
+private fun inferToolNameFromContent(content: String): String? {
+    val trimmed = content.trim()
+    if (trimmed.startsWith("[工具执行结果]")) {
+        val rest = trimmed.removePrefix("[工具执行结果]").trim()
+        return rest.substringBefore(' ').takeIf {
+            it.isNotBlank() && !it.contains(':') && !it.contains('=')
+        }
+    }
+    if (trimmed.startsWith("[用户取消]")) {
+        return trimmed.removePrefix("[用户取消]").trim().substringBefore(' ').takeIf { it.isNotBlank() }
+    }
+    if (trimmed.startsWith("[工具执行异常]")) {
+        return trimmed.removePrefix("[工具执行异常]").trim().substringBefore(' ').takeIf { it.isNotBlank() }
+    }
+    if (trimmed.contains("工具文档")) return "load_tool_doc"
+    return null
+}
+
+private fun String.parseJsonObjectOrNull(): JsonObject? =
+    runCatching { JsonParser.parseString(this).asJsonObject }.getOrNull()
+
+private fun JsonObject.getString(key: String): String? =
+    get(key)?.takeIf { !it.isJsonNull }?.let { element ->
+        runCatching {
+            if (element.isJsonPrimitive) element.asString else element.toString()
+        }.getOrNull()
+    }?.trim()?.takeIf { it.isNotEmpty() }
+
+private fun formatJsonForDisplay(text: String): String {
+    return runCatching {
+        val element = JsonParser.parseString(text)
+        com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(element)
+    }.getOrElse { text }
+}
+
+@Composable
 private fun ToolBubble(
     content: String,
     colors: IdeColors,
@@ -882,13 +1323,31 @@ private fun ParseFailedInline(
 private fun extractField(text: String, key: String): String? {
     val marker = "$key:"
     val start = text.indexOf(marker)
-    if (start < 0) return null
-    val valueStart = start + marker.length
+    val equalsMarker = "$key="
+    val equalsStart = text.indexOf(equalsMarker)
+    if (start < 0 && equalsStart < 0) return null
+    val actualStart: Int
+    val markerLength: Int
+    if (start >= 0 && (equalsStart < 0 || start < equalsStart)) {
+        actualStart = start
+        markerLength = marker.length
+    } else {
+        actualStart = equalsStart
+        markerLength = equalsMarker.length
+    }
+    val valueStart = actualStart + markerLength
     // 取到下一个空格分隔字段之前
     val rest = text.substring(valueStart)
     val endIdx = rest.indexOf(' ').let { if (it < 0) rest.length else it }
-    val raw = rest.substring(0, endIdx).trim()
+    val raw = rest.substring(0, endIdx).trim().trim('\'', '"', ',', ';')
     return raw.takeIf { it.isNotEmpty() }
+}
+
+private fun extractTextAfter(text: String, marker: String): String? {
+    val start = text.indexOf(marker)
+    if (start < 0) return null
+    val rest = text.substring(start + marker.length).trim()
+    return rest.lineSequence().firstOrNull { it.isNotBlank() }?.trim()
 }
 
 private fun truncateText(text: String, max: Int): String =

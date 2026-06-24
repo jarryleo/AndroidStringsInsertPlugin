@@ -113,6 +113,17 @@ internal class SseStreamParser(
             }
             if (!text.isNullOrEmpty()) onDelta(text)
         }
+        // OpenAI-compatible reasoning models(例如部分 DeepSeek/OpenRouter 模型)
+        // 会把思考过程放在 reasoning_content,普通 content 只保留最终回答。
+        // UI 的 Thinking 区块消费的正是 onDelta,所以这里也要纳入流式文本。
+        delta.get("reasoning_content")?.let { reasoningEl ->
+            val text = when {
+                reasoningEl.isJsonNull -> null
+                reasoningEl.isJsonPrimitive -> reasoningEl.asString
+                else -> reasoningEl.toString()
+            }
+            if (!text.isNullOrEmpty()) onDelta(text)
+        }
 
         // 工具调用增量:delta.tool_calls 是稀疏数组(每项可能只含部分字段),按 index 合并
         delta.getAsJsonArray("tool_calls")?.forEach { el ->
@@ -190,9 +201,17 @@ internal class SseStreamParser(
                         b.textBuffer.append(t)
                         onDelta(t)
                     }
+                    "thinking_delta" -> {
+                        val t = delta.get("thinking")?.asString ?: return
+                        b.textBuffer.append(t)
+                        onDelta(t)
+                    }
                     "input_json_delta" -> {
                         val p = delta.get("partial_json")?.asString ?: return
                         b.argsBuffer.append(p)
+                    }
+                    "signature_delta" -> {
+                        // Anthropic extended thinking signature; not useful for UI.
                     }
                 }
             }
