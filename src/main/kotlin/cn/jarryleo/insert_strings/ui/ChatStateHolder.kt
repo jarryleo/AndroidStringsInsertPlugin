@@ -71,4 +71,14 @@ internal interface ChatStateHolder {
      * 弹框没有表格可切,默认空实现即可。
      */
     fun closeChatView() {}
+
+    /**
+     * 当一次 [AiAction.InsertStrings] 实际写入到 strings.xml 后由 driver 回调。
+     * 用于 "Extract strings.xml" 这类需要把选区替换成 @string/key 或 R.string.key 的场景。
+     * 默认空实现;只有 ExtractStringsChatHolder 等需要回填编辑器的入口会覆写。
+     *
+     * @param key      写入的 key 名
+     * @param module   目标模块(可能为 null,表示未指定模块)
+     */
+    fun onInsertStringsInserted(key: String, module: String?) {}
 }

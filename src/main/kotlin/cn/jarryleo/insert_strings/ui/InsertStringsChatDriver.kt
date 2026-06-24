@@ -1410,6 +1410,17 @@ internal class InsertStringsChatDriver(
         state.insertStringsManager.updateUI(allEntries)
         val names = actions.joinToString(", ") { it.name }
         state.showToast("Inserted: $names")
+
+        // 通知 state 有 insert_strings 已完成(供 ExtractStringsChatHolder 这类入口
+        // 拿到 key 后回填编辑器选区)。默认空实现,只有需要的入口会覆写。
+        results.forEachIndexed { i, (_, ok) ->
+            if (ok) {
+                actions.getOrNull(i)?.let { a ->
+                    state.onInsertStringsInserted(a.name, batchModule)
+                }
+            }
+        }
+
         state.closeChatView()
 
         // 为每个 insert_strings 调用添加对应的 tool result(使用 entry 自带的 toolCallId,避免下标错位)

@@ -35,6 +35,13 @@
                     icon="/META-INF/pluginIcon.svg"/>
     </extensions>
     <actions>
+        <action id="ExtractStringsAction"
+                class="cn.jarryleo.insert_strings.ExtractStringsAction"
+                text="Extract strings.xml"
+                description="Extract the selected text into strings.xml and replace the selection with a reference">
+            <add-to-group group-id="EditMenu" anchor="first"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="first"/>
+        </action>
         <action id="AskAiAction"
                 class="cn.jarryleo.insert_strings.AskAiAction"
                 text="Ask AI"
