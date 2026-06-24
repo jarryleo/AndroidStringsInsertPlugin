@@ -115,7 +115,7 @@ internal class InsertStringsEditorOpsController(
         }
         // **不关闭聊天视图**:翻译查重的完整流程是 replace_selection → read_string → (可选)
         // ask_user 询问是否修正 → update_string。若此处关闭聊天视图,AI 无法继续推进
-        // 后续工作(主面板会切回表格,AskAi/ExtractStrings 弹框会 dispose,都破坏对话流程)。
+        // 后续工作(主面板会切回表格,AskAi/ExtractStrings 弹框保持打开,都依赖对话上下文)。
         return "[工具执行结果] 类型:replace_selection 状态:成功 " +
             "信息:已将选区替换为 $replacement(原长度 ${range.second - range.first} 字符),聊天视图保持打开"
     }

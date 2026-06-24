@@ -51,7 +51,7 @@ import javax.swing.*
  *      - XML 布局(res/layout*):  `@string/key`
  *      - Kotlin / Java:          `R.string.key`
  *      - 其它文件:               默认走 `R.string.key`(代码优先)
- * 4. 弹框关闭。
+ * 4. 弹框保持打开(用户可继续与 AI 交互,或手动点 Close 按钮关闭)。
  *
  * 「若 key 已存在则提示用户是否覆盖」由 AI 按 system prompt 中的规则通过 ask_user
  * 自然处理(已在 AITranslator.CHAT_SYSTEM_PROMPT 中说明),不在本类里重复实现。
@@ -128,8 +128,10 @@ class ExtractStringsAction : AnAction() {
             project = project,
             onKeyInserted = { key ->
                 // AI 完成 insert_strings / 复用 existing key 后,立即回到编辑器替换硬编码文本。
+                // 注意:此处不再关闭弹框 —— AI 后续可能继续推进翻译查重(read_string /
+                // ask_user / update_string),弹框需保持打开以维持对话上下文。
                 val doReplace = {
-                    val replaced = replaceSelection(
+                    replaceSelection(
                         editor = editor,
                         project = project,
                         file = currentFile,
@@ -138,10 +140,6 @@ class ExtractStringsAction : AnAction() {
                         selectionEnd = selectionEnd,
                         key = key,
                     )
-                    if (replaced) {
-                        dialog.dispose()
-                    }
-                    replaced
                 }
                 if (SwingUtilities.isEventDispatchThread()) {
                     doReplace()
