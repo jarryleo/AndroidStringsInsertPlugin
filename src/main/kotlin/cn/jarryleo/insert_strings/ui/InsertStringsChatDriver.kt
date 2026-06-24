@@ -363,26 +363,38 @@ internal class InsertStringsChatDriver(
             //    在 function-calling 回合里两者互补。
             val realToolCalls = reply.toolCalls.filter { it.name != ToolDefinitions.TOOL_TASK_COMPLETE }
             val hasTaskComplete = reply.toolCalls.any { it.name == ToolDefinitions.TOOL_TASK_COMPLETE }
-            val (finalContent, finalToolCalls, finalThinking) = when {
+            // 关键修复:必须把「解析失败」的 tool_call 一起写入 assistant 消息的 toolCalls 字段,
+            // 否则下一轮 OpenAI/DeepSeek 协议校验会失败:
+            //   "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"
+            // —— 之前 [finalToolCalls] 只用 realToolCalls(排除 failed),导致下面追加的
+            // "解析失败" tool_result 的 tool_call_id 在上一条 assistant 消息里找不到对应 tool_use,
+            // DeepSeek / OpenAI 立即返回 HTTP 400。
+            // UI 层只对 realToolCalls 做"summarizeToolCalls"展示用,真正驱动 processAiReply 的是
+            // reply.actions(只含解析成功的),所以混入 failed 不会重复执行。
+            val finalToolCalls = realToolCalls + reply.failedToolCalls
+            val (finalContent, finalThinking) = when {
                 // 情况 A:模型纯文本回复(无工具调用)——内容就是回复本身,不要重复展示
-                reply.toolCalls.isEmpty() && reply.failedToolCalls.isEmpty() -> {
-                    Triple(reply.reply, emptyList<ToolCall>(), "")
+                finalToolCalls.isEmpty() -> {
+                    Pair(reply.reply, "")
                 }
                 // 情况 B:只有 task_complete 终止信号
                 // content 留空,由 handleTaskComplete 写入 summary;
                 // thinking 保留流式累积文本,作为「思考过程」展示
                 realToolCalls.isEmpty() && hasTaskComplete -> {
-                    Triple("", emptyList<ToolCall>(), reply.reply)
+                    Pair("", reply.reply)
                 }
                 // 情况 C:有真实工具调用(可叠加 task_complete,但 task_complete 之后会被前面分支截走,
                 //    所以这里只可能是纯真实工具调用)
                 else -> {
                     val summary = if (realToolCalls.isNotEmpty()) {
                         "执行操作: ${summarizeToolCalls(realToolCalls)}"
+                    } else if (reply.failedToolCalls.isNotEmpty()) {
+                        // 全部解析失败:在 content 上提示一下,用户能直接看到失败信息(否则 UI 上只看到一行「执行操作:」)
+                        "执行操作失败: ${summarizeToolCalls(reply.failedToolCalls)} 参数无法解析"
                     } else {
                         ""
                     }
-                    Triple(summary, realToolCalls, reply.reply)
+                    Pair(summary, reply.reply)
                 }
             }
 
@@ -444,6 +456,15 @@ internal class InsertStringsChatDriver(
             //    这会让用户看到一个空气泡后对话卡死,直到手动重新发送。
             //    此场景下应当主动继续 tool loop,把错误 tool_result 喂回给 AI,
             //    让 AI 看到失败信息后自动修正并重新调用合法工具,无需用户介入。
+            //
+            // 关键约束(配合上面 finalToolCalls 含 failed 的修复):assistant 消息的
+            // toolCalls 现在保留了 failed 项,所以"解析失败" tool_result 的 tool_call_id
+            // 能匹配上 tool_use,DeepSeek 不会再因 "Messages with role 'tool' must be a
+            // response to a preceding message with 'tool_calls'" 报 HTTP 400 而终止对话。
+            //
+            // 当 actions 非空 + failedToolCalls 非空(混合)时,processAiReply 已根据
+            // 实际成功的 action 走完分支(task_complete 终止 / ask_user 暂停 / 写操作继续),
+            // 不需要我们再额外 continue。
             if (reply.actions.isEmpty() && reply.failedToolCalls.isNotEmpty()) {
                 continueToolLoopInBackground(context, iteration + 1)
             }
@@ -523,11 +544,30 @@ internal class InsertStringsChatDriver(
             }
 
             if (askAction.options.isNotEmpty()) {
-                // 带 options:挂到 assistant 消息渲染按钮,记录 toolCallId,等待用户点击
-                state.chatMessages[state.chatMessages.lastIndex] =
-                    state.chatMessages.last().copy(options = askAction.options)
+                // 带 options:把 question 写入 assistant 消息的 content(让用户看到问题),
+                // options 挂到 options 字段(让 UI 渲染按钮)。记录 toolCallId,等待用户点击。
+                // 修复:之前只挂 options,question 文本被吞掉,用户只看到「执行操作: ask_user」+ 按钮,
+                //      完全不知道 AI 在问什么(流式累积的 thinking 在回合结束后被折叠,看不到)。
+                // 同时清空 thinking:summary("执行操作: ask_user")和流式 thinking 内容都会被
+                // ThinkingSection 折叠区渲染,会和 question 重复 + 挤占视觉空间,影响可读性。
+                val lastIdx = state.chatMessages.lastIndex
+                if (lastIdx >= 0) {
+                    state.chatMessages[lastIdx] = state.chatMessages[lastIdx].copy(
+                        content = askAction.question,
+                        thinking = "",
+                        options = askAction.options
+                    )
+                }
             } else {
-                // 无 options:用 toast 通知用户问题内容,等待用户在输入框中回复
+                // 无 options:把 question 写入 assistant 消息的 content,
+                // 提示用户到输入框中回复;toast 作为辅助提示。同时清空 thinking(同上)。
+                val lastIdx = state.chatMessages.lastIndex
+                if (lastIdx >= 0) {
+                    state.chatMessages[lastIdx] = state.chatMessages[lastIdx].copy(
+                        content = askAction.question,
+                        thinking = ""
+                    )
+                }
                 state.showToast(askAction.question)
             }
             // 无论是否带 options,都暂停 loop 等待用户响应。

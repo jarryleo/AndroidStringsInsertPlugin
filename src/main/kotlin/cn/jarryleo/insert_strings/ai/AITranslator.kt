@@ -92,7 +92,7 @@ object AITranslator {
 - find_rows_by_text: 反查 — 在表格中按文本搜索行(exact/contains/regex,可选 column 限定)。
 
 ### 通用
-- ask_user: 向用户提问并等待用户回复。options 非空时显示按钮供用户点击,请优先提供options参数,方便用户快速回复;options 为空时用户会在聊天输入框中输入回复,系统会作为 tool_result 回传。无论是否带 options,调用本工具都会暂停 tool loop 直到用户响应 — 因此不要反复调用本工具,收到回复后请用 task_complete 或执行操作结束本轮。
+- ask_user: 向用户提问并等待用户回复。**question 必填且必须是字符串**,这是展示给用户的唯一入口;options 非空时显示按钮供用户点击,请优先提供options参数,方便用户快速回复;options 为空时用户会在聊天输入框中输入回复,系统会作为 tool_result 回传。无论是否带 options,调用本工具都会暂停 tool loop 直到用户响应 — 因此不要反复调用本工具,收到回复后请用 task_complete 或执行操作结束本轮。**注意:如果 question 字段缺失或格式异常,系统会向用户显示"AI 尝试提问但未提供问题内容",此时用户难以理解你的意图;务必保证 question 字段是非空字符串。**
 - load_tool_doc: 按需加载工具详细文档。
 - task_complete: 结束对话,status 取 success / partial / failed。
 
@@ -1799,7 +1799,21 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 } else null
             }
             ToolDefinitions.TOOL_ASK_USER -> {
-                val question = args.get("question")?.asString ?: return null
+                // 修复:更宽容的解析 —— 部分模型会省略 question 字段或把它写成非字符串,
+                // 之前直接 return null → 进入 failedToolCalls → 用户看不到问题内容。
+                // 现在即使 question 缺失/类型异常,也用兜底文案让 AI 的提问意图能传达给用户
+                // (options 解析失败时降级为「无按钮,用户在输入框回复」模式,继续等用户响应)。
+                val rawQuestion = args.get("question")
+                val question = when {
+                    rawQuestion == null || rawQuestion.isJsonNull -> "(AI 尝试提问但未提供问题内容,请在输入框回复)"
+                    rawQuestion.isJsonPrimitive -> rawQuestion.asString.trim()
+                        .ifEmpty { "(AI 尝试提问但问题内容为空,请在输入框回复)" }
+                    else -> {
+                        // 复杂类型(number/array/object)退化到 toString,再 strip 引号
+                        val asText = rawQuestion.toString().trim('"').trim()
+                        asText.ifEmpty { "(AI 尝试提问但问题内容无法解析,请在输入框回复)" }
+                    }
+                }
                 val optionsArray = args.getAsJsonArray("options")
                 val options = optionsArray?.mapNotNull {
                     it?.extractText()?.takeIf { o -> o.isNotEmpty() }
