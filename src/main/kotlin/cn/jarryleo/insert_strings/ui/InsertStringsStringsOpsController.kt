@@ -105,6 +105,8 @@ internal class InsertStringsStringsOpsController(
     fun runQueryKeys(action: AiAction.QueryKeys): String {
         val context = ContextManager.getInstance(project)
         val contextInfo = context.contextInfo
+        // 默认走「推荐默认模块」,与 insert_strings 一致:用户没指定时优先 currentModule,
+        // 偏弱时退回项目最强模块(语种最多+行数最多)。这样 AI 不显式传 module 也能查到对的内容。
         val moduleName = resolveTargetModule(
             action.module,
             contextInfo?.currentModule?.moduleName,
@@ -124,13 +126,15 @@ internal class InsertStringsStringsOpsController(
                 pattern = action.pattern,
                 limit = action.limit ?: 50,
                 offset = action.offset ?: 0,
-                includeTranslations = action.includeTranslations
+                includeTranslations = action.includeTranslations,
+                searchIn = StringsService.SearchIn.valueOf(action.searchIn.name)
             )
             totalMatched = results.size
         }
         return buildString {
             append("[工具执行结果] 类型:query_keys 模块:").append(moduleName)
             append(" pattern:").append(action.pattern ?: "(无)")
+            append(" searchIn:").append(action.searchIn.name.lowercase())
             append(" 状态:成功 命中:").append(totalMatched)
             if (results.isEmpty()) {
                 appendLine("\n未找到匹配的 key。")

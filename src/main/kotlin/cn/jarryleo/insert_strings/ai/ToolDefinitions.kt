@@ -108,9 +108,12 @@ object ToolDefinitions {
 
     private const val DESC_QUERY_KEYS =
         "列出或搜索模块内的字符串 key。" +
-            "pattern 为空时列出所有 key;非空时按正则匹配 key 名(例: \"mall_.*\")。" +
+            "pattern 为空时列出所有 key;非空时按正则匹配。" +
+            "searchIn 控制匹配范围:key(默认,只匹配 key 名)/ text(跨多语言翻译文本)/ both(并集)。" +
             "includeTranslations=true 时返回各语言当前翻译(消耗较多 token,谨慎使用)。" +
-            "适用场景:用户说「找一下关于房间的 key」「列出所有错误提示的 key」,或 AI 需要先发现 key 名再修改。"
+            "module 省略时按 recommendedDefaultModule → currentModule → 行数最多模块的优先级自动选。" +
+            "适用场景:用户说「找一下关于房间的 key」「列出所有错误提示的 key」,或 AI 需要先发现 key 名再修改。" +
+            "想反查某段翻译属于哪个 key 时,优先用 searchIn=text 而不是 find_keys_by_text —— 一次返回带 key 列表 + 全部语种。"
 
     private const val DESC_READ_STRING =
         "读取指定 key 在模块所有语言的当前翻译,返回 key+各语言文本+文件路径。" +
@@ -359,16 +362,21 @@ object ToolDefinitions {
     }
 
     private fun openAiQueryKeysParams(): JsonObject {
+        val searchInEnum = JsonArray().apply {
+            add("key")
+            add("text")
+            add("both")
+        }
         return obj {
             addProperty("type", "object")
             add("properties", obj {
                 add("module", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,目标 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时用 currentModule.moduleName。")
+                    addProperty("description", "可选,目标 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时按 recommendedDefaultModule → currentModule → 行数最多模块的优先级自动选(默认即「推荐模块」)。")
                 })
                 add("pattern", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选正则表达式,对 key 名做匹配。为空或省略时列出所有 key(分页)。")
+                    addProperty("description", "可选正则表达式。匹配范围由 searchIn 决定:key 名 / 各语种翻译文本 / 两者。为空或省略时列出所有 key(分页)。")
                 })
                 add("limit", obj {
                     addProperty("type", "integer")
@@ -381,6 +389,14 @@ object ToolDefinitions {
                 add("includeTranslations", obj {
                     addProperty("type", "boolean")
                     addProperty("description", "可选,是否在结果中带各语言当前翻译。默认 false。开启后 token 消耗大,谨慎使用。")
+                })
+                add("searchIn", obj {
+                    addProperty("type", "string")
+                    add("enum", searchInEnum)
+                    addProperty(
+                        "description",
+                        "可选,搜索范围:key(默认,只匹配 key 名)/ text(跨多语种翻译文本,等价于 find_keys_by_text 但入口统一)/ both(key 名和翻译文本任一命中即可)。"
+                    )
                 })
             })
         }

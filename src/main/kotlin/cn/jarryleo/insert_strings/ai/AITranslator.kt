@@ -90,7 +90,7 @@ object AITranslator {
 
 ## 工具一览
 ### strings.xml 操作
-- query_keys: 列出/搜索模块内的字符串 key(pattern 正则,可选 includeTranslations)。
+- query_keys: 列出/搜索模块内的字符串 key(pattern 正则,可选 includeTranslations;新增 searchIn=text|both 支持跨多语种翻译文本搜索,默认 searchIn=key)。省略 module 时按 recommendedDefaultModule 自动选。
 - read_string: 读取指定 key 在所有语言的当前翻译。
 - find_keys_by_text: 反查 — 通过翻译文本查找 key(exact/contains/regex,可选 module/language 限定)。
 - insert_strings: 插入/全量覆盖翻译(translations 必含 values 默认英语并覆盖其他语言,适合新增 key)。
@@ -164,21 +164,30 @@ object AITranslator {
 
         "query_keys" to """
             ## query_keys 详细用法
-            列出 / 搜索模块内的字符串 key。
+            列出 / 搜索模块内的字符串 key,支持 key 名 / 翻译文本 / 两者 三种搜索范围。
             字段：
-            - module（可选）：目标 Android 模块名，取上下文 modules[].moduleName。省略时用 currentModule.moduleName。
-            - pattern（可选）：正则表达式，对 key 名做匹配。为空或省略时列出所有 key（分页）。
+            - module（可选）：目标 Android 模块名，取上下文 modules[].moduleName。
+              省略时**按 recommendedDefaultModule → currentModule → 行数最多模块** 的优先级自动选,
+              多数情况下省略 module 即可命中用户当前工作模块。
+            - pattern（可选）：正则表达式,匹配范围由 searchIn 决定。为空或省略时列出所有 key（分页）。
+            - searchIn（可选,默认 key）：
+              - `key`  只匹配 key 名(完全等价于旧行为)
+              - `text` 跨多语言文件,匹配任一语种的翻译文本(类似 find_keys_by_text 但入口统一)
+              - `both` key 名和翻译文本任一命中即可(并集)
             - limit（可选）：最大返回条数，默认 50，最大 500。
             - offset（可选）：分页偏移，默认 0。
-            - includeTranslations（可选，默认 false）：是否在结果中带各语言当前翻译。开启后 token 消耗大，仅在确实需要翻译内容时使用。
+            - includeTranslations（可选，默认 false）：是否在结果中带各语言当前翻译。开启后 token 消耗大,仅在确实需要翻译内容时使用。
             返回：每条结果形如 `{key, translations?, filePath}`；分页时可用 offset 续读。
             典型场景：
-            - 「项目里有哪些 key」「找以 error_ 开头的 key」「列出 home 模块的 key」
-            - AI 修改前先 search 找到目标 key 名称，再 read_string 读全文。
+            - 「项目里有哪些 key」「找以 error_ 开头的 key」「列出 home 模块的 key」 → searchIn=key
+            - 「哪个 key 翻译成了"登录"」 → searchIn=text, 配合 includeTranslations=true 一次拿到全语种
+            - 「找包含支付相关文案的所有 key」 → searchIn=both
+            - AI 修改前先 search 找到目标 key 名称,再 read_string 读全文。
             示例：
             {"type":"query_keys","module":"app","pattern":"^login_.*","limit":50}
+            {"type":"query_keys","pattern":"登录","searchIn":"text","includeTranslations":true}
+            {"type":"query_keys","pattern":"pay|订单","searchIn":"both"}
             {"type":"query_keys","limit":100,"offset":100}
-            {"type":"query_keys","includeTranslations":true,"limit":20}
         """.trimIndent(),
 
         "read_string" to """
@@ -1842,7 +1851,10 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val includeTranslations = args.get("includeTranslations")?.let {
                     runCatching { it.asBoolean }.getOrNull()
                 } ?: false
-                AiAction.QueryKeys(module, pattern, limit, offset, includeTranslations)
+                val searchIn = args.get("searchIn")?.asString?.lowercase()?.let { raw ->
+                    runCatching { AiAction.QueryKeys.SearchIn.valueOf(raw.uppercase()) }.getOrNull()
+                } ?: AiAction.QueryKeys.SearchIn.KEY
+                AiAction.QueryKeys(module, pattern, limit, offset, includeTranslations, searchIn)
             }
             ToolDefinitions.TOOL_READ_STRING -> {
                 val name = args.get("name")?.asString?.trim() ?: return null

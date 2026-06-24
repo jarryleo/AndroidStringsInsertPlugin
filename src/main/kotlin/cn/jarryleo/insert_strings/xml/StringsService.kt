@@ -36,12 +36,17 @@ object StringsService {
     }
 
     /**
-     * 按正则 pattern 搜索 key(对模块默认语言文件中的 key 名做匹配)。
+     * 按正则 pattern 搜索 key(对模块默认语言文件中的 key 名做匹配,或扩展为多语种翻译文本匹配)。
      *
-     * @param pattern 正则字符串。为空/null 时退化为 [listKeys]。
-     * @param limit   最大返回条数
-     * @param offset  分页偏移
-     * @return 匹配结果:[key, language -> text, filePath] 三元组
+     * @param pattern            正则字符串。为空/null 时退化为 [listKeys]。
+     * @param limit              最大返回条数
+     * @param offset             分页偏移
+     * @param includeTranslations 是否在结果中带各语言当前翻译(默认 false,节省 token)
+     * @param searchIn           搜索范围:
+     *                            - [SearchIn.KEY]  (默认)只匹配 key 名,完全等价于旧行为
+     *                            - [SearchIn.TEXT] 跨多语言文件,匹配任一语言的翻译文本
+     *                            - [SearchIn.BOTH] key 名 / 翻译文本 任一命中即可
+     * @return 匹配结果:[key, language -> text, filePath] 四元组
      */
     fun searchKeys(
         project: Project,
@@ -49,7 +54,8 @@ object StringsService {
         pattern: String?,
         limit: Int = 50,
         offset: Int = 0,
-        includeTranslations: Boolean = false
+        includeTranslations: Boolean = false,
+        searchIn: SearchIn = SearchIn.KEY,
     ): List<KeySearchResult> {
         val defaultFile = resolveDefaultStringsFile(project, moduleName) ?: return emptyList()
         val allKeys = parseKeysFromFile(defaultFile)
@@ -58,7 +64,33 @@ object StringsService {
         } else {
             runCatching { Regex(pattern) }.getOrElse { return emptyList() }
         }
-        val matchedKeys = if (regex == null) allKeys else allKeys.filter { regex.containsMatchIn(it) }
+        val matchedKeys: List<String> = when {
+            regex == null -> allKeys
+            searchIn == SearchIn.KEY -> allKeys.filter { regex.containsMatchIn(it) }
+            else -> {
+                // TEXT / BOTH: 跨多语言文件扫翻译文本,任一文件命中即可。
+                // 复用 parseStringEntriesFromFile,避免重复正则。
+                val context = ContextManager.getInstance(project)
+                val perFile = context.getModuleFiles(moduleName)
+                val hit = LinkedHashSet<String>()
+                for ((valuesDir, stringsFile) in perFile) {
+                    val entries = parseStringEntriesFromFile(stringsFile)
+                    for ((key, value) in entries) {
+                        if (regex.containsMatchIn(value)) {
+                            hit.add(key)
+                            if (searchIn == SearchIn.TEXT && hit.size >= limit) break
+                        }
+                    }
+                    if (searchIn == SearchIn.TEXT && hit.size >= limit) break
+                }
+                // BOTH: 还要把 key 名命中的补进来
+                if (searchIn == SearchIn.BOTH) {
+                    allKeys.filter { regex.containsMatchIn(it) }.forEach { hit.add(it) }
+                }
+                // 保持 defaultFile 中出现顺序,让结果可读
+                allKeys.filter { it in hit }
+            }
+        }
         val safeOffset = offset.coerceAtLeast(0)
         val safeLimit = limit.coerceAtLeast(1).coerceAtMost(500)
         val page = matchedKeys.drop(safeOffset).take(safeLimit)
@@ -73,6 +105,8 @@ object StringsService {
             KeySearchResult(key, translations, defaultFile.path)
         }
     }
+
+    enum class SearchIn { KEY, TEXT, BOTH }
 
     /**
      * 读取指定 key 在模块所有语言的当前翻译。

@@ -136,19 +136,25 @@ sealed class AiAction {
     /**
      * 列出/搜索模块内的字符串 key(AI 主动发现能力)。
      *
-     * @param module             目标模块名,省略时用 currentModule
+     * @param module             目标模块名,省略时按 recommendedDefaultModule → currentModule → fallback 优先级
      * @param pattern            可选正则;为空时退化为全量列表
      * @param limit              最大返回条数,默认 50
      * @param offset             分页偏移,默认 0
      * @param includeTranslations 是否在结果中带各语言当前翻译(默认 false,节省 token)
+     * @param searchIn           搜索范围: KEY=只匹配 key 名(默认,向后兼容);
+     *                           TEXT=只匹配各语言翻译文本(类似 find_keys_by_text);
+     *                           BOTH=任一命中即可(并集)
      */
     data class QueryKeys(
         val module: String?,
         val pattern: String?,
         val limit: Int?,
         val offset: Int?,
-        val includeTranslations: Boolean
-    ) : AiAction()
+        val includeTranslations: Boolean,
+        val searchIn: SearchIn = SearchIn.KEY
+    ) : AiAction() {
+        enum class SearchIn { KEY, TEXT, BOTH }
+    }
 
     /**
      * 读取指定 key 在模块所有语言的当前翻译(AI 精确读取能力)。
