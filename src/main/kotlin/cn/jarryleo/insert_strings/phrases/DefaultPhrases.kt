@@ -27,7 +27,7 @@ internal object DefaultPhrases {
         val seeds = listOf(
             Seed(
                 title = "strings选中的翻译检测",
-                text = "帮我检查选中的翻译是否准确，生成总结报告。"
+                text = "帮我检查选中的翻译是否准确，生成总结报告，提供修复方案，并询问用户是否修正，提供对应选项按钮。"
             ),
             Seed(
                 title = "strings选中的翻译修复",
@@ -35,7 +35,7 @@ internal object DefaultPhrases {
             ),
             Seed(
                 title = "表格翻译检测",
-                text = "帮我检查表格内的翻译是否准确，生成总结报告。"
+                text = "帮我检查表格内的翻译是否准确，生成总结报告，提供修复方案，并询问用户是否修正，提供对应选项按钮。"
             ),
             Seed(
                 title = "表格翻译修复",
