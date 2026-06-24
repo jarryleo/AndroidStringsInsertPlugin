@@ -28,6 +28,7 @@ internal class InsertStringsChatDriver(
     private val state: ChatStateHolder,
     private val stringsOps: InsertStringsStringsOpsController,
     private val sheetsOps: InsertStringsSheetsOpsController,
+    private val fileOps: InsertStringsFileOpsController,
     private val chatContextBuilder: InsertStringsChatContextBuilder,
 ) {
 
@@ -608,6 +609,24 @@ internal class InsertStringsChatDriver(
             return
         }
 
+        // Priority 7: 文件操作域(get_editor_file / read_file / edit_file /
+        //   create_file / search_in_files / find_references / list_files)
+        val fileEntries = unprocessed.filter {
+            it.action is AiAction.GetEditorFile ||
+                it.action is AiAction.ReadFile ||
+                it.action is AiAction.EditFile ||
+                it.action is AiAction.CreateFile ||
+                it.action is AiAction.SearchInFiles ||
+                it.action is AiAction.FindReferences ||
+                it.action is AiAction.ListFiles
+        }
+        if (fileEntries.isNotEmpty()) {
+            unprocessed.removeAll(fileEntries)
+            executeFileOps(fileEntries, context, iteration)
+            addSkippedToolResults(unprocessed, "因已执行文件操作而跳过")
+            return
+        }
+
         // 没有任何可执行 tool call:AI 只是在说,等用户输入
         addSkippedToolResults(unprocessed, "本轮 AI 未调用可识别的工具")
         state.chatSending = false
@@ -637,6 +656,13 @@ internal class InsertStringsChatDriver(
                 is AiAction.AskUser -> "ask_user"
                 is AiAction.LoadToolDoc -> "load_tool_doc"
                 is AiAction.SheetsOperation -> "sheets_operation(${action.operation.name.lowercase()})"
+                is AiAction.GetEditorFile -> "get_editor_file"
+                is AiAction.ReadFile -> "read_file"
+                is AiAction.EditFile -> "edit_file"
+                is AiAction.CreateFile -> "create_file"
+                is AiAction.SearchInFiles -> "search_in_files"
+                is AiAction.FindReferences -> "find_references"
+                is AiAction.ListFiles -> "list_files"
                 is AiAction.TaskComplete -> "task_complete"
             }
             state.chatMessages.add(
@@ -1098,6 +1124,64 @@ internal class InsertStringsChatDriver(
                     )
                     state.chatSending = false
                 }
+            }
+        }
+    }
+
+    /**
+     * 执行文件操作域动作(7 个新工具)并把每个结果作为 tool result 回传。
+     *
+     * 与 sheets 域不同:文件操作是同步操作(无网络),不需要后台线程 + 重复 key 确认流程,
+     * 但读 / 搜索 / find_references 仍然可能耗时长(扫描大目录),所以也丢到后台线程。
+     *
+     * 异常处理:任一动作抛异常时,为已成功的动作保留成功 tool_result,为失败的动作添加错误 tool_result,
+     * 同时在 chat 里追加一条 assistant 提示"部分动作失败"。不会让整批 tool_call 全部失败。
+     */
+    private fun executeFileOps(
+        entries: List<ActionWithToolCall>,
+        context: String,
+        iteration: Int
+    ) {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val pendingResults = mutableListOf<Pair<String, String>>()
+            var firstError: String? = null
+            entries.forEach { (action, toolCallId) ->
+                if (toolCallId.isEmpty()) return@forEach
+                val resultText = try {
+                    when (action) {
+                        is AiAction.GetEditorFile -> fileOps.runGetEditorFile(action)
+                        is AiAction.ReadFile -> fileOps.runReadFile(action)
+                        is AiAction.EditFile -> fileOps.runEditFile(action)
+                        is AiAction.CreateFile -> fileOps.runCreateFile(action)
+                        is AiAction.SearchInFiles -> fileOps.runSearchInFiles(action)
+                        is AiAction.FindReferences -> fileOps.runFindReferences(action)
+                        is AiAction.ListFiles -> fileOps.runListFiles(action)
+                        else -> return@forEach
+                    }
+                } catch (e: Exception) {
+                    val typeLabel = when (action) {
+                        is AiAction.GetEditorFile -> "get_editor_file"
+                        is AiAction.ReadFile -> "read_file"
+                        is AiAction.EditFile -> "edit_file"
+                        is AiAction.CreateFile -> "create_file"
+                        is AiAction.SearchInFiles -> "search_in_files"
+                        is AiAction.FindReferences -> "find_references"
+                        is AiAction.ListFiles -> "list_files"
+                        else -> "file_op"
+                    }
+                    "[工具执行异常] $typeLabel 失败:${e.message ?: "unknown"}".also {
+                        if (firstError == null) firstError = e.message ?: "unknown"
+                    }
+                }
+                pendingResults.add(toolCallId to resultText)
+            }
+            SwingUtilities.invokeLater {
+                pendingResults.forEach { (toolCallId, content) ->
+                    state.chatMessages.add(
+                        ChatMessage(role = "tool", content = content, toolCallId = toolCallId)
+                    )
+                }
+                continueToolLoopInBackground(context, iteration + 1)
             }
         }
     }

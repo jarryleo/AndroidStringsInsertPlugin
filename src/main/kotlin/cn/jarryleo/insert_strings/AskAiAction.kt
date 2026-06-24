@@ -116,14 +116,16 @@ class AskAiAction : AnAction() {
             editorLoc.y + (editor.component.height - dialog.height) / 2
         )
 
-        // 装配 driver + 三个 controller(共享同一 ChatStateHolder)
+        // 装配 driver + 四个 controller(共享同一 ChatStateHolder)
         val stringsOps = InsertStringsStringsOpsController(state)
         val sheetsOps = InsertStringsSheetsOpsController(state)
+        val fileOps = InsertStringsFileOpsController(state)
         val contextBuilder = InsertStringsChatContextBuilder(state)
         val driver = InsertStringsChatDriver(
             state = state,
             stringsOps = stringsOps,
             sheetsOps = sheetsOps,
+            fileOps = fileOps,
             chatContextBuilder = contextBuilder,
         )
 

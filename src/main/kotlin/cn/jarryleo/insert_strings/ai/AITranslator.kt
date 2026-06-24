@@ -945,6 +945,18 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         }.getOrDefault(ToolDefinitions.SheetContext(null, emptyList()))
     }
 
+    /**
+     * 从项目上下文 JSON 中解析 projectBase 段(IDE 当前打开项目根路径)。
+     * 注入到所有文件操作工具的 description 里,让 AI 知道相对路径怎么传。
+     */
+    private fun extractProjectBase(context: String): String? {
+        if (context.isBlank()) return null
+        return runCatching {
+            val root = JsonParser.parseString(context).asJsonObject
+            root.get("projectBase")?.takeIf { !it.isJsonNull }?.asString
+        }.getOrNull()
+    }
+
     private fun openAiChatBody(
         model: String,
         messages: List<ChatMessage>,
@@ -952,9 +964,10 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         stream: Boolean = false
     ): String {
         val sheetCtx = extractSheetContext(context)
+        val projectBase = extractProjectBase(context)
         val root = JsonObject().apply {
             addProperty("model", model)
-            add("tools", ToolDefinitions.openAiTools(sheetCtx))
+            add("tools", ToolDefinitions.openAiTools(sheetCtx, projectBase))
             if (stream) addProperty("stream", true)
             add(
                 "messages",
@@ -983,6 +996,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         stream: Boolean = false
     ): String {
         val sheetCtx = extractSheetContext(context)
+        val projectBase = extractProjectBase(context)
         val root = JsonObject().apply {
             addProperty("model", model)
             addProperty("max_tokens", 4096)
@@ -993,7 +1007,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 }
             }
             addProperty("system", systemParts)
-            add("tools", ToolDefinitions.anthropicTools(sheetCtx))
+            add("tools", ToolDefinitions.anthropicTools(sheetCtx, projectBase))
             if (stream) addProperty("stream", true)
             add(
                 "messages",
@@ -1559,6 +1573,61 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                     batchEdits
                 )
             }
+            // region ============== 文件操作域解析(2026 新增) ==============
+            ToolDefinitions.TOOL_GET_EDITOR_FILE -> {
+                AiAction.GetEditorFile()
+            }
+            ToolDefinitions.TOOL_READ_FILE -> {
+                val path = args.get("path")?.asString?.trim() ?: return null
+                if (path.isEmpty()) return null
+                val startLine = args.get("startLine")?.let { runCatching { it.asInt }.getOrNull() } ?: 0
+                val endLine = args.get("endLine")?.let { runCatching { it.asInt }.getOrNull() } ?: -1
+                val maxLines = args.get("maxLines")?.let { runCatching { it.asInt }.getOrNull() } ?: 600
+                AiAction.ReadFile(path, startLine, endLine, maxLines)
+            }
+            ToolDefinitions.TOOL_EDIT_FILE -> {
+                val path = args.get("path")?.asString?.trim() ?: return null
+                val oldText = args.get("oldText")?.asString ?: return null
+                val newText = args.get("newText")?.asString ?: return null
+                if (path.isEmpty() || oldText.isEmpty()) return null
+                val useRegex = args.get("useRegex")?.let { runCatching { it.asBoolean }.getOrNull() } ?: false
+                val replaceAll = args.get("replaceAll")?.let { runCatching { it.asBoolean }.getOrNull() } ?: false
+                AiAction.EditFile(path, oldText, newText, useRegex, replaceAll)
+            }
+            ToolDefinitions.TOOL_CREATE_FILE -> {
+                val path = args.get("path")?.asString?.trim() ?: return null
+                val content = args.get("content")?.asString ?: return null
+                if (path.isEmpty()) return null
+                val overwrite = args.get("overwrite")?.let { runCatching { it.asBoolean }.getOrNull() } ?: false
+                AiAction.CreateFile(path, content, overwrite)
+            }
+            ToolDefinitions.TOOL_SEARCH_IN_FILES -> {
+                val pattern = args.get("pattern")?.asString ?: return null
+                if (pattern.isEmpty()) return null
+                val useRegex = args.get("useRegex")?.let { runCatching { it.asBoolean }.getOrNull() } ?: false
+                val caseSensitive = args.get("caseSensitive")?.let { runCatching { it.asBoolean }.getOrNull() } ?: false
+                val filePattern = args.get("filePattern")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val relativeDir = args.get("relativeDir")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val limit = args.get("limit")?.let { runCatching { it.asInt }.getOrNull() } ?: 100
+                AiAction.SearchInFiles(pattern, useRegex, caseSensitive, filePattern, relativeDir, limit)
+            }
+            ToolDefinitions.TOOL_FIND_REFERENCES -> {
+                val symbol = args.get("symbol")?.asString?.trim() ?: return null
+                if (symbol.isEmpty()) return null
+                val kind = args.get("kind")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: "general"
+                val caseSensitive = args.get("caseSensitive")?.let { runCatching { it.asBoolean }.getOrNull() } ?: false
+                val limit = args.get("limit")?.let { runCatching { it.asInt }.getOrNull() } ?: 100
+                AiAction.FindReferences(symbol, kind, caseSensitive, limit)
+            }
+            ToolDefinitions.TOOL_LIST_FILES -> {
+                val relativeDir = args.get("relativeDir")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: "."
+                val pattern = args.get("pattern")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: "*"
+                val recursive = args.get("recursive")?.let { runCatching { it.asBoolean }.getOrNull() } ?: false
+                val includeDirs = args.get("includeDirs")?.let { runCatching { it.asBoolean }.getOrNull() } ?: false
+                val maxEntries = args.get("maxEntries")?.let { runCatching { it.asInt }.getOrNull() } ?: 500
+                AiAction.ListFiles(relativeDir, pattern, recursive, includeDirs, maxEntries)
+            }
+            // endregion
             else -> null
         }
     }

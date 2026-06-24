@@ -231,6 +231,128 @@ sealed class AiAction {
         val caseSensitive: Boolean,
         val limit: Int
     ) : AiAction()
+
+    // region ============== 文件操作域(2026 新增) ==============
+    //
+    // 7 个新工具对应 IDE 内文件 / 内容 / 引用 操作,与 strings / sheets 域并列。
+    // 拆分成独立工具类是为了:
+    //  - 单次 round-trip 只解决一类问题,token 友好
+    //  - 每个工具的安全约束独立(读操作自由,写操作只限定项目内)
+    //  - AI 可按需组合(先 search_in_files 找目标,再 read_file 看上下文,再 edit_file 改)
+    //
+    // 共同约束(由 FileOpsService 兜底):
+    //  - 所有路径必须落在当前 IDE 打开的项目根目录内,绝对路径越界会被拒绝
+    //  - 写操作原子(临时文件 + rename),中途失败不会污染原文件
+    //  - 大文件有字节/行数上限,避免 OOM 与 token 爆炸
+    //  - search/find_references 只搜 java/kt/xml(必要时扩到 gradle/json/...)
+    //
+
+    /**
+     * 获取当前 IDE 编辑器中打开的文件信息:路径、文件名带后缀、当前选中文字、选区起止行。
+     * 主要用于 AI 「我在看什么文件?选中了什么?」自检。
+     */
+    data class GetEditorFile(
+        val dummy: String? = null
+    ) : AiAction()
+
+    /**
+     * 读取项目内任意文件的内容。
+     *
+     * @param path       相对项目根路径(如 "app/src/main/AndroidManifest.xml")或项目内的绝对路径
+     * @param startLine  起始行 0-based(包含),默认 0
+     * @param endLine    结束行 0-based(包含),-1 表示到文件末尾,默认 -1
+     * @param maxLines   单次返回最大行数(防止大文件爆 token),默认 600
+     */
+    data class ReadFile(
+        val path: String,
+        val startLine: Int,
+        val endLine: Int,
+        val maxLines: Int
+    ) : AiAction()
+
+    /**
+     * 精准编辑文件(同时支持 unique 模式 + regex 模式)。
+     *
+     * @param path        文件路径(相对项目根或项目内绝对路径)
+     * @param oldText     唯一匹配文本(useRegex=false)或正则 pattern
+     * @param newText     替换为的新文本
+     * @param useRegex    true 时把 oldText 视为正则
+     * @param replaceAll  true 时替换所有匹配;false 时要求唯一匹配(0/>1 处会失败)
+     */
+    data class EditFile(
+        val path: String,
+        val oldText: String,
+        val newText: String,
+        val useRegex: Boolean,
+        val replaceAll: Boolean
+    ) : AiAction()
+
+    /**
+     * 创建新文件(支持嵌套目录,自动 mkdirs)。
+     *
+     * @param path      文件路径(相对项目根或项目内绝对路径)
+     * @param content   文件内容
+     * @param overwrite 目标文件已存在时是否覆盖,默认 false(避免误覆盖)
+     */
+    data class CreateFile(
+        val path: String,
+        val content: String,
+        val overwrite: Boolean
+    ) : AiAction()
+
+    /**
+     * 在项目内文件中按文本 / 正则搜索,返回文件路径+行号+匹配内容。
+     * 默认仅搜索 java/kt/xml(也包括 gradle/json/properties/txt/md)。
+     *
+     * @param pattern        搜索文本/正则
+     * @param useRegex       true 时按正则
+     * @param caseSensitive  是否区分大小写(默认 false)
+     * @param filePattern    可选 glob 限定文件名(例: "*.kt"),null 时不限制
+     * @param relativeDir    限定子目录(相对项目根),null 时搜索整个项目
+     * @param limit          最大返回条数(默认 100,最大 200)
+     */
+    data class SearchInFiles(
+        val pattern: String,
+        val useRegex: Boolean,
+        val caseSensitive: Boolean,
+        val filePattern: String?,
+        val relativeDir: String?,
+        val limit: Int
+    ) : AiAction()
+
+    /**
+     * 查找符号在项目中的引用点(Java/Kotlin/XML 文件)。
+     *
+     * @param symbol   资源名/视图 id/key/类名/标识符
+     * @param kind     引用类型:id/string/layout/drawable/color/class/general
+     * @param caseSensitive 是否区分大小写
+     * @param limit    最大返回条数(默认 100,最大 200)
+     */
+    data class FindReferences(
+        val symbol: String,
+        val kind: String,
+        val caseSensitive: Boolean,
+        val limit: Int
+    ) : AiAction()
+
+    /**
+     * 列举项目内某目录下的文件/子目录,支持 glob 与递归。
+     *
+     * @param relativeDir  相对项目根的子目录,"." 或空表示项目根
+     * @param pattern      glob 模式(默认 "*")
+     * @param recursive    是否递归子目录(限制最多 10 层防止爆栈)
+     * @param includeDirs  是否在结果中包含目录
+     * @param maxEntries   最大返回条数(默认 500)
+     */
+    data class ListFiles(
+        val relativeDir: String,
+        val pattern: String,
+        val recursive: Boolean,
+        val includeDirs: Boolean,
+        val maxEntries: Int
+    ) : AiAction()
+
+    // endregion
 }
 
 data class AiReply(

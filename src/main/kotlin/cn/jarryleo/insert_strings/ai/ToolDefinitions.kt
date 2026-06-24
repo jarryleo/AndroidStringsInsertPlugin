@@ -28,14 +28,19 @@ object ToolDefinitions {
     /**
      * OpenAI / OpenAI 兼容协议的 tools 数组(放在 request body 的 `tools` 字段)。
      * 每次构建都重新生成,这样 [sheetContext] 能把当前 defaultSheetName / availableSheets
-     * 拼到 sheets_operation / find_rows_by_text 的 description 里,AI 一眼看到当前工作表名。
+     * 拼到 sheets_operation / find_rows_by_text 的 description 里,AI 一眼看到当前工作表名;
+     * [projectBase] 拼到所有文件操作工具的 description 后面,让 AI 知道相对路径怎么传。
      */
-    fun openAiTools(sheetContext: SheetContext = SheetContext(null, emptyList())): JsonArray =
-        buildOpenAiTools(sheetContext)
+    fun openAiTools(
+        sheetContext: SheetContext = SheetContext(null, emptyList()),
+        projectBase: String? = null
+    ): JsonArray = buildOpenAiTools(sheetContext, projectBase)
 
     /** Anthropic Messages API 的 tools 数组(放在 request body 的 `tools` 字段)。 */
-    fun anthropicTools(sheetContext: SheetContext = SheetContext(null, emptyList())): JsonArray =
-        buildAnthropicTools(sheetContext)
+    fun anthropicTools(
+        sheetContext: SheetContext = SheetContext(null, emptyList()),
+        projectBase: String? = null
+    ): JsonArray = buildAnthropicTools(sheetContext, projectBase)
 
     /** 工具名 → JSON Schema 的 properties 引用,供 driver 在解析 tool_call.arguments 时复用。 */
     val toolNames: List<String> = listOf(
@@ -47,6 +52,13 @@ object ToolDefinitions {
         TOOL_FIND_KEYS_BY_TEXT,
         TOOL_SHEETS_OPERATION,
         TOOL_FIND_ROWS_BY_TEXT,
+        TOOL_GET_EDITOR_FILE,
+        TOOL_READ_FILE,
+        TOOL_EDIT_FILE,
+        TOOL_CREATE_FILE,
+        TOOL_SEARCH_IN_FILES,
+        TOOL_FIND_REFERENCES,
+        TOOL_LIST_FILES,
         TOOL_ASK_USER,
         TOOL_LOAD_TOOL_DOC,
         TOOL_TASK_COMPLETE,
@@ -60,6 +72,13 @@ object ToolDefinitions {
     const val TOOL_FIND_KEYS_BY_TEXT = "find_keys_by_text"
     const val TOOL_SHEETS_OPERATION = "sheets_operation"
     const val TOOL_FIND_ROWS_BY_TEXT = "find_rows_by_text"
+    const val TOOL_GET_EDITOR_FILE = "get_editor_file"
+    const val TOOL_READ_FILE = "read_file"
+    const val TOOL_EDIT_FILE = "edit_file"
+    const val TOOL_CREATE_FILE = "create_file"
+    const val TOOL_SEARCH_IN_FILES = "search_in_files"
+    const val TOOL_FIND_REFERENCES = "find_references"
+    const val TOOL_LIST_FILES = "list_files"
     const val TOOL_ASK_USER = "ask_user"
     const val TOOL_LOAD_TOOL_DOC = "load_tool_doc"
     const val TOOL_TASK_COMPLETE = "task_complete"
@@ -108,6 +127,64 @@ object ToolDefinitions {
             "注意:sheetName 参数必须**原样**使用下方工作表名(包含点、空格等特殊字符,不要加单引号)," +
             "系统会按 Google Sheets A1 规则自动处理转义。"
 
+    // region 文件操作域描述(2026 新增)
+
+    private const val DESC_GET_EDITOR_FILE =
+        "获取当前 IDE 编辑器中打开的文件信息:完整路径、文件名带后缀(用于判断文件类型,如 MainActivity.kt / activity_main.xml)、" +
+            "当前选中的文字、选区起止行号、文件总行数。" +
+            "适用场景:用户说「改一下我打开的这个文件」「解释我选中的代码」,AI 先调用本工具确认上下文;不传任何参数。" +
+            "返回 fileType 后缀(kt/java/xml/...)和 language 分类,kotlin/java/xml 可直接读,其它后缀注意可能是配置/资源文件。"
+
+    private const val DESC_READ_FILE =
+        "读取当前 IDE 项目内任意文件的内容(相对项目根路径或项目内的绝对路径)。" +
+            "适用场景:AI 拿到文件路径(从 get_editor_file / search_in_files / find_references / list_files 取得)后想看完整内容。" +
+            "默认从第 0 行读到末尾,大文件会按 maxLines(默认 600)截断,可用 startLine / endLine 翻页继续读。" +
+            "限制:单文件 > 1.5MB 会拒绝读取,改用 search_in_files 检索指定内容。"
+
+    private const val DESC_EDIT_FILE =
+        "精准修改项目内任意文件的内容。" +
+            "两种模式(同时支持):" +
+            "  - **文本模式**(默认,useRegex=false):用 oldText 全文精确匹配,匹配 1 处时直接替换;0 处报错(让 AI 用 read_file 复查);" +
+            "    匹配 >1 处且 replaceAll=false 时也报错(让 AI 扩展 oldText 到唯一,或开启 replaceAll)。" +
+            "  - **正则模式**(useRegex=true):用 oldText 作 Kotlin 正则;同样默认要求唯一匹配,replaceAll=true 时全文替换。" +
+            "原子写:写失败不会污染原文件(临时文件 + rename)。" +
+            "适用场景:用户说「把第 X 行的 foo 改成 bar」「把所有 TODO 替换成 FIXME」,AI 先 read_file 拿原文,再用本工具改。" +
+            "限制:单文件 > 3MB 拒绝编辑,需拆为多次小范围操作。"
+
+    private val DESC_CREATE_FILE =
+        "在项目内创建新文件(支持嵌套目录,自动 mkdirs)。" +
+            "参数:path 相对项目根或项目内绝对路径;content 文件内容;overwrite 文件已存在时是否覆盖(默认 false,防误覆盖)。" +
+            "适用场景:用户说「新建一个 util 类」「生成 README」「在 build.gradle 加一段配置(先用 read_file 看现有内容,再用 edit_file 改,而不是用本工具整文件覆盖)」。"
+
+    private const val DESC_SEARCH_IN_FILES =
+        "在项目内文件中按文本 / 正则搜索,返回文件路径+行号+列号+匹配内容。" +
+            "默认仅搜索 java / kt / xml 文件(也包括 gradle / kts / json / properties / txt / md),不搜图片/二进制。" +
+            "适用场景:用户说「在项目里找一下 XXX 的用法」「看哪个文件调用了 getResult」,AI 在调用 edit_file 前先用本工具定位修改点。" +
+            "可选 filePattern(glob,如 \"*.kt\")与 relativeDir(子目录,如 \"app/src/main\")缩小范围,避免大项目全量扫描慢。" +
+            "限制:单次最多返回 200 条命中,超出请收紧 pattern / 限定目录。"
+
+    private const val DESC_FIND_REFERENCES =
+        "查找符号在项目中的引用点(Java/Kotlin/XML 文件)。" +
+            "kind 取值:" +
+            "  - **id**:匹配 R.id.xxx / @+id/xxx / @id/xxx(资源 id 引用)" +
+            "  - **string**:匹配 R.string.xxx / @string/xxx(字符串资源引用)" +
+            "  - **layout**:匹配 R.layout.xxx / @layout/xxx(布局引用)" +
+            "  - **drawable**:匹配 R.drawable.xxx / @drawable/xxx(图标引用)" +
+            "  - **color**:匹配 R.color.xxx / @color/xxx(颜色引用)" +
+            "  - **class**:按标识符边界匹配类名" +
+            "  - **general**(默认):按标识符边界匹配任意符号名" +
+            "适用场景:用户说「这个 key / view id / 类名 在哪些地方被引用」,重构前评估影响面。" +
+            "与 search_in_files 的区别:本工具是「符号语义」搜索,自动适配资源引用的多种写法;search_in_files 是「字面文本」搜索。"
+
+    private const val DESC_LIST_FILES =
+        "列举项目内某目录下的文件 / 子目录,支持 glob 与递归。" +
+            "参数:relativeDir 相对项目根的子目录(\".\" 或空表示项目根);pattern glob(默认 \"*\");" +
+            "recursive 是否递归子目录(限制最多 10 层);includeDirs 是否包含目录。" +
+            "适用场景:用户说「项目里有哪些 layout 文件」「app/src/main/java 下都有什么包」,AI 探索项目结构。" +
+            "限制:单次最多返回 500 条;大目录请用 filePattern 限定(如 \"*.kt\")。"
+
+    // endregion
+
     private const val DESC_SHEETS_OPERATION =
         "执行 Google 表格操作。operation 决定具体动作类型。" +
             "不确定用法时先调用 load_tool_doc(\"sheets_basic\"/\"sheets_row_ops\"/...) 获取详细文档。" +
@@ -152,9 +229,26 @@ object ToolDefinitions {
         return "$base\n\n[当前 Google Sheets 上下文] ${parts.joinToString("; ")}。"
     }
 
-    private fun buildOpenAiTools(ctx: SheetContext): JsonArray {
+    /**
+     * 把当前 IDE 项目根拼到 description 后面,让 AI 在调文件操作工具时知道相对路径怎么传。
+     * @param projectBase 当前项目根(可为 null,表示未打开项目)
+     */
+    private fun appendProjectContext(base: String, projectBase: String?): String {
+        if (projectBase.isNullOrBlank()) {
+            return "$base\n\n[项目根] 当前 IDE 未打开项目,所有文件工具都将失败 — 请先打开 Android/IntelliJ 项目。"
+        }
+        return "$base\n\n[项目根] $projectBase — 路径参数优先传相对项目根的路径(如 \"app/src/main/AndroidManifest.xml\")。"
+    }
+
+    private fun buildOpenAiTools(ctx: SheetContext, projectBase: String? = null): JsonArray {
         val descSheets = appendSheetContext(DESC_SHEETS_OPERATION, ctx)
         val descFindRows = appendSheetContext(DESC_FIND_ROWS_BY_TEXT, ctx)
+        val descGetEditor = appendProjectContext(DESC_GET_EDITOR_FILE, projectBase)
+        val descReadFile = appendProjectContext(DESC_READ_FILE, projectBase)
+        val descEditFile = appendProjectContext(DESC_EDIT_FILE, projectBase)
+        val descCreateFile = appendProjectContext(DESC_CREATE_FILE, projectBase)
+        val descSearch = appendProjectContext(DESC_SEARCH_IN_FILES, projectBase)
+        val descList = appendProjectContext(DESC_LIST_FILES, projectBase)
         return JsonArray().apply {
             add(openAiTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
             add(openAiTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
@@ -164,15 +258,28 @@ object ToolDefinitions {
             add(openAiTool(TOOL_FIND_KEYS_BY_TEXT, DESC_FIND_KEYS_BY_TEXT, openAiFindKeysByTextParams()))
             add(openAiTool(TOOL_SHEETS_OPERATION, descSheets, openAiSheetsOperationParams()))
             add(openAiTool(TOOL_FIND_ROWS_BY_TEXT, descFindRows, openAiFindRowsByTextParams()))
+            add(openAiTool(TOOL_GET_EDITOR_FILE, descGetEditor, openAiGetEditorFileParams()))
+            add(openAiTool(TOOL_READ_FILE, descReadFile, openAiReadFileParams()))
+            add(openAiTool(TOOL_EDIT_FILE, descEditFile, openAiEditFileParams()))
+            add(openAiTool(TOOL_CREATE_FILE, descCreateFile, openAiCreateFileParams()))
+            add(openAiTool(TOOL_SEARCH_IN_FILES, descSearch, openAiSearchInFilesParams()))
+            add(openAiTool(TOOL_FIND_REFERENCES, DESC_FIND_REFERENCES, openAiFindReferencesParams()))
+            add(openAiTool(TOOL_LIST_FILES, descList, openAiListFilesParams()))
             add(openAiTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(openAiTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(openAiTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
         }
     }
 
-    private fun buildAnthropicTools(ctx: SheetContext): JsonArray {
+    private fun buildAnthropicTools(ctx: SheetContext, projectBase: String? = null): JsonArray {
         val descSheets = appendSheetContext(DESC_SHEETS_OPERATION, ctx)
         val descFindRows = appendSheetContext(DESC_FIND_ROWS_BY_TEXT, ctx)
+        val descGetEditor = appendProjectContext(DESC_GET_EDITOR_FILE, projectBase)
+        val descReadFile = appendProjectContext(DESC_READ_FILE, projectBase)
+        val descEditFile = appendProjectContext(DESC_EDIT_FILE, projectBase)
+        val descCreateFile = appendProjectContext(DESC_CREATE_FILE, projectBase)
+        val descSearch = appendProjectContext(DESC_SEARCH_IN_FILES, projectBase)
+        val descList = appendProjectContext(DESC_LIST_FILES, projectBase)
         return JsonArray().apply {
             add(anthropicTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
             add(anthropicTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
@@ -182,6 +289,13 @@ object ToolDefinitions {
             add(anthropicTool(TOOL_FIND_KEYS_BY_TEXT, DESC_FIND_KEYS_BY_TEXT, openAiFindKeysByTextParams()))
             add(anthropicTool(TOOL_SHEETS_OPERATION, descSheets, openAiSheetsOperationParams()))
             add(anthropicTool(TOOL_FIND_ROWS_BY_TEXT, descFindRows, openAiFindRowsByTextParams()))
+            add(anthropicTool(TOOL_GET_EDITOR_FILE, descGetEditor, openAiGetEditorFileParams()))
+            add(anthropicTool(TOOL_READ_FILE, descReadFile, openAiReadFileParams()))
+            add(anthropicTool(TOOL_EDIT_FILE, descEditFile, openAiEditFileParams()))
+            add(anthropicTool(TOOL_CREATE_FILE, descCreateFile, openAiCreateFileParams()))
+            add(anthropicTool(TOOL_SEARCH_IN_FILES, descSearch, openAiSearchInFilesParams()))
+            add(anthropicTool(TOOL_FIND_REFERENCES, DESC_FIND_REFERENCES, openAiFindReferencesParams()))
+            add(anthropicTool(TOOL_LIST_FILES, descList, openAiListFilesParams()))
             add(anthropicTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(anthropicTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(anthropicTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
@@ -678,6 +792,200 @@ object ToolDefinitions {
             })
         }
     }
+
+    // region 文件操作域 JSON Schema(2026 新增)
+
+    private fun openAiGetEditorFileParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("dummy", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "保留字段,本工具不接收任何参数,传空字符串或省略。")
+                })
+            })
+        }
+    }
+
+    private fun openAiReadFileParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("path", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,相对项目根的路径(如 \"app/src/main/AndroidManifest.xml\")或项目内的绝对路径。")
+                })
+                add("startLine", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "可选,起始行 0-based(包含),默认 0。")
+                })
+                add("endLine", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "可选,结束行 0-based(包含),-1 表示到文件末尾,默认 -1。")
+                })
+                add("maxLines", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "可选,单次返回最大行数(防止 token 爆炸),默认 600,最大 2000。")
+                })
+            })
+            add("required", JsonArray().apply { add("path") })
+        }
+    }
+
+    private fun openAiEditFileParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("path", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,文件路径(相对项目根或项目内绝对路径)。")
+                })
+                add("oldText", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,匹配文本(useRegex=false)或正则 pattern(useRegex=true)。")
+                })
+                add("newText", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,替换为的新文本。")
+                })
+                add("useRegex", obj {
+                    addProperty("type", "boolean")
+                    addProperty("description", "可选,true 时把 oldText 视为 Kotlin 正则,默认 false(纯文本匹配)。")
+                })
+                add("replaceAll", obj {
+                    addProperty("type", "boolean")
+                    addProperty("description", "可选,true 时替换所有匹配;false 时要求唯一匹配(0/>1 处会失败,让 AI 调整),默认 false。")
+                })
+            })
+            add("required", JsonArray().apply {
+                add("path")
+                add("oldText")
+                add("newText")
+            })
+        }
+    }
+
+    private fun openAiCreateFileParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("path", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,文件路径(相对项目根或项目内绝对路径);支持嵌套目录,自动 mkdirs。")
+                })
+                add("content", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,文件内容。")
+                })
+                add("overwrite", obj {
+                    addProperty("type", "boolean")
+                    addProperty("description", "可选,目标文件已存在时是否覆盖,默认 false(防误覆盖)。修改已存在文件请用 edit_file。")
+                })
+            })
+            add("required", JsonArray().apply {
+                add("path")
+                add("content")
+            })
+        }
+    }
+
+    private fun openAiSearchInFilesParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("pattern", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,搜索文本(useRegex=false)或正则(useRegex=true)。")
+                })
+                add("useRegex", obj {
+                    addProperty("type", "boolean")
+                    addProperty("description", "可选,true 时按正则,默认 false(按子串)。")
+                })
+                add("caseSensitive", obj {
+                    addProperty("type", "boolean")
+                    addProperty("description", "可选,是否区分大小写,默认 false。")
+                })
+                add("filePattern", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,glob 限定文件名(例:\"*.kt\")。仅支持 * 与 ? 通配符,不处理 **。")
+                })
+                add("relativeDir", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,限定子目录(相对项目根),如 \"app/src/main\";省略时搜索整个项目。")
+                })
+                add("limit", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "可选,最大返回条数,默认 100,最大 200。")
+                })
+            })
+            add("required", JsonArray().apply { add("pattern") })
+        }
+    }
+
+    private fun openAiFindReferencesParams(): JsonObject {
+        val kindEnum = JsonArray().apply {
+            add("id")
+            add("string")
+            add("layout")
+            add("drawable")
+            add("color")
+            add("class")
+            add("general")
+        }
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("symbol", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,要查找的符号名(资源名 / view id / key / 类名 / 标识符)。")
+                })
+                add("kind", obj {
+                    addProperty("type", "string")
+                    add("enum", kindEnum)
+                    addProperty("description", "引用类型:id(资源id)/string/layout/drawable/color/class/general(任意符号)。默认 general。")
+                })
+                add("caseSensitive", obj {
+                    addProperty("type", "boolean")
+                    addProperty("description", "可选,是否区分大小写,默认 false。")
+                })
+                add("limit", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "可选,最大返回条数,默认 100,最大 200。")
+                })
+            })
+            add("required", JsonArray().apply { add("symbol") })
+        }
+    }
+
+    private fun openAiListFilesParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("relativeDir", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,相对项目根的子目录,\".\" 或空表示项目根,默认 \".\"。")
+                })
+                add("pattern", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,glob 模式,默认 \"*\"(列出所有)。支持 * 与 ? 通配符。")
+                })
+                add("recursive", obj {
+                    addProperty("type", "boolean")
+                    addProperty("description", "可选,是否递归子目录(最多 10 层),默认 false。")
+                })
+                add("includeDirs", obj {
+                    addProperty("type", "boolean")
+                    addProperty("description", "可选,是否在结果中包含目录,默认 false。")
+                })
+                add("maxEntries", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "可选,最大返回条数,默认 500。")
+                })
+            })
+        }
+    }
+
+    // endregion
 
     // endregion
 

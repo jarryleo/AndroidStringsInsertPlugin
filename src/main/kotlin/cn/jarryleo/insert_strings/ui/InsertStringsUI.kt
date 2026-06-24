@@ -121,6 +121,8 @@ class InsertStringsUI(
         private set
     internal lateinit var sheetsOpsController: InsertStringsSheetsOpsController
         private set
+    internal lateinit var fileOpsController: InsertStringsFileOpsController
+        private set
     internal lateinit var chatContextBuilder: InsertStringsChatContextBuilder
         private set
     internal lateinit var chatDriver: InsertStringsChatDriver
@@ -232,11 +234,13 @@ class InsertStringsUI(
         phrasesController = InsertStringsPhrasesController(this)
         stringsOpsController = InsertStringsStringsOpsController(this)
         sheetsOpsController = InsertStringsSheetsOpsController(this)
+        fileOpsController = InsertStringsFileOpsController(this)
         chatContextBuilder = InsertStringsChatContextBuilder(this)
         chatDriver = InsertStringsChatDriver(
             state = this,
             stringsOps = stringsOpsController,
             sheetsOps = sheetsOpsController,
+            fileOps = fileOpsController,
             chatContextBuilder = chatContextBuilder,
         )
     }

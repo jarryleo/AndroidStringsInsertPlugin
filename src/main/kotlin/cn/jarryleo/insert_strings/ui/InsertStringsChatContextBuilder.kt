@@ -39,6 +39,7 @@ internal class InsertStringsChatContextBuilder(
             .takeIf { it.isNotEmpty() }
 
         val root = JsonObject().apply {
+            addProperty("projectBase", state.project.basePath)
             add("androidProject", JsonObject().apply {
                 addProperty("name", contextInfo.projectName)
                 addProperty(
