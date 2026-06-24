@@ -5,7 +5,26 @@ import cn.jarryleo.insert_strings.InsertStringsManager
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.sheets.SheetsManager
 import cn.jarryleo.insert_strings.xml.KeyedStringsInfo
+import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.vfs.VirtualFile
+
+/**
+ * 入口打开 chat 时捕获的「编辑器 + 选区」快照。
+ *
+ * 用于 AI 通过 [AiAction.ReplaceSelection] 工具 / 翻译查重时
+ * `使用现有 key:<existing_key>` 选项触发的「把硬编码文本替换为 @string/key 或 R.string.key」操作。
+ *
+ * 主面板聊天视图此字段为 null(无编辑器上下文),`replace_selection` 工具在主面板场景下会
+ * 返回失败信息。
+ */
+data class EditorSelectionContext(
+    val editor: Editor,
+    val file: VirtualFile?,
+    val selectedText: String,
+    val selectionStart: Int,
+    val selectionEnd: Int,
+)
 
 /**
  * 聊天域共享的最小状态面。
@@ -38,9 +57,16 @@ internal interface ChatStateHolder {
     var askUserCallCount: Int
     var toolDocLoadCount: Int
     var pendingSheetsInsert: PendingSheetsInsert?
-    var pendingStringsInsert: PendingStringsInsert?
     var showContextPopup: Boolean
     var chatContextText: String
+
+    /**
+     * 入口打开时捕获的编辑器选区(AskAi / ExtractStrings 弹框在打开时设置)。
+     * null 表示当前 chat 入口没有可替换的编辑器选区(主面板聊天视图场景)。
+     * 供 AI 通过 [AiAction.ReplaceSelection] 工具 / `onInsertStringsInserted` 回调
+     * 触发「把硬编码文本替换为对 key 的引用」时使用。
+     */
+    var editorSelection: EditorSelectionContext?
 
     // ===== 表格状态(由 controllers 读写) =====
     /**
@@ -74,11 +100,18 @@ internal interface ChatStateHolder {
     fun closeChatView() {}
 
     /**
-     * 当一次 [AiAction.InsertStrings] 实际写入到 strings.xml 后由 driver 回调。
-     * 用于 "Extract strings.xml" 这类需要把选区替换成 @string/key 或 R.string.key 的场景。
-     * 默认空实现;只有 ExtractStringsChatHolder 等需要回填编辑器的入口会覆写。
+     * 当一次 [AiAction.InsertStrings] 实际写入到 strings.xml 后由 driver 回调,
+     * 或 AI 通过 [AiAction.ReplaceSelection] 工具调用时由 driver 触发。
+     * 用于 "Extract strings.xml" / "Ask AI" 这类需要把选区替换成 @string/key 或 R.string.key 的场景。
+     * 默认空实现;只有 ExtractStringsChatHolder / AskAiChatHolder 等需要回填编辑器的入口会覆写。
      *
-     * @param key      写入的 key 名
+     * 行为:在 EDT 上执行 WriteCommandAction;XML 布局文件替换为 `@string/<key>`,
+     * 其它文件替换为 `R.string/<key>`;**执行后聊天视图保持打开**(不调用 closeChatView),
+     * AI 继续推进翻译查重的后续流程(调用 read_string / ask_user / update_string)。
+     * 若 [editorSelection] 为 null 或选区已失效,默认实现为 no-op,
+     * ExtractStrings / AskAi 实现应自行兜底并返回失败结果。
+     *
+     * @param key      要引用的字符串 key
      * @param module   目标模块(可能为 null,表示未指定模块)
      */
     fun onInsertStringsInserted(key: String, module: String?) {}

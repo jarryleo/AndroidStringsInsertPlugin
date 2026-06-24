@@ -103,13 +103,14 @@ class InsertStringsUI(
     // AI 上下文弹窗
     override var showContextPopup by mutableStateOf(false)
     override var chatContextText by mutableStateOf("")
+    // 主面板聊天视图无编辑器上下文,本字段始终为 null;extract/askai 弹框的 ChatHolder 会覆写。
+    override var editorSelection: EditorSelectionContext? = null
 
     /**
      * 「重复 key 插入」二次确认时持有的状态。
      * 拆出去会让 ChatDriver 反向依赖过多,保留在 UI 上更直接。
      */
     override var pendingSheetsInsert: PendingSheetsInsert? = null
-    override var pendingStringsInsert: PendingStringsInsert? = null
 
     // ============== 协作类(延迟初始化,见 [createToolWindowContent]) ==============
     internal lateinit var actionsController: InsertStringsActionsController
@@ -242,6 +243,7 @@ class InsertStringsUI(
             stringsOps = stringsOpsController,
             sheetsOps = sheetsOpsController,
             fileOps = fileOpsController,
+            editorOps = InsertStringsEditorOpsController(this),
             chatContextBuilder = chatContextBuilder,
         )
     }

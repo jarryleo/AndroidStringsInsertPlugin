@@ -83,6 +83,19 @@ class AskAiAction : AnAction() {
         // 其它表格相关回调全部空实现 —— 弹框不展示 strings.xml 表格。
         val state = AskAiChatHolder(project)
 
+        // 捕获编辑器选区(给 AI 的 replace_selection 工具 / driver 触发的
+        // onInsertStringsInserted 使用,例如用户点选 ask_user 的「使用现有 key:<existing_key>」后,
+        // AI 用 replace_selection 把硬编码文本替换为对 key 的引用)。
+        val selectionStart = editor.selectionModel.selectionStart
+        val selectionEnd = editor.selectionModel.selectionEnd
+        state.bindEditorSelection(
+            editor = editor,
+            file = editor.virtualFile,
+            selectedText = selectedText,
+            selectionStart = selectionStart,
+            selectionEnd = selectionEnd,
+        )
+
         val composePanel = ComposePanel()
         val (titleBar, toastLabel) = createTitleBar(dialog, "Ask AI")
         state.bindToastLabel(toastLabel)
@@ -116,16 +129,18 @@ class AskAiAction : AnAction() {
             editorLoc.y + (editor.component.height - dialog.height) / 2
         )
 
-        // 装配 driver + 四个 controller(共享同一 ChatStateHolder)
+        // 装配 driver + 五个 controller(共享同一 ChatStateHolder)
         val stringsOps = InsertStringsStringsOpsController(state)
         val sheetsOps = InsertStringsSheetsOpsController(state)
         val fileOps = InsertStringsFileOpsController(state)
+        val editorOps = InsertStringsEditorOpsController(state)
         val contextBuilder = InsertStringsChatContextBuilder(state)
         val driver = InsertStringsChatDriver(
             state = state,
             stringsOps = stringsOps,
             sheetsOps = sheetsOps,
             fileOps = fileOps,
+            editorOps = editorOps,
             chatContextBuilder = contextBuilder,
         )
 
@@ -282,6 +297,9 @@ class AskAiAction : AnAction() {
  * 持有 dialog 生命周期内的 chat state + driver 引用。
  * 表格相关字段为空容器(不与主面板共享,controllers 写入会被丢弃,符合"弹框不展示表格"语义)。
  * showToast 直接把文字写到标题栏中央的 toast 标签上(1.8s 后自动清空)。
+ *
+ * 编辑器选区:在 [AskAiAction] 调用 [bindEditorSelection] 时注入,使 [onInsertStringsInserted]
+ * 与 [AiAction.ReplaceSelection] 工具都能把硬编码选区替换为对 key 的引用。
  */
 private class AskAiChatHolder(
     override val project: Project
@@ -299,9 +317,9 @@ private class AskAiChatHolder(
     override var askUserCallCount: Int = 0
     override var toolDocLoadCount: Int = 0
     override var pendingSheetsInsert: PendingSheetsInsert? = null
-    override var pendingStringsInsert: PendingStringsInsert? = null
     override var showContextPopup: Boolean by mutableStateOf(false)
     override var chatContextText: String by mutableStateOf("")
+    override var editorSelection: EditorSelectionContext? = null
 
     // 弹框无表格 —— 提供空容器,controllers 写入即丢弃
     override val keyEntries: MutableList<KeyedStringsInfo> = mutableListOf()
@@ -312,8 +330,33 @@ private class AskAiChatHolder(
     private var toastLabel: JBLabel? = null
     private var toastTimer: Timer? = null
 
+    @Volatile
+    private var editorReplacementTriggered: Boolean = false
+
     fun bindToastLabel(label: JBLabel) {
         toastLabel = label
+    }
+
+    /**
+     * 注入 chat 入口打开时的编辑器选区(由 [AskAiAction.showChatDialog] 在构造后立即调用)。
+     * 用于 AI 通过 [AiAction.ReplaceSelection] 工具或 driver 触发
+     * [onInsertStringsInserted] 时,把硬编码选区替换为对 key 的引用。
+     */
+    fun bindEditorSelection(
+        editor: com.intellij.openapi.editor.Editor,
+        file: com.intellij.openapi.vfs.VirtualFile?,
+        selectedText: String,
+        selectionStart: Int,
+        selectionEnd: Int
+    ) {
+        editorSelection = EditorSelectionContext(
+            editor = editor,
+            file = file,
+            selectedText = selectedText,
+            selectionStart = selectionStart,
+            selectionEnd = selectionEnd,
+        )
+        editorReplacementTriggered = false
     }
 
     override fun showToast(message: String) {
@@ -327,5 +370,67 @@ private class AskAiChatHolder(
                 start()
             }
         }
+    }
+
+    /**
+     * AskAi 入口的 [onInsertStringsInserted] 实现:把 [editorSelection] 选中的硬编码文本
+     * 替换为 `@string/<key>`(XML 布局)或 `R.string.<key>`(其它)。
+     * 若 [editorSelection] 为 null 或已被替换过,静默 no-op(AI 通过
+     * [AiAction.ReplaceSelection] 工具调用时由 controller 走显式路径并返回详细结果)。
+     */
+    override fun onInsertStringsInserted(key: String, module: String?) {
+        if (editorReplacementTriggered) return
+        val ctx = editorSelection ?: return
+        editorReplacementTriggered = true
+        SwingUtilities.invokeLater {
+            replaceEditorSelectionInternal(ctx, key)
+        }
+    }
+
+    private fun replaceEditorSelectionInternal(ctx: EditorSelectionContext, key: String) {
+        val editor = ctx.editor
+        if (editor.isDisposed) return
+        val document = editor.document
+        val textLength = document.textLength
+        val originalText = ctx.selectedText.takeIf { it.isNotBlank() } ?: return
+        val currentSelection = editor.selectionModel
+        val range: Pair<Int, Int> = when {
+            currentSelection.hasSelection() -> {
+                val s = currentSelection.selectionStart
+                val e = currentSelection.selectionEnd
+                if (s in 0 until e && e <= textLength &&
+                    document.charsSequence.subSequence(s, e).toString() == originalText
+                ) s to e else null
+            }
+
+            else -> null
+        } ?: when {
+            ctx.selectionStart in 0 until ctx.selectionEnd && ctx.selectionEnd <= textLength &&
+                    document.charsSequence.subSequence(ctx.selectionStart, ctx.selectionEnd).toString() == originalText
+                -> ctx.selectionStart to ctx.selectionEnd
+
+            else -> null
+        } ?: run {
+            val first = document.text.indexOf(originalText)
+            if (first < 0) return
+            val second = document.text.indexOf(originalText, first + originalText.length)
+            if (second < 0) first to (first + originalText.length) else return
+        }
+        if (range !is Pair<Int, Int>) return
+        val replacement = if (isLayoutXmlFile(ctx.file)) "@string/$key" else "R.string.$key"
+        try {
+            com.intellij.openapi.command.WriteCommandAction.runWriteCommandAction(project) {
+                document.replaceString(range.first, range.second, replacement)
+                editor.selectionModel.removeSelection()
+                editor.caretModel.moveToOffset(range.first + replacement.length)
+                editor.scrollingModel.scrollToCaret(com.intellij.openapi.editor.ScrollType.MAKE_VISIBLE)
+            }
+        } catch (_: Exception) {
+            // 写入失败时静默 — 调用方(AI 工具或 driver)会基于结果继续推进
+        }
+    }
+
+    private fun isLayoutXmlFile(file: com.intellij.openapi.vfs.VirtualFile?): Boolean {
+        return (file?.extension?.lowercase() == "xml")
     }
 }

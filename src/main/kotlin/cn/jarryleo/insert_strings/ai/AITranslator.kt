@@ -78,14 +78,37 @@ object AITranslator {
   - 若 currentModule 字段为 null(用户没在 Android 模块里),直接用 `recommendedDefaultModule`。
   - 若用户**明确指定了模块**(在消息里说"插到 feature 模块"或选了某行翻译),就用用户指定的模块(module 参数显式传)。
   - 需要保证模块内每个语种都有对应的翻译。
-  - 注意:只操作 strings.xml 文件不操作 google sheet,插入前需检查 key 是否存在,若 key 已存在则提示用户是否覆盖。
-  - **插入翻译前的查重流程(系统会在写文件前自动跑)**:
-    1. 插入翻译前先通过 find_keys_by_text 工具查找用户提供的译文是否在strings.xml中已有对应的key。
-    2. 若找到翻译文本对应的key，则询问用户并提示用户选择:
-       - 「使用现有翻译」— 跳过写入,沿用已有的 key,系统会回读现有翻译交给你比对是否需要修正(用 update_string 修缺漏);同时在 Extract 入口会自动把选区替换为现有 key。
-       - 「插入新的翻译」— 忽略查重,按原计划新增 key(可能产生重复文案的不同 key)。
-       - 「取消操作」— 放弃本次插入。
-    3. 你的 insert_strings 一次输出**覆盖多个 key**时,只要其中任何一个命中查重,整批都会暂停等待用户选择 — 不可只对部分 key 跳过查重。
+  - 注意:只操作 strings.xml 文件不操作 google sheet。
+  - 插入翻译前需要检查你生成的key在strings.xml是否存在,若存在请生成新的key.
+  - **插入翻译前的两道查重均由 AI 自助完成,系统不再自动跑**:
+    1. **译文查重**:用 find_keys_by_text 工具扫描待插入的 values 译文(**默认英语**,values/ 目录是 Android 默认英语源),
+       看目标模块或全项目中是否已存在对应 key。建议同时跑一次 query_keys(searchIn=text / both) 提高命中率。
+    2. **Key 名查重**:生成 key 后,用 query_keys(searchIn=key) 检查你打算用的 key 名是否已存在,避免无意中撞名。
+    3. 若两道查重中有任一命中,**用一次 ask_user 列出全部命中项**。question 中**明确写出找到的现有 key 名称与所在模块**。
+       options **必须**使用以下统一格式(便于你后续按选项文本判断用户的决策):
+       - **"使用现有 key:<existing_key>"**(冒号后紧跟 key 名,key 名只允许 `[A-Za-z_][A-Za-z0-9_]*`;允许在结尾追加说明)
+       - "插入新 key" — 忽略查重,按原计划新增 key(可能产生重复文案的不同 key)
+       - "取消操作" — 放弃本次插入
+       例:`{"options":["使用现有 key:hello_world","插入新 key","取消操作"]}`
+    4. **用户选择后的标准流程(由 AI 自行驱动,系统不再自动触发替换)**:
+       - **选择「使用现有 key:<existing_key>」** —— ⚠️ **强约束:必须按顺序执行以下两步,不可跳过第一步** ⚠️:
+         - **第一步(必做)**:先判断本次插入是否来自用户从布局/代码中选中的硬编码文本
+           (典型场景:Extract strings.xml 入口,或 AskAi 入口下用户选中了一段代码)。若是,
+           **必须先调用 replace_selection(key=<existing_key>)** 工具把选区替换为
+           `@string/<existing_key>`(XML 布局)或 `R.string/<existing_key>`(其它文件);
+           工具返回成功后**才**进入第二步。若不是(用户直接给出译文文本,无选区),跳过本步。
+           **常见错误:不要在用户选择「使用现有 key」后直接调 read_string 跳过 replace_selection** —
+           这会让硬编码文本保留在文件中,违反用户提取字符串的初衷。
+         - **第二步(必做)**:调用 read_string(<existing_key>) 取现有 key 的全语种翻译,逐项检查是否准确、是否缺漏;
+           若有修正需求,先 ask_user 询问用户是否修正,得到肯定答复后用 update_string 精准补全;
+           若已完整准确,直接 task_complete 结束。
+         - **不要**再调用 insert_strings(那个待插入的新 key 已被忽略)。
+       - **选择「插入新 key」**:
+         - 先用 query_keys 查你准备生成的 key 名是否已存在(可结合正则约束);
+         - 若存在,**重新生成一个不冲突的 key**(长度仍不超过 40 字符),直到唯一;
+         - 调用 insert_strings 写入所有语种翻译(若来自布局/代码选区,driver 在 insert 成功后会自动
+           触发 onInsertStringsInserted 完成硬编码文本的替换,无需你再调用 replace_selection)。
+       - **选择「取消操作」**:无需任何处理,直接 task_complete 即可。
 
 ## 强制终止规则(最重要)
 - 唯一的「合法终止」信号是调用 task_complete 工具。
@@ -157,12 +180,32 @@ object AITranslator {
             - 若上下文有 currentKeys，优先用第一个 key 作为 name；多 key 时可为每个 key 分别返回 insert_strings。
             - 可以同时返回多个 insert_strings 动作插入多个字符串。
             - 翻译内容中 XML 特殊字符需转义：&amp; &lt; &gt; &quot; &apos;。
-            - **重复 key 检查(系统自动跑,不要用 find_keys_by_text 重复跑)**:
-              - 在调用本工具前,你应**主动**用 find_keys_by_text 按 values 译文(默认英语)粗略扫一下目标模块,
-                看是否存在与待插入译文完全一致或高度相似的现有 key。若有,**改用 update_string 复用现有 key**,
-                或在 user 消息里告诉用户"我准备插入的翻译 X 看起来和现有 key Y 重复,我想…",让用户决策。
-              - 即使你事先扫过,系统在执行时也会再做一次确认(因为查重是文件级精确比对,比模型判断更可靠)。
-              - 一次 insert_strings 涉及多个 key 时,只要其中任何一个命中,整批都会暂停等用户选择。
+            - **插入前的两道查重均由 AI 自助完成,系统不再自动跑**:
+              1. **译文查重**:用 find_keys_by_text 按 values 译文(**默认英语**,values/ 目录是 Android 默认英语源)扫目标模块/全项目,
+                 看是否存在与待插入译文完全一致或高度相似的现有 key。
+                 建议同时跑一次 query_keys(searchIn=text / both),跨多语种翻译文本搜索,提高命中率。
+              2. **Key 名查重**:用 query_keys(searchIn=key) 查你打算生成的 key 名是否已存在(避免无意中撞名)。
+            - **若两道查重中有任一命中,用 ask_user 询问用户**。options 统一格式(便于你后续按选项文本判断用户决策):
+              - `使用现有 key:<existing_key>` — key 名只允许 `[A-Za-z_][A-Za-z0-9_]*`,允许在结尾追加说明;沿用现有 key,**跳过本次写入**。
+              - `插入新 key` — 忽略查重,按原计划新增 key(可能产生重复文案的不同 key)。
+              - `取消操作` — 放弃本次插入。
+            - **用户选择后的处理流程(由 AI 自行驱动,系统不再自动触发替换)**:
+              - 选「使用现有 key:<existing_key>」—— ⚠️ **强约束:必须按顺序执行以下两步,不可跳过第一步** ⚠️:
+                - **第一步(必做)**:先判断本次插入是否来自用户从布局/代码中选中的硬编码文本
+                  (典型场景:Extract strings.xml 入口,或 AskAi 入口下用户选中了一段代码)。若是,
+                  **必须先调用 replace_selection(key=<existing_key>)** 工具把选区替换为
+                  `@string/<existing_key>`(XML 布局)或 `R.string/<existing_key>`(其它文件);
+                  工具返回成功后**才**进入第二步。若不是(用户直接给出译文文本,无选区),跳过本步。
+                  **常见错误:不要在用户选择「使用现有 key」后直接调 read_string 跳过 replace_selection** —
+                  这会让硬编码文本保留在文件中,违反用户提取字符串的初衷。
+                - **第二步(必做)**:调用 read_string(<existing_key>) 取现有 key 的全语种翻译,
+                  逐项检查是否准确、是否缺漏;若有修正需求,先 ask_user 询问用户是否修正,
+                  得到肯定答复后用 update_string 精准补全;若已完整准确,直接 task_complete 结束。
+                - **不要**再调用 insert_strings(那个待插入的新 key 已被忽略)。
+              - 选「插入新 key」:用 query_keys 查你准备生成的 key 名是否已存在,若存在重新生成一个不冲突的 key(长度仍不超过 40 字符);
+                然后调用 insert_strings(若来自布局/代码选区,driver 在写完后会自动触发 onInsertStringsInserted 完成硬编码文本的替换,无需你再调用 replace_selection)。
+              - 选「取消操作」:无需任何处理,直接 task_complete 即可。
+            - 一次 insert_strings 涉及多个 key 时,只要其中任何一个命中查重,整批都要用一次 ask_user 列出全部命中项,不可只对部分 key 跳过查重。
             示例（5 个语种全覆盖）:
             {"type":"insert_strings","module":"app","name":"hello_world","translations":{"values":"Hello","values-zh-rCN":"你好","values-ja":"こんにちは","values-ko":"안녕하세요","values-fr":"Bonjour"}}
         """.trimIndent(),
@@ -205,6 +248,8 @@ object AITranslator {
             典型场景：
             - 修改/删除前先 read_string 确认原文，避免误覆盖已有正确翻译。
             - 用户问「X 现在怎么翻译的」。
+            - **翻译查重后第二步**:用户选「使用现有 key:<existing_key>」后,调用本工具读现有 key 的全语种翻译,
+              逐项检查是否准确、是否缺漏,决定是否用 update_string 补全。
             示例：
             {"type":"read_string","module":"app","name":"hello_world"}
             {"type":"read_string","name":"login_title"}
@@ -257,6 +302,8 @@ object AITranslator {
             典型场景：
             - 看到一段文字想反查是哪个 key。
             - 排查重复翻译、跨语言确认某文本对应哪个 key。
+            - **insert_strings 前必跑**:作为翻译查重入口,先把待插入的 values 译文(默认英语)用 matchType=exact 跑一次,
+              再用 matchType=contains 跑一次兜底,把命中的 key 放进 ask_user 询问用户。
             示例：
             {"type":"find_keys_by_text","text":"登录","language":"values-zh-rCN"}
             {"type":"find_keys_by_text","text":"^Hello.*$","module":"app","matchType":"regex"}
@@ -436,10 +483,50 @@ object AITranslator {
             - 关键参数缺失（如不确定目标 key 写法）、风险操作确认（如破坏性 delete、跨模块写入）、目标不明确需要澄清时使用。
             - 收到用户回复后必须用 task_complete 或其他操作推进目标，不能再连续调用本工具。
             - 一次性把要确认的多个问题合并到一次 ask_user，不要拆成多轮。
+            - **翻译查重专用格式(仅 AI 内部约定)**:检测到 insert_strings 与现有 key 重复时,
+              options 应使用以下统一格式以便于你后续按选项文本判断用户决策。
+              **系统不再自动拦截**「使用现有 key」选项 — 用户点选后选项文本直接回传给你,
+              由你根据选项文本决定后续动作:
+              - 选「使用现有 key:<existing_key>」:⚠️ **若插入来自布局/代码选区,必须先调用 replace_selection(key=<existing_key>)**,
+                然后调用 read_string 校验现有翻译,再决定是否 update_string / task_complete。
+                **不要**在选「使用现有 key」后跳过 replace_selection 直接调 read_string。
+              - 选「插入新 key」:重新生成不冲突的 key 后调用 insert_strings(driver 会自动替换硬编码文本)。
+              - 选「取消操作」:直接 task_complete 结束。
+              - `使用现有 key:<existing_key>` — key 名只允许 `[A-Za-z_][A-Za-z0-9_]*`,允许在结尾追加说明
+              - `插入新 key`
+              - `取消操作`
             示例（带按钮）：
             {"type":"ask_user","question":"key 'hello' 已存在,如何处理?","options":["覆盖现有翻译","在末尾追加同名行","取消操作"]}
+            示例（翻译查重）:
+            {"type":"ask_user","question":"检测到现有 key 'hello_world' 在 app 模块与待插入译文一致,你想:","options":["使用现有 key:hello_world","插入新 key","取消操作"]}
             示例（开放输入）：
             {"type":"ask_user","question":"你想修改哪个模块的 strings.xml?(app / home / common)","options":[]}
+        """.trimIndent(),
+
+        "replace_selection" to """
+            ## replace_selection 详细用法
+            把当前 IDE 编辑器选中的硬编码文本替换为对指定 key 的引用。
+            字段：
+            - key（必填）：要引用的字符串 key（snake_case）。
+            行为：
+            - XML 布局文件（res/layout* 等）替换为 `@string/<key>`；其它文件（Kotlin/Java/...）替换为 `R.string/<key>`。
+            - 在 EDT 上 WriteCommandAction 中执行;**执行后聊天视图保持打开**(不调用 closeChatView),
+              AI 继续调用 read_string / ask_user / update_string 推进翻译查重的后续流程。
+            ⚠️ **强约束:这是用户选「使用现有 key:<existing_key>」后必须执行的第一步** ⚠️
+            ——若本次插入来自布局/代码选区,AI **必须**先调用本工具把硬编码文本替换为对 key 的引用,
+            再调用 read_string 校验现有翻译。**绝不可**在用户选「使用现有 key」后跳过本工具,
+            直接调 read_string ——这会让硬编码文本保留在文件中,违反用户提取字符串的初衷。
+            适用场景：
+            - **翻译查重 +「使用现有 key」**:用户点选 ask_user 的「使用现有 key:<existing_key>」选项后,
+              AI 自行判断本次插入是否来自布局/代码选区;若是,**调用本工具**把选区替换为
+              `@string/<existing_key>`(XML 布局)或 `R.string/<existing_key>`(其它文件);
+              然后调用 read_string 检查现有翻译是否需要修正。
+            - **AskAi 入口通用替换**:用户在 AskAi 弹框下选中一段硬编码文字,要求 AI 提取为 strings.xml
+              并替换为对 key 的引用,AI 走完 insert_strings 后可以调用本工具完成替换
+              (driver 也会在 insert 成功后通过 onInsertStringsInserted 回调自动触发,两者效果一致)。
+            限制：仅在 chat 入口(Extract / AskAi 弹框)有效;主面板聊天视图无编辑器上下文,会返回失败信息。
+            示例：
+            {"type":"replace_selection","key":"hello_world"}
         """.trimIndent(),
 
         "task_complete" to """
@@ -2066,6 +2153,11 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 AiAction.ListFiles(relativeDir, pattern, recursive, includeDirs, maxEntries)
             }
             // endregion
+            ToolDefinitions.TOOL_REPLACE_SELECTION -> {
+                val key = args.get("key")?.asString?.trim() ?: return null
+                if (key.isEmpty()) return null
+                AiAction.ReplaceSelection(key)
+            }
             else -> null
         }
     }

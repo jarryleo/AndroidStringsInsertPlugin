@@ -186,12 +186,14 @@ class ExtractStringsAction : AnAction() {
         val stringsOps = InsertStringsStringsOpsController(state)
         val sheetsOps = InsertStringsSheetsOpsController(state)
         val fileOps = InsertStringsFileOpsController(state)
+        val editorOps = InsertStringsEditorOpsController(state)
         val contextBuilder = InsertStringsChatContextBuilder(state)
         val driver = InsertStringsChatDriver(
             state = state,
             stringsOps = stringsOps,
             sheetsOps = sheetsOps,
             fileOps = fileOps,
+            editorOps = editorOps,
             chatContextBuilder = contextBuilder,
         )
 
@@ -474,9 +476,9 @@ private class ExtractStringsChatHolder(
     override var askUserCallCount: Int = 0
     override var toolDocLoadCount: Int = 0
     override var pendingSheetsInsert: PendingSheetsInsert? = null
-    override var pendingStringsInsert: PendingStringsInsert? = null
     override var showContextPopup: Boolean by mutableStateOf(false)
     override var chatContextText: String by mutableStateOf("")
+    override var editorSelection: EditorSelectionContext? = null
 
     override val keyEntries: MutableList<KeyedStringsInfo> = mutableListOf()
     override var selectedKeyIndex: Int = 0

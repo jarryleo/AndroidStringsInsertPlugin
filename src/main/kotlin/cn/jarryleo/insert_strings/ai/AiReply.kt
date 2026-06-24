@@ -262,6 +262,22 @@ sealed class AiAction {
     ) : AiAction()
 
     /**
+     * 把当前 IDE 编辑器选中的硬编码文本替换为对指定 key 的引用。
+     *
+     * 典型用法:用户从布局/代码中选中一段硬编码文字,要求 AI 提取为 strings.xml。
+     * AI 走完翻译查重 + insert_strings 流程后,driver 会回调 [ChatStateHolder.onInsertStringsInserted]
+     * 触发本动作;或在「使用现有 key」场景下由 AI 显式调用本工具来触发同样的替换。
+     *
+     * 行为:XML 布局文件替换为 `@string/<key>`,其它文件替换为 `R.string/<key>`;
+     * 在 EDT 上 WriteCommandAction 中执行;**执行后聊天视图保持打开**,AI 继续调用
+     * read_string / ask_user / update_string 推进翻译查重的后续流程。
+     * 无编辑器上下文(主面板聊天)或选区失效时,driver 会返回失败 tool_result。
+     */
+    data class ReplaceSelection(
+        val key: String
+    ) : AiAction()
+
+    /**
      * 读取项目内任意文件的内容。
      *
      * @param path       相对项目根路径(如 "app/src/main/AndroidManifest.xml")或项目内的绝对路径

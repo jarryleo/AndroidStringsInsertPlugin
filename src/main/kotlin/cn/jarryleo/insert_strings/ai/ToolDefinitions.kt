@@ -61,6 +61,7 @@ object ToolDefinitions {
         TOOL_LIST_FILES,
         TOOL_ASK_USER,
         TOOL_LOAD_TOOL_DOC,
+        TOOL_REPLACE_SELECTION,
         TOOL_TASK_COMPLETE,
     )
 
@@ -79,6 +80,7 @@ object ToolDefinitions {
     const val TOOL_SEARCH_IN_FILES = "search_in_files"
     const val TOOL_FIND_REFERENCES = "find_references"
     const val TOOL_LIST_FILES = "list_files"
+    const val TOOL_REPLACE_SELECTION = "replace_selection"
     const val TOOL_ASK_USER = "ask_user"
     const val TOOL_LOAD_TOOL_DOC = "load_tool_doc"
     const val TOOL_TASK_COMPLETE = "task_complete"
@@ -91,7 +93,30 @@ object ToolDefinitions {
             "translations 必须始终包含 \"values\"(默认英语),并覆盖模块内的所有语言 —— 一字不差对照 `recommendedDefaultModule.xmlFiles[].language`(或显式 module 的 `xmlFiles[].language`)。" +
             "module 优先级:用户在消息中**明确指定** > 用户在 UI 中**选中行所在的模块** > 省略让系统用 `recommendedDefaultModule`(优先 currentModule,偏弱时退回最强模块)。" +
             "若只想修改个别语言,请改用 update_string(部分语言更新,不覆写其他语言)。" +
-            "重复 key 检查:系统会在写文件前自动按 values 译文比对目标模块(及跨模块索引)是否已有相同 key;命中时整批暂停让用户选「使用现有翻译 / 插入新翻译 / 取消」,用户选「使用现有」后系统会回读现有翻译让你检查是否需要 update_string 修缺漏。一次插入多个 key 时,任一命中都会让整批暂停。"
+            "**插入前的两道查重均由 AI 自助完成,系统不再自动跑**:" +
+            "  1. **译文查重**:用 find_keys_by_text 按 values 译文(默认英语)扫目标模块/全项目,看是否已有相同文案的 key。" +
+            "  2. **Key 名查重**:生成 key 后,用 query_keys(searchIn=key) 检查你打算用的 key 名是否已存在(避免插入后撞名)。" +
+            "两道查重均命中时,**用一次 ask_user 列出全部命中项**,options 统一格式(便于你后续按选项文本判断用户决策):" +
+            "  - **「使用现有 key:<existing_key>」** — key 名只允许 `[A-Za-z_][A-Za-z0-9_]*`;沿用现有 key,跳过本次写入。" +
+            "  - **「插入新 key」** — 忽略查重,按原计划新增 key(可能产生重复文案的不同 key)。" +
+            "  - **「取消操作」** — 放弃本次插入。" +
+            "**用户选择后的处理流程(由 AI 自行驱动,系统不再自动触发替换)**:" +
+            "  - 选「使用现有 key:<existing_key>」—— ⚠️ **强约束:必须按顺序执行以下两步,不可跳过第一步** ⚠️:" +
+            "    - **第一步(必做)**:先判断本次插入是否来自用户从布局/代码中选中的硬编码文本" +
+            "(Extract strings.xml 入口 / AskAi 入口选中了代码)。若是," +
+            "**必须先调用 replace_selection(key=<existing_key>)** 工具把选区替换为" +
+            "`@string/<existing_key>`(XML 布局)或 `R.string/<existing_key>`(其它文件);" +
+            "工具返回成功后**才**进入第二步。若不是(用户直接给出译文文本,无选区),跳过本步。" +
+            "**常见错误:不要在用户选择「使用现有 key」后直接调 read_string 跳过 replace_selection** ——" +
+            "这会让硬编码文本保留在文件中,违反用户提取字符串的初衷。" +
+            "    - **第二步(必做)**:调用 read_string(<existing_key>) 取现有 key 的全语种翻译," +
+            "逐项检查是否准确、是否缺漏;若有修正需求,先 ask_user 询问用户是否修正," +
+            "得到肯定答复后用 update_string 精准补全;若已完整准确,直接 task_complete 结束。" +
+            "    - **不要**再调用 insert_strings(那个待插入的新 key 已被忽略)。" +
+            "  - 选「插入新 key」:用 query_keys 查你准备生成的 key 名是否已存在,若存在重新生成一个不冲突的 key(长度仍不超过 40 字符);" +
+            "然后调用 insert_strings(若来自布局/代码选区,driver 在写完后会自动触发 onInsertStringsInserted 完成硬编码文本的替换,无需你再调用 replace_selection)。" +
+            "  - 选「取消操作」:无需任何处理,直接 task_complete 即可。" +
+            "一次插入多个 key 时,任一命中都要用一次 ask_user 列出全部命中项,不可只对部分 key 跳过查重。"
 
     private const val DESC_UPDATE_STRING =
         "精准修改指定 key 的部分语言翻译,只动 translations 中列出的语言,其他语言保持原样。" +
@@ -203,6 +228,19 @@ object ToolDefinitions {
             "使用场景:关键参数缺失、风险操作确认、目标不明确需要澄清。" +
             "重要:每次调用都会暂停 tool loop 等待用户响应,不会自动继续 — 因此若想退出循环,必须在收到用户回复后调用 task_complete 或采取其他操作,不能连续反复调用本工具。"
 
+    private const val DESC_REPLACE_SELECTION =
+        "把当前 IDE 编辑器选中的硬编码文本替换为对指定 key 的引用。" +
+            "XML 布局(res/layout* 等)文件替换为 `@string/<key>`,其它文件(Kotlin/Java/...)替换为 `R.string/<key>`。" +
+            "在 EDT 上 WriteCommandAction 中执行;**执行后聊天视图保持打开**,AI 继续调用 read_string / ask_user / update_string 推进翻译查重的后续流程。" +
+            "⚠️ **强约束:这是用户选「使用现有 key:<existing_key>」后必须执行的第一步** ⚠️ ——若插入来自布局/代码选区," +
+            "AI **必须**先调用本工具把硬编码文本替换为对 key 的引用,再调用 read_string 校验现有翻译。" +
+            "**绝不可**在用户选「使用现有 key」后跳过本工具直接调 read_string ——" +
+            "这会让硬编码文本保留在文件中,违反用户提取字符串的初衷。" +
+            "典型用法:" +
+            "  - **翻译查重 +「使用现有 key」**:用户点选 ask_user 的「使用现有 key:<existing_key>」选项后,AI 用本工具触发实际替换(然后继续检查现有翻译是否需要修正)。" +
+            "  - **AskAi 入口通用替换**:用户在 AskAi 弹框下选中一段硬编码文字,要求 AI 提取为 strings.xml 并替换为对 key 的引用。" +
+            "限制:仅在 chat 入口(Extract / AskAi 弹框)有效;主面板聊天视图无编辑器上下文,会返回失败信息。"
+
     private const val DESC_LOAD_TOOL_DOC =
         "按需加载工具的详细使用文档(枚举值、参数约束、示例)。" +
             "返回的文档会作为工具结果回传给你,你据此继续返回实际执行动作,不要重复请求同一工具的文档。"
@@ -272,6 +310,7 @@ object ToolDefinitions {
             add(openAiTool(TOOL_LIST_FILES, descList, openAiListFilesParams()))
             add(openAiTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(openAiTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
+            add(openAiTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
             add(openAiTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
         }
     }
@@ -303,6 +342,7 @@ object ToolDefinitions {
             add(anthropicTool(TOOL_LIST_FILES, descList, openAiListFilesParams()))
             add(anthropicTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(anthropicTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
+            add(anthropicTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
             add(anthropicTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
         }
     }
@@ -788,6 +828,7 @@ object ToolDefinitions {
             // 通用
             add("ask_user")
             add("load_tool_doc")
+            add("replace_selection")
             add("task_complete")
         }
         return obj {
@@ -829,6 +870,22 @@ object ToolDefinitions {
                 add("summary")
                 add("status")
             })
+        }
+    }
+
+    private fun openAiReplaceSelectionParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("key", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "必填,要引用的字符串 key(snake_case)。系统会把当前 IDE 编辑器选中的硬编码文本替换为 `@string/<key>`(XML 布局)或 `R.string.<key>`(其它文件),并关闭聊天视图。"
+                    )
+                })
+            })
+            add("required", JsonArray().apply { add("key") })
         }
     }
 
