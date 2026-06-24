@@ -723,6 +723,28 @@ object AITranslator {
         .build()
 
     /**
+     * 网络重试时的 UI 提示回调。driver 在每轮 AI 调用前注册,
+     * 当 [RetrySupport] 触发重试时,本回调会在 **后台线程** 被调用,
+     * 实现需要负责切回 EDT 后再写 chatMessages。
+     *
+     * 函数签名:(label 操作名, attempt 第几次重试 1-based, waitSeconds 等待秒数) -> Unit
+     *
+     * 设计动机:[RetrySupport] 是 ai 包下的纯工具,不应反向依赖 ui 包;通过
+     * 函数回调保持单向依赖,driver 负责把"重试中"消息渲染到气泡里。
+     */
+    @Volatile
+    @JvmStatic
+    var onRetryListener: ((label: String, attempt: Int, waitSeconds: Long) -> Unit)? = null
+
+    /**
+     * 用户停止/重试终止信号。driver 在每轮 AI 调用前把自己绑进来,RetrySupport
+     * 会在 sleep 中定期检查,用户点 Stop 时立即终止重试,避免再发一次请求。
+     */
+    @Volatile
+    @JvmStatic
+    var retryShouldContinue: () -> Boolean = { true }
+
+    /**
      * 批量翻译审查的专用系统提示词（独立于主聊天，最小化 token 使用）。
      * 只要求模型输出有问题的行，避免回吐整张表。
      */
@@ -752,28 +774,39 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         if (apiKey.isBlank()) return "Please configure the AI API key first."
         if (model.isBlank()) return "Please configure the AI model first."
 
-        return runCatching {
-            val body = when (protocol) {
-                AiProtocol.OPENAI -> openAiTranslateBody(model, code, text)
-                AiProtocol.ANTHROPIC -> anthropicTranslateBody(model, code, text)
+        return try {
+            RetrySupport.execute(
+                label = "AI translate",
+                onRetry = { attempt, wait ->
+                    onRetryListener?.invoke("AI translate", attempt, wait)
+                },
+                shouldContinue = { retryShouldContinue() },
+            ) {
+                val body = when (protocol) {
+                    AiProtocol.OPENAI -> openAiTranslateBody(model, code, text)
+                    AiProtocol.ANTHROPIC -> anthropicTranslateBody(model, code, text)
+                }
+                val request = HttpRequest.newBuilder(URI.create(endpoint))
+                    .timeout(Duration.ofSeconds(60))
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .applyAuthHeaders(protocol, apiKey)
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build()
+                val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+                if (response.statusCode() !in 200..299) {
+                    throw IllegalStateException("HTTP ${response.statusCode()}: ${response.body().limitForMessage()}")
+                }
+                when (protocol) {
+                    AiProtocol.OPENAI -> parseOpenAiText(response.body())
+                    AiProtocol.ANTHROPIC -> parseAnthropicText(response.body())
+                }
             }
-            val request = HttpRequest.newBuilder(URI.create(endpoint))
-                .timeout(Duration.ofSeconds(60))
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .applyAuthHeaders(protocol, apiKey)
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build()
-            val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-            if (response.statusCode() !in 200..299) {
-                throw IllegalStateException("HTTP ${response.statusCode()}: ${response.body().limitForMessage()}")
-            }
-            when (protocol) {
-                AiProtocol.OPENAI -> parseOpenAiText(response.body())
-                AiProtocol.ANTHROPIC -> parseAnthropicText(response.body())
-            }
-        }.getOrElse {
-            it.message ?: "AI translate failed."
+        } catch (e: InterruptedException) {
+            // 用户在重试中点了 Stop
+            "AI translate cancelled."
+        } catch (e: Exception) {
+            e.message ?: "AI translate failed."
         }
     }
 
@@ -805,28 +838,38 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             }
         }
 
-        return runCatching {
-            val body = when (protocol) {
-                AiProtocol.OPENAI -> openAiBatchTranslateBody(model, userContent)
-                AiProtocol.ANTHROPIC -> anthropicBatchTranslateBody(model, userContent)
+        return try {
+            RetrySupport.execute(
+                label = "AI batch translate",
+                onRetry = { attempt, wait ->
+                    onRetryListener?.invoke("AI batch translate", attempt, wait)
+                },
+                shouldContinue = { retryShouldContinue() },
+            ) {
+                val body = when (protocol) {
+                    AiProtocol.OPENAI -> openAiBatchTranslateBody(model, userContent)
+                    AiProtocol.ANTHROPIC -> anthropicBatchTranslateBody(model, userContent)
+                }
+                val request = HttpRequest.newBuilder(URI.create(endpoint))
+                    .timeout(Duration.ofSeconds(90))
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .applyAuthHeaders(protocol, apiKey)
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build()
+                val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+                if (response.statusCode() !in 200..299) {
+                    throw IllegalStateException("HTTP ${response.statusCode()}: ${response.body().limitForMessage()}")
+                }
+                val responseText = when (protocol) {
+                    AiProtocol.OPENAI -> parseOpenAiText(response.body())
+                    AiProtocol.ANTHROPIC -> parseAnthropicText(response.body())
+                }
+                parseBatchTranslateResult(responseText, items)
             }
-            val request = HttpRequest.newBuilder(URI.create(endpoint))
-                .timeout(Duration.ofSeconds(90))
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .applyAuthHeaders(protocol, apiKey)
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build()
-            val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-            if (response.statusCode() !in 200..299) {
-                throw IllegalStateException("HTTP ${response.statusCode()}: ${response.body().limitForMessage()}")
-            }
-            val responseText = when (protocol) {
-                AiProtocol.OPENAI -> parseOpenAiText(response.body())
-                AiProtocol.ANTHROPIC -> parseAnthropicText(response.body())
-            }
-            parseBatchTranslateResult(responseText, items)
-        }.getOrElse {
+        } catch (_: InterruptedException) {
+            items.associate { (k, _) -> k to "" }
+        } catch (_: Exception) {
             items.associate { (k, _) -> k to "" }
         }
     }
@@ -894,27 +937,37 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         if (apiKey.isBlank()) return AiReply("Please configure the AI API key first.", emptyList())
         if (model.isBlank()) return AiReply("Please configure the AI model first.", emptyList())
 
-        return runCatching {
-            val body = when (protocol) {
-                AiProtocol.OPENAI -> openAiChatBody(model, messages, context)
-                AiProtocol.ANTHROPIC -> anthropicChatBody(model, messages, context)
+        return try {
+            RetrySupport.execute(
+                label = "AI chat",
+                onRetry = { attempt, wait ->
+                    onRetryListener?.invoke("AI chat", attempt, wait)
+                },
+                shouldContinue = { retryShouldContinue() },
+            ) {
+                val body = when (protocol) {
+                    AiProtocol.OPENAI -> openAiChatBody(model, messages, context)
+                    AiProtocol.ANTHROPIC -> anthropicChatBody(model, messages, context)
+                }
+                val request = HttpRequest.newBuilder(URI.create(endpoint))
+                    .timeout(Duration.ofSeconds(60))
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .applyAuthHeaders(protocol, apiKey)
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build()
+                val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+                if (response.statusCode() !in 200..299) {
+                    throw IllegalStateException("HTTP ${response.statusCode()}: ${response.body().limitForMessage()}")
+                }
+                // function calling 响应同时包含文本与 tool_calls,需解析完整 JSON。
+                // 优先用专用解析;若失败,退化到抽取纯文本以便用户至少看到回复。
+                parseAiReply(response.body())
             }
-            val request = HttpRequest.newBuilder(URI.create(endpoint))
-                .timeout(Duration.ofSeconds(60))
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .applyAuthHeaders(protocol, apiKey)
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build()
-            val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-            if (response.statusCode() !in 200..299) {
-                throw IllegalStateException("HTTP ${response.statusCode()}: ${response.body().limitForMessage()}")
-            }
-            // function calling 响应同时包含文本与 tool_calls,需解析完整 JSON。
-            // 优先用专用解析;若失败,退化到抽取纯文本以便用户至少看到回复。
-            parseAiReply(response.body())
-        }.getOrElse {
-            AiReply(it.message ?: "AI chat failed.", emptyList())
+        } catch (e: InterruptedException) {
+            AiReply("AI chat cancelled.", emptyList())
+        } catch (e: Exception) {
+            AiReply(e.message ?: "AI chat failed.", emptyList())
         }
     }
 
@@ -955,46 +1008,65 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         if (apiKey.isBlank()) return AiReply("Please configure the AI API key first.", emptyList())
         if (model.isBlank()) return AiReply("Please configure the AI model first.", emptyList())
 
-        return runCatching {
-            val body = when (protocol) {
-                AiProtocol.OPENAI -> openAiChatBody(model, messages, context, stream = true)
-                AiProtocol.ANTHROPIC -> anthropicChatBody(model, messages, context, stream = true)
-            }
-            val request = HttpRequest.newBuilder(URI.create(endpoint))
-                .timeout(Duration.ofSeconds(120))
-                .header("Content-Type", "application/json")
-                .header("Accept", "text/event-stream")
-                .applyAuthHeaders(protocol, apiKey)
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build()
-            val response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream())
-            if (response.statusCode() !in 200..299) {
-                // 非 2xx 时 body 是普通 JSON,按 error 格式读
-                val errBody = response.body().readBytes().toString(Charsets.UTF_8)
-                response.body().close()
-                throw IllegalStateException("HTTP ${response.statusCode()}: ${errBody.limitForMessage()}")
-            }
-            val stream = response.body()
-            try {
-                val text = StringBuilder()
-                val parser = SseStreamParser(protocol) { deltaText ->
-                    if (deltaText.isNotEmpty()) {
-                        text.append(deltaText)
-                        onPartialText(text.toString())
+        // 流式特殊处理:重试只在「请求未开始流」前安全(SSE 已经开始
+        // 再重试意味着同一轮有两次响应,语义混乱)。
+        // 用一个本地 flag,流开始解析后置 true,RetrySupport 看到就拒绝后续重试。
+        val streamStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        return try {
+            RetrySupport.execute(
+                label = "AI chat (stream)",
+                onRetry = { attempt, wait ->
+                    onRetryListener?.invoke("AI chat (stream)", attempt, wait)
+                },
+                shouldContinue = {
+                    // 用户点 Stop OR 流已开始 → 终止重试
+                    retryShouldContinue() && !streamStarted.get()
+                },
+            ) {
+                val body = when (protocol) {
+                    AiProtocol.OPENAI -> openAiChatBody(model, messages, context, stream = true)
+                    AiProtocol.ANTHROPIC -> anthropicChatBody(model, messages, context, stream = true)
+                }
+                val request = HttpRequest.newBuilder(URI.create(endpoint))
+                    .timeout(Duration.ofSeconds(120))
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "text/event-stream")
+                    .applyAuthHeaders(protocol, apiKey)
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build()
+                val response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream())
+                if (response.statusCode() !in 200..299) {
+                    // 非 2xx 时 body 是普通 JSON,按 error 格式读
+                    val errBody = response.body().readBytes().toString(Charsets.UTF_8)
+                    response.body().close()
+                    throw IllegalStateException("HTTP ${response.statusCode()}: ${errBody.limitForMessage()}")
+                }
+                val stream = response.body()
+                streamStarted.set(true)
+                try {
+                    val text = StringBuilder()
+                    val parser = SseStreamParser(protocol) { deltaText ->
+                        if (deltaText.isNotEmpty()) {
+                            text.append(deltaText)
+                            onPartialText(text.toString())
+                        }
                     }
+                    parser.parse(stream)
+                    // 流结束后把累积的内容合成一个标准响应 JSON,复用 parseAiReply → toolCallToAction 全链路
+                    val syntheticBody = when (protocol) {
+                        AiProtocol.OPENAI -> buildOpenAiSyntheticBody(text.toString(), parser.toolCalls)
+                        AiProtocol.ANTHROPIC -> buildAnthropicSyntheticBody(text.toString(), parser.toolCalls)
+                    }
+                    parseAiReply(syntheticBody)
+                } finally {
+                    stream.close()
                 }
-                parser.parse(stream)
-                // 流结束后把累积的内容合成一个标准响应 JSON,复用 parseAiReply → toolCallToAction 全链路
-                val syntheticBody = when (protocol) {
-                    AiProtocol.OPENAI -> buildOpenAiSyntheticBody(text.toString(), parser.toolCalls)
-                    AiProtocol.ANTHROPIC -> buildAnthropicSyntheticBody(text.toString(), parser.toolCalls)
-                }
-                parseAiReply(syntheticBody)
-            } finally {
-                stream.close()
             }
-        }.getOrElse {
-            AiReply(it.message ?: "AI chat failed.", emptyList())
+        } catch (e: InterruptedException) {
+            AiReply("AI chat cancelled.", emptyList())
+        } catch (e: Exception) {
+            AiReply(e.message ?: "AI chat failed.", emptyList())
         }
     }
 
@@ -1102,29 +1174,39 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         val modeDesc = if (mode == "fix") "修正模式（fix）" else "检查模式（check）"
         val userContent = "模式：$modeDesc\n表头列数：${header.size}\n数据行数：${batchRows.size}\n\n$compactData"
 
-        return runCatching {
-            val body = when (protocol) {
-                AiProtocol.OPENAI -> openAiReviewBody(model, userContent)
-                AiProtocol.ANTHROPIC -> anthropicReviewBody(model, userContent)
+        return try {
+            RetrySupport.execute(
+                label = "AI review",
+                onRetry = { attempt, wait ->
+                    onRetryListener?.invoke("AI review", attempt, wait)
+                },
+                shouldContinue = { retryShouldContinue() },
+            ) {
+                val body = when (protocol) {
+                    AiProtocol.OPENAI -> openAiReviewBody(model, userContent)
+                    AiProtocol.ANTHROPIC -> anthropicReviewBody(model, userContent)
+                }
+                val request = HttpRequest.newBuilder(URI.create(endpoint))
+                    .timeout(Duration.ofSeconds(90))
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .applyAuthHeaders(protocol, apiKey)
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build()
+                val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+                if (response.statusCode() !in 200..299) {
+                    throw IllegalStateException("HTTP ${response.statusCode()}: ${response.body().limitForMessage()}")
+                }
+                val responseText = when (protocol) {
+                    AiProtocol.OPENAI -> parseOpenAiText(response.body())
+                    AiProtocol.ANTHROPIC -> parseAnthropicText(response.body())
+                }
+                parseReviewResult(responseText)
             }
-            val request = HttpRequest.newBuilder(URI.create(endpoint))
-                .timeout(Duration.ofSeconds(90))
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .applyAuthHeaders(protocol, apiKey)
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build()
-            val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-            if (response.statusCode() !in 200..299) {
-                throw IllegalStateException("HTTP ${response.statusCode()}: ${response.body().limitForMessage()}")
-            }
-            val responseText = when (protocol) {
-                AiProtocol.OPENAI -> parseOpenAiText(response.body())
-                AiProtocol.ANTHROPIC -> parseAnthropicText(response.body())
-            }
-            parseReviewResult(responseText)
-        }.getOrElse {
-            ReviewResult.empty("审查请求失败：${it.message ?: "unknown"}")
+        } catch (_: InterruptedException) {
+            ReviewResult.empty("审查请求已取消。")
+        } catch (e: Exception) {
+            ReviewResult.empty("审查请求失败:${e.message ?: "unknown"}")
         }
     }
 

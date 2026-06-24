@@ -4,6 +4,7 @@ import cn.jarryleo.insert_strings.ai.AITranslator
 import cn.jarryleo.insert_strings.ai.AiAction
 import cn.jarryleo.insert_strings.ai.AiReply
 import cn.jarryleo.insert_strings.ai.ChatMessage
+import cn.jarryleo.insert_strings.ai.RetrySupport
 import cn.jarryleo.insert_strings.ai.ToolCall
 import cn.jarryleo.insert_strings.ai.ToolDefinitions
 import cn.jarryleo.insert_strings.sheets.SheetsManager
@@ -86,7 +87,33 @@ internal class InsertStringsChatDriver(
         state.toolDocLoadCount = 0
         state.askUserCallCount = 0
         state.stopRequested = false
+        bindRetryHooks()
         continueChatWithAi()
+    }
+
+    /**
+     * 把 AITranslator 的重试回调 / 终止信号绑到当前 state。
+     * - onRetryListener:每次重试时往 chatMessages 推一条「⏳ 网络异常,第 N 次重试(等待 X 秒)」气泡。
+     *   用 [ChatMessage] 形式展示在 UI 上,用户能直观看到「卡在哪一步」「还要等多久」。
+     * - retryShouldContinue:让 RetrySupport 在用户点 Stop 时能 100ms 醒一次检查,
+     *   而不必等满退避时间,改善 Stop 体感。
+     *
+     * 必须在每次新对话开始时调一次(在 [sendChatMessage] 中已对接),
+     * 旧对话的回调会在 [newChat] / [stopChat] / chatSending=false 路径自然解绑。
+     */
+    private fun bindRetryHooks() {
+        AITranslator.retryShouldContinue = { !state.stopRequested }
+        AITranslator.onRetryListener = { label, attempt, waitSeconds ->
+            // RetrySupport 在后台线程触发,必须切回 EDT 后再写 chatMessages
+            SwingUtilities.invokeLater {
+                val content = "⏳ $label 失败,${attempt}/${RetrySupport.DEFAULT_MAX_RETRIES} 次重试中(约 ${waitSeconds}s 后重发请求)..."
+                // 用 assistant role 渲染为左侧气泡;⏳ emoji + "失败/重试" 文本已能让用户一眼区分这是系统提示,
+                // 而不是 AI 的真实回复(后者通常是正常段落或 "执行操作:xxx")。
+                state.chatMessages.add(
+                    ChatMessage(role = "assistant", content = content)
+                )
+            }
+        }
     }
 
     /**
@@ -138,6 +165,8 @@ internal class InsertStringsChatDriver(
         // 清理挂起的重复 key 询问,避免新会话中误把旧 option 路由到旧 pending
         state.pendingSheetsInsert = null
         state.pendingStringsInsert = null
+        // 清掉 AITranslator 上挂的旧回调,避免下次新会话的 RetrySupport 还把提示塞到这条旧 chat
+        AITranslator.onRetryListener = null
     }
 
     /**
@@ -289,6 +318,20 @@ internal class InsertStringsChatDriver(
                                 content = "AI 请求失败:${it.message ?: "unknown"}"
                             )
                         )
+                        // 兜底报告:重试耗尽后明确告诉用户本轮已停止
+                        if (it is InterruptedException) {
+                            state.chatMessages.add(
+                                ChatMessage(role = "assistant", content = "⏹ 已停止生成。")
+                            )
+                        } else if (it.message?.contains("cancelled", ignoreCase = true) != true) {
+                            state.chatMessages.add(
+                                ChatMessage(
+                                    role = "assistant",
+                                    content = "❌ AI 请求多次重试仍失败(${RetrySupport.DEFAULT_MAX_RETRIES + 1} 次尝试)," +
+                                        "已停止本轮对话。\n请检查网络/AI 服务后重新发送消息。\n错误信息:${it.message ?: "unknown"}"
+                                )
+                            )
+                        }
                         state.chatSending = false
                     }
                     return
@@ -327,6 +370,25 @@ internal class InsertStringsChatDriver(
                         content = "AI 请求失败:${e.message ?: "unknown"}",
                         thinking = "",
                         streaming = false
+                    )
+                }
+                // 兜底:若是 RetrySupport 抛出的重试耗尽异常,明确告诉用户本轮已停止。
+                // RetrySupport 用 InterruptedException 表示用户点 Stop,用普通 Exception 表示重试 N 次后失败。
+                if (e is InterruptedException) {
+                    state.chatMessages.add(
+                        ChatMessage(
+                            role = "assistant",
+                            content = "⏹ 已停止生成。"
+                        )
+                    )
+                } else if (e.message?.contains("cancelled", ignoreCase = true) != true) {
+                    // 排除"用户主动取消"语义后,剩下的就是"重试耗尽仍失败",报告给用户
+                    state.chatMessages.add(
+                        ChatMessage(
+                            role = "assistant",
+                            content = "❌ AI 请求多次重试仍失败(${RetrySupport.DEFAULT_MAX_RETRIES + 1} 次尝试)," +
+                                "已停止本轮对话。\n请检查网络/AI 服务后重新发送消息。\n错误信息:${e.message ?: "unknown"}"
+                        )
                     )
                 }
                 state.chatSending = false
