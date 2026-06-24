@@ -212,13 +212,13 @@ class ExtractStringsAction : AnAction() {
         // 长度不超过 40 字符」「向 currentModule 插入,没有就用行数最多模块」,与 system prompt 一致。
         val firstMessage = buildString {
             append("请插入翻译:").append(selectedText)
-            appendLine()
+            /*appendLine()
             appendLine("默认需要你自动生成一个 key,key 长度不要超过 40 个字符。")
             appendLine("然后向 currentModule 模块插入这个模块所有语种的翻译;")
             appendLine("若 currentModule 不存在则插入行数最多的模块内。")
             appendLine("需要保证模块内每个语种都有对应的翻译。")
             appendLine("注意:只操作 strings.xml 文件不操作 google sheet。")
-            appendLine("插入前需检查 key 是否存在;若 key 已存在则提示用户是否覆盖。")
+            appendLine("插入前需检查 key 是否存在;若 key 已存在则提示用户是否覆盖。")*/
         }
         ApplicationManager.getApplication().executeOnPooledThread {
             driver.sendChatMessage(firstMessage)

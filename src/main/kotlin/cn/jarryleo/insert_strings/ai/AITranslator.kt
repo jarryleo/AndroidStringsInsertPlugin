@@ -65,12 +65,10 @@ object AITranslator {
         """你是一个 Android 应用国际化字符串管理助手。通过 function calling 与系统协作:调用工具执行操作,调用 task_complete 结束任务。
 
 ## 关于默认语言 values 的强制约定(重要)
-- 上下文 `availableLanguages` 可能由用户当前选中行的语言决定,如果用户没选英语行,系统会自动补上 `values`。
-- 即使 availableLanguages 没有 `values`,你也必须始终在 `translations` 里包含 `values` 键(默认英语原义)。
-  若 availableLanguages 和要插入的目标模块语言数量不一致,优先按模块内的语言种类翻译。
-- 插入/全量覆盖 strings.xml 时,translations 必含 `values`,其他目标语言也必含。
-- 当用户表述：插入翻译 时，默认需要你自动生成一个key，key长度不要超过40个字符，然后向currentModule模块插入这个模块所有语种的翻译，若currentModule不存在则插入行数最多的模块内，需要保证模块内每个语种都有对应的翻译。注意：只操作strings.xml文件不操作google sheet，插入前需检查key是否存在，若key已存在则提示用户是否覆盖。
-
+- 上下文 `availableLanguages` 可能由用户当前选中行的语言决定,实际语言数量以**当前操作模块内的 xmlFiles 列表**为准(模块下每个 values* 目录对应一个语种,见 `modules[].xmlFiles[].language` 与 `currentModule.xmlFiles[].language`)。
+- 插入/全量覆盖 strings.xml 时,translations **必须**包含 `values` 与该模块下所有其他 `values*` 语种,不能遗漏任何一个。一个都不能少 —— 少写一个语种意味着那个语言的 UI 在运行时显示空串或 key 名字。
+- 不知道该模块有哪些语种时,先用 query_keys / read_string(任意已知 key)扫一遍,或直接参考 `currentModule.xmlFiles[].language`;**不要**靠猜 —— 漏写会破坏 i18n 完整性。
+- 当用户表述：插入翻译 时,默认需要你自动生成一个 key(key 长度不要超过 40 个字符),然后向 currentModule 模块插入这个模块所有语种的翻译;若 currentModule 不存在则插入行数最多的模块内(参考 `moduleWithMostLines`)。需要保证模块内每个语种都有对应的翻译。注意:只操作 strings.xml 文件不操作 google sheet,插入前需检查 key 是否存在,若 key 已存在则提示用户是否覆盖。
 
 ## 强制终止规则(最重要)
 - 唯一的「合法终止」信号是调用 task_complete 工具。
@@ -130,14 +128,320 @@ object AITranslator {
             - module（可选）：目标 Android 模块名，取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时用 currentModule.moduleName。
             - name（必填）：字符串 key，snake_case。
             - translations（必填）：键为语言目录名（如 values、values-zh-rCN、values-fr），值为对应翻译文本。
-            规则：
-            - translations 必须包含 `values`(默认英语),即使 availableLanguages 里没有。漏写会导致 values/strings.xml 被写空。
-            - translations 必须覆盖 availableLanguages 中的所有其他语言,不能遗漏。
+            规则（必须严格遵守,违反会导致 i18n 缺失）:
+            - **translations 必须覆盖目标模块下所有语种** —— 逐一对照 `currentModule.xmlFiles[].language`(或写死的 module 的 `xmlFiles[].language`)翻译,一个都不能少。
+            - **必须包含 `values`**(默认英语),即使 availableLanguages 没有也要补。
+            - **不要**用 availableLanguages 推断目标语种 —— 它可能仅反映用户当前选中的行,不是模块真实语种。**始终以目标模块的 xmlFiles 列表为准**。
+            - 不确定模块语种时,先用 query_keys 或 read_string 探查,或直接读取 context.modules[].xmlFiles。
+            - 系统在写入前会兜底补齐你漏写的语种(用 `values` 英文文本填),但**不要依赖这个兜底** —— 兜底会导致界面出现英文/未翻译文本,你应该在 tool call 里就给齐。
             - 若上下文有 currentKeys，优先用第一个 key 作为 name；多 key 时可为每个 key 分别返回 insert_strings。
             - 可以同时返回多个 insert_strings 动作插入多个字符串。
             - 翻译内容中 XML 特殊字符需转义：&amp; &lt; &gt; &quot; &apos;。
+            示例（5 个语种全覆盖）:
+            {"type":"insert_strings","module":"app","name":"hello_world","translations":{"values":"Hello","values-zh-rCN":"你好","values-ja":"こんにちは","values-ko":"안녕하세요","values-fr":"Bonjour"}}
+        """.trimIndent(),
+
+        "query_keys" to """
+            ## query_keys 详细用法
+            列出 / 搜索模块内的字符串 key。
+            字段：
+            - module（可选）：目标 Android 模块名，取上下文 modules[].moduleName。省略时用 currentModule.moduleName。
+            - pattern（可选）：正则表达式，对 key 名做匹配。为空或省略时列出所有 key（分页）。
+            - limit（可选）：最大返回条数，默认 50，最大 500。
+            - offset（可选）：分页偏移，默认 0。
+            - includeTranslations（可选，默认 false）：是否在结果中带各语言当前翻译。开启后 token 消耗大，仅在确实需要翻译内容时使用。
+            返回：每条结果形如 `{key, translations?, filePath}`；分页时可用 offset 续读。
+            典型场景：
+            - 「项目里有哪些 key」「找以 error_ 开头的 key」「列出 home 模块的 key」
+            - AI 修改前先 search 找到目标 key 名称，再 read_string 读全文。
             示例：
-            {"type":"insert_strings","module":"app","name":"hello_world","translations":{"values":"Hello","values-zh-rCN":"你好","values-fr":"Bonjour"}}
+            {"type":"query_keys","module":"app","pattern":"^login_.*","limit":50}
+            {"type":"query_keys","limit":100,"offset":100}
+            {"type":"query_keys","includeTranslations":true,"limit":20}
+        """.trimIndent(),
+
+        "read_string" to """
+            ## read_string 详细用法
+            读取指定 key 在模块所有语言的当前翻译。
+            字段：
+            - module（可选）：目标 Android 模块名。省略时用 currentModule.moduleName。
+            - name（必填）：字符串 key 名。
+            返回：key + 各语言当前翻译 + 各语言文件路径。若 key 不存在，返回「该 key 不存在」。
+            典型场景：
+            - 修改/删除前先 read_string 确认原文，避免误覆盖已有正确翻译。
+            - 用户问「X 现在怎么翻译的」。
+            示例：
+            {"type":"read_string","module":"app","name":"hello_world"}
+            {"type":"read_string","name":"login_title"}
+        """.trimIndent(),
+
+        "update_string" to """
+            ## update_string 详细用法
+            精准修改指定 key 的部分语言翻译（不动未列出的语言）。
+            字段：
+            - module（可选）：目标 Android 模块名。省略时用 currentModule.moduleName。
+            - name（必填）：字符串 key，snake_case。
+            - translations（必填）：键为语言目录名（values / values-zh-rCN / values-fr 等），值仅包含**需要修改**的翻译。
+            关键规则：
+            - **只动 translations 中列出的语言**，未列出的语言保持原样（这是与 insert_strings 的最大区别）。
+            - 若 key 在某语言文件中不存在则在该文件中创建条目。
+            - 适用场景：「只改 X 的繁体」「修正 Z 的某个语言翻译」「新增某语言翻译」。
+            - 不适用场景：要全量覆盖某 key 的全部语言翻译时，请改用 insert_strings。
+            示例（仅改中文与法语，不动英语）：
+            {"type":"update_string","module":"app","name":"hello_world","translations":{"values-zh-rCN":"你好世界","values-fr":"Bonjour le monde"}}
+        """.trimIndent(),
+
+        "delete_string" to """
+            ## delete_string 详细用法
+            删除指定 key 的翻译（破坏性操作）。
+            字段：
+            - module（可选）：目标 Android 模块名。省略时用 currentModule.moduleName。
+            - name（必填）：字符串 key，snake_case。
+            - languages（可选）：要删除的语言目录名列表（如 ["values-fr", "values-zh-rCN"]）。为空 / null / 省略时，删除该 key 在**所有语言**的翻译（整 key 被移除）；非空时，仅删除列表中指定语言的翻译，其他语言保持原样。
+            安全约束：
+            - **删除是破坏性操作**，操作前建议先 read_string 确认目标 key 与翻译。
+            - 不确定范围时，先用 ask_user 与用户确认。
+            - 适用场景：「删除 X 的法语翻译」「移除这个 key」「删掉 X 的繁体和日语」。
+            示例（删除整 key）：
+            {"type":"delete_string","module":"app","name":"hello_world"}
+            示例（仅删除部分语言）：
+            {"type":"delete_string","name":"hello_world","languages":["values-fr","values-ja"]}
+        """.trimIndent(),
+
+        "find_keys_by_text" to """
+            ## find_keys_by_text 详细用法
+            strings.xml 反查：通过翻译文本查找对应的 key。
+            字段：
+            - text（必填）：要查找的翻译文本。
+            - module（可选）：限定 Android 模块名。省略时搜索项目中**所有模块**的所有 strings.xml。
+            - language（可选）：限定语言目录（如 values-zh-rTW）。省略时搜索所有语言。
+            - matchType（可选）：匹配模式，exact（完全相等）/ contains（子串，默认）/ regex（正则）。
+            - caseSensitive（可选，默认 false）：是否区分大小写。
+            - limit（可选）：最大返回条数，默认 30，最大 200。
+            返回：每条结果形如 `{key, module, language, text, filePath}`。
+            典型场景：
+            - 看到一段文字想反查是哪个 key。
+            - 排查重复翻译、跨语言确认某文本对应哪个 key。
+            示例：
+            {"type":"find_keys_by_text","text":"登录","language":"values-zh-rCN"}
+            {"type":"find_keys_by_text","text":"^Hello.*$","module":"app","matchType":"regex"}
+        """.trimIndent(),
+
+        "find_rows_by_text" to """
+            ## find_rows_by_text 详细用法
+            Google Sheets 反查：在表格中按文本搜索行。
+            字段：
+            - text（必填）：要查找的文本。
+            - spreadsheetId（可选）：默认用上下文 googleSheets 配置。
+            - sheetName（可选）：默认用 defaultSheetName。
+            - column（可选）：限定列名（与表头精确匹配，忽略大小写）。例：values-zh-rTW。
+            - matchType（可选）：匹配模式，exact / contains（默认）/ regex。
+            - caseSensitive（可选，默认 false）。
+            - limit（可选）：最大返回条数，默认 30，最大 200。
+            返回：每条结果形如 `{rowNumber, sheetName, column, text, row}`。
+            注意：sheetName 参数必须**原样**使用工作表名（包含点、空格等特殊字符，不要加单引号），系统会按 Google Sheets A1 规则自动处理转义。
+            典型场景：
+            - 「这个翻译对应表格里哪一行」「看哪个 key 有这个文本」「跨语言定位某文案」。
+            示例：
+            {"type":"find_rows_by_text","text":"登录","column":"values-zh-rCN"}
+            {"type":"find_rows_by_text","text":"^Hello.*$","sheetName":"1.0.3.0","matchType":"regex"}
+        """.trimIndent(),
+
+        "get_editor_file" to """
+            ## get_editor_file 详细用法
+            获取当前 IDE 编辑器中打开的文件信息。不接收任何有效参数（dummy 字段保留，忽略）。
+            返回字段：
+            - filePath：完整绝对路径。
+            - fileName：文件名带后缀（用于判断文件类型，如 MainActivity.kt / activity_main.xml）。
+            - fileType：小写后缀（kt / java / xml / gradle / ...），无后缀时为空串。
+            - language：按后缀归类（kotlin / java / xml / gradle / json / properties / markdown / text / other）。
+            - lineCount：文件总行数。
+            - selectedText：当前选中的文字（无选区时为空）。
+            - selectionStartLine / selectionEndLine：选区起止行（0-based，无选区时为 -1）。
+            典型场景：
+            - 用户说「改一下我打开的这个文件」「解释我选中的代码」「我在看哪个文件」，AI 先调用本工具确认上下文。
+            - AI 拿到 filePath 后可继续 read_file / search_in_files / find_references。
+            示例：
+            {"type":"get_editor_file","dummy":""}
+        """.trimIndent(),
+
+        "read_file" to """
+            ## read_file 详细用法
+            读取当前 IDE 项目内任意文件的内容。
+            字段：
+            - path（必填）：相对项目根的路径（如 "app/src/main/AndroidManifest.xml"），或项目内的绝对路径。
+            - startLine（可选，默认 0）：起始行 0-based（包含）。
+            - endLine（可选，默认 -1）：结束行 0-based（包含），-1 表示到文件末尾。
+            - maxLines（可选，默认 600）：单次返回最大行数（防止 token 爆炸），最大 2000。
+            限制与约束：
+            - 单文件 > 1.5MB（1_500_000 字节）会拒绝读取，请改用 search_in_files 检索指定内容。
+            - 所有路径必须落在当前 IDE 打开的项目根目录内，绝对路径越界会被拒绝。
+            - 返回时会带 `--- begin content ---` / `--- end content ---` 包裹，便于解析。
+            - 内容被截断时返回里会提示「… 内容已截断，请用 startLine/endLine 分页继续读取」。
+            典型场景：
+            - AI 拿到文件路径（从 get_editor_file / search_in_files / find_references / list_files 取得）后想看完整内容。
+            - 大文件分页读：第 1 轮读 0-599，第 2 轮 startLine=600 读 600-1199。
+            示例：
+            {"type":"read_file","path":"app/src/main/AndroidManifest.xml"}
+            {"type":"read_file","path":"app/src/main/java/com/foo/MainActivity.kt","startLine":0,"endLine":200,"maxLines":200}
+        """.trimIndent(),
+
+        "edit_file" to """
+            ## edit_file 详细用法
+            精准修改项目内任意文件的内容。两种模式（同时支持）。
+            字段：
+            - path（必填）：文件路径（相对项目根或项目内绝对路径）。
+            - oldText（必填）：匹配文本（useRegex=false）或正则 pattern（useRegex=true）。
+            - newText（必填）：替换为的新文本（可为空字符串，表示删除）。
+            - useRegex（可选，默认 false）：true 时把 oldText 视为 Kotlin 正则。
+            - replaceAll（可选，默认 false）：true 时替换所有匹配；false 时要求**唯一**匹配（0 处或 >1 处都会失败，让 AI 调整 oldText 到唯一或开启 replaceAll）。
+            关键约束：
+            - 原子写：写失败不会污染原文件（临时文件 + rename 模式）。
+            - 限制：单文件 > 3MB（3_000_000 字节）拒绝编辑，需拆为多次小范围操作。
+            - 路径必须落在项目根内。
+            - 替换成功后 IDE 会自动重读该文件（如已打开），用户能立即看到变化。
+            典型流程：
+            1. AI 先 get_editor_file / read_file 拿原文。
+            2. 调用 edit_file 修改。
+            3. 失败时根据错误信息调整 oldText（更精确的上下文片段）或开启 replaceAll。
+            示例（文本模式，唯一匹配）：
+            {"type":"edit_file","path":"app/src/main/java/Foo.kt","oldText":"val x = 1","newText":"val x = 2"}
+            示例（正则全文替换）：
+            {"type":"edit_file","path":"app/src/main/res/values/strings.xml","oldText":"<string name=\"hello\">[^<]*</string>","newText":"<string name=\"hello\">Hello World</string>","useRegex":true,"replaceAll":false}
+        """.trimIndent(),
+
+        "create_file" to """
+            ## create_file 详细用法
+            在项目内创建新文件。
+            字段：
+            - path（必填）：文件路径（相对项目根或项目内绝对路径）。支持嵌套目录，自动 mkdirs。
+            - content（必填）：文件内容。
+            - overwrite（可选，默认 false）：目标文件已存在时是否覆盖。**默认不覆盖**，防误操作。修改已存在文件请改用 edit_file。
+            限制：路径必须落在项目根内。
+            典型场景：
+            - 「新建一个 util 类」「生成 README」「新增空 strings.xml 骨架」。
+            - **不适用**「修改已有文件的部分内容」——那种场景请用 edit_file；用 create_file + overwrite=true 整文件覆盖既慢又容易丢格式。
+            示例：
+            {"type":"create_file","path":"app/src/main/java/com/foo/Util.kt","content":"package com.foo\n\nclass Util {}\n"}
+            {"type":"create_file","path":"docs/README.md","content":"# Notes\n","overwrite":false}
+        """.trimIndent(),
+
+        "search_in_files" to """
+            ## search_in_files 详细用法
+            在项目内文件中按文本 / 正则搜索。
+            字段：
+            - pattern（必填）：搜索文本（useRegex=false）或正则（useRegex=true）。
+            - useRegex（可选，默认 false）：true 时按 Kotlin 正则。
+            - caseSensitive（可选，默认 false）。
+            - filePattern（可选）：glob 限定文件名（如 "*.kt"），仅支持 * 与 ? 通配符，不处理 **。
+            - relativeDir（可选）：限定子目录（相对项目根），如 "app/src/main"；省略时搜索整个项目。
+            - limit（可选）：最大返回条数，默认 100，最大 200。
+            默认搜索文件类型：java / kt / xml / gradle / kts / json / properties / txt / md；不搜图片 / 二进制 / build / .git。
+            返回：每条命中 `{filePath, lineNumber, columnNumber, matchedText}`（单行最长 200 字符，超长截断）。
+            限制：单次最多返回 200 条命中；超出请收紧 pattern 或用 relativeDir 限定子目录。
+            典型场景：
+            - 「在项目里找一下 XXX 的用法」「看哪个文件调用了 getResult」「哪里用到了某个资源」。
+            - 调用 edit_file 前先用本工具定位修改点（拿到 filePath + 行号）。
+            示例（搜文本）：
+            {"type":"search_in_files","pattern":"R.string.hello","limit":50}
+            示例（正则+限定目录与后缀）：
+            {"type":"search_in_files","pattern":"fun\\s+getResult","useRegex":true,"filePattern":"*.kt","relativeDir":"app/src/main","limit":30}
+        """.trimIndent(),
+
+        "find_references" to """
+            ## find_references 详细用法
+            按符号语义查找项目中的引用点（Java / Kotlin / XML 文件）。与 search_in_files 的区别：本工具理解「资源引用」的多种写法，自动适配 R.id.x / @+id/x / @id/x 等。
+            字段：
+            - symbol（必填）：要查找的符号名（资源名 / view id / key / 类名 / 标识符）。
+            - kind（可选）：引用类型，枚举值：
+              - id：匹配 R.id.xxx / @+id/xxx / @id/xxx（资源 id 引用）。
+              - string：匹配 R.string.xxx / @string/xxx（字符串资源引用）。
+              - layout：匹配 R.layout.xxx / @layout/xxx（布局引用）。
+              - drawable：匹配 R.drawable.xxx / @drawable/xxx（图标引用）。
+              - color：匹配 R.color.xxx / @color/xxx（颜色引用）。
+              - class：按标识符边界匹配类名。
+              - general（默认）：按标识符边界匹配任意符号名。
+            - caseSensitive（可选，默认 false）。
+            - limit（可选）：最大返回条数，默认 100，最大 200。
+            典型场景：
+            - 「这个 key / view id / 类名 在哪些地方被引用」「重构 X 前评估影响面」「检查旧 key 还在哪些文件被使用」。
+            示例：
+            {"type":"find_references","symbol":"hello_world","kind":"string"}
+            {"type":"find_references","symbol":"submit_button","kind":"id","caseSensitive":true}
+            {"type":"find_references","symbol":"MainActivity","kind":"class","limit":50}
+        """.trimIndent(),
+
+        "list_files" to """
+            ## list_files 详细用法
+            列举项目内某目录下的文件 / 子目录，支持 glob 与递归。
+            字段：
+            - relativeDir（可选，默认 "."）：相对项目根的子目录，"." 或空表示项目根。
+            - pattern（可选，默认 "*"）：glob 模式，支持 * 与 ? 通配符，不处理 **。
+            - recursive（可选，默认 false）：是否递归子目录（最多 10 层，防爆栈）。
+            - includeDirs（可选，默认 false）：是否在结果中包含目录。
+            - maxEntries（可选，默认 500）：最大返回条数。
+            限制：
+            - 大目录请用 filePattern 限定（如 "*.kt"）避免返回过多结果。
+            - 路径必须落在项目根内。
+            典型场景：
+            - 「项目里有哪些 layout 文件」「app/src/main/java 下都有什么包」「res 目录里有哪些 values-* 」。
+            - AI 探索项目结构时先用本工具建索引，再用 search_in_files / read_file 精确读目标。
+            示例：
+            {"type":"list_files","relativeDir":"app/src/main/res","pattern":"*.xml","recursive":false}
+            {"type":"list_files","relativeDir":"app/src/main/java","pattern":"*.kt","recursive":true,"includeDirs":true,"maxEntries":300}
+        """.trimIndent(),
+
+        "ask_user" to """
+            ## ask_user 详细用法
+            向用户提问并等待用户回复。每次调用都会暂停 tool loop 直到用户响应——因此不要反复调用本工具。
+            字段：
+            - question（必填）：问题文本，会直接展示给用户。建议在问题里说明上下文与各选项的含义，避免歧义。
+            - options（可选）：按钮选项，非空时显示为可点击按钮（推荐优先使用，用户一键回复更高效）；为空 / null 时用户会在聊天输入框输入回复，系统会作为 tool_result 回传。
+            使用规则：
+            - 关键参数缺失（如不确定目标 key 写法）、风险操作确认（如破坏性 delete、跨模块写入）、目标不明确需要澄清时使用。
+            - 收到用户回复后必须用 task_complete 或其他操作推进目标，不能再连续调用本工具。
+            - 一次性把要确认的多个问题合并到一次 ask_user，不要拆成多轮。
+            示例（带按钮）：
+            {"type":"ask_user","question":"key 'hello' 已存在,如何处理?","options":["覆盖现有翻译","在末尾追加同名行","取消操作"]}
+            示例（开放输入）：
+            {"type":"ask_user","question":"你想修改哪个模块的 strings.xml?(app / home / common)","options":[]}
+        """.trimIndent(),
+
+        "task_complete" to """
+            ## task_complete 详细用法
+            声明任务已完成，结束当前对话循环。**这是唯一的合法终止信号**——没有调用本工具 = 你仍在执行，系统会持续驱动你继续。
+            字段：
+            - summary（必填）：给用户看的最终总结，会直接展示。建议用一两句话说明完成了什么、覆盖了哪些 key / 文件 / 语言。
+            - status（必填）：任务完成状态，枚举值：
+              - success：完全达成。
+              - partial：部分达成（如用户中途拒绝、范围受限）。
+              - failed：执行失败（如权限不足、AI 异常）。
+            - notes（可选）：补充说明（如「用户拒绝」「缺少必要信息」），会附在 summary 后展示。
+            使用规则：
+            - 必须等到用户目标真正达成才调用——拿了工具结果但还没做事不算完成。
+            - 调用本工具后不要在同一次回复中再调用其他工具。
+            示例：
+            {"type":"task_complete","summary":"已在 app 模块的 strings.xml 中插入 hello_world 的 3 个语种翻译。","status":"success"}
+            {"type":"task_complete","summary":"已修正 hello_world 的法语翻译,中文与日语用户拒绝修改,跳过。","status":"partial","notes":"用户拒绝修改 values-zh-rCN 与 values-ja"}
+            {"type":"task_complete","summary":"Google Sheets 未配置,无法执行。","status":"failed","notes":"请先在设置中配置 spreadsheetId 与 defaultSheetName"}
+        """.trimIndent(),
+
+        "load_tool_doc" to """
+            ## load_tool_doc 详细用法
+            按需加载工具的详细使用文档（参数约束、枚举值、示例等）。主聊天 system prompt 只放工具清单，详细用法全部按需加载以节省 token。
+            字段：
+            - tool（必填）：要加载的工具名。当前可用值：
+              - insert_strings、query_keys、read_string、update_string、delete_string、find_keys_by_text
+              - sheets_basic、sheets_row_ops、sheets_column_ops、sheets_freeze、sheets_review、sheets_color、sheets_batch_modify
+              - find_rows_by_text
+              - get_editor_file、read_file、edit_file、create_file、search_in_files、find_references、list_files
+              - ask_user、load_tool_doc、task_complete
+            使用规则：
+            - 不确定工具字段时再调本工具，不要在每次任务开始时一次性加载所有文档。
+            - 系统对「连续调用 load_tool_doc」有次数上限（防止 AI 反复加载文档而不执行操作），所以一次最多加载需要的 1-2 个文档，拿到后立即返回实际工具调用。
+            - 文档返回后会作为 tool 消息回传给你，你据此直接返回正确的工具调用，**不要重复请求同一工具的文档**。
+            示例：
+            {"type":"load_tool_doc","tool":"sheets_batch_modify"}
         """.trimIndent(),
 
         "sheets_basic" to """

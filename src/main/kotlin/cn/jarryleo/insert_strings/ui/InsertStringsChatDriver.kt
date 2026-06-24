@@ -1389,6 +1389,36 @@ internal class InsertStringsChatDriver(
             // 兜底:确保 values(默认英语)一定存在,避免漏写导致 values/strings.xml 被清空
             if (DEFAULT_LANGUAGE !in merged) merged[DEFAULT_LANGUAGE] = ""
 
+            // 全语种兜底:以目标模块实际 xmlFiles 为准,补齐 AI 漏写的语种。
+            // 兜底文本按以下优先级选取 —— 确保所有语种都有非空值,UI 不会显示空白:
+            //   1) values(默认英语)译文
+            //   2) AI 提供的任何其他语种译文
+            //   3) 模块里该 key 现有翻译(已有翻译优先保留,即使 AI 漏给)
+            //   4) 空前缀 —— 仅在以上都没有时使用,配合新增空 values 目录的占位。
+            // 这样既不会让任何语种"完全没条目"(导致运行时 key 不存在),
+            // 也不会清空用户/AI 已提供的翻译。
+            val targetModuleLanguages = contextMgr.getModuleFiles(targetModule).map { it.first.name }
+            if (targetModuleLanguages.isNotEmpty()) {
+                val fallbackSource = merged[DEFAULT_LANGUAGE]
+                    ?: action.translations.values.firstOrNull { it.isNotBlank() }
+                    ?: existingTranslations.values.firstOrNull { it.isNotBlank() }
+                    ?: ""
+                val filledLanguages = mutableListOf<String>()
+                for (lang in targetModuleLanguages) {
+                    if (lang !in merged) {
+                        merged[lang] = fallbackSource
+                        filledLanguages.add(lang)
+                    }
+                }
+                if (filledLanguages.isNotEmpty()) {
+                    DebugLog.log(
+                        "InsertStringsChatDriver",
+                        "insert_strings key=${action.name} module=$targetModule " +
+                            "auto-filled missing languages: $filledLanguages (source length=${fallbackSource.length})"
+                    )
+                }
+            }
+
             try {
                 state.insertStringsManager.insertIntoModule(
                     project, targetModule, mapOf(action.name to merged)

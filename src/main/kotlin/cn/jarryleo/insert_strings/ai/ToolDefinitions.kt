@@ -88,7 +88,7 @@ object ToolDefinitions {
     private const val DESC_INSERT_STRINGS =
         "向 Android strings.xml 插入或修改翻译字符串。" +
             "可同时调用多次以插入多个字符串。" +
-            "translations 必须始终包含 \"values\"(默认英语),并覆盖 availableLanguages 中所有其他语言。" +
+            "translations 必须始终包含 \"values\"(默认英语),并覆盖模块内的所有语言。" +
             "若只想修改个别语言,请改用 update_string(部分语言更新,不覆写其他语言)。"
 
     private const val DESC_UPDATE_STRING =
@@ -742,7 +742,14 @@ object ToolDefinitions {
 
     private fun openAiLoadToolDocParams(): JsonObject {
         val availableTools = JsonArray().apply {
+            // strings.xml 操作
             add("insert_strings")
+            add("query_keys")
+            add("read_string")
+            add("update_string")
+            add("delete_string")
+            add("find_keys_by_text")
+            // Google Sheets 操作
             add("sheets_basic")
             add("sheets_row_ops")
             add("sheets_column_ops")
@@ -750,6 +757,19 @@ object ToolDefinitions {
             add("sheets_review")
             add("sheets_color")
             add("sheets_batch_modify")
+            add("find_rows_by_text")
+            // 文件 / 内容 / 引用操作
+            add("get_editor_file")
+            add("read_file")
+            add("edit_file")
+            add("create_file")
+            add("search_in_files")
+            add("find_references")
+            add("list_files")
+            // 通用
+            add("ask_user")
+            add("load_tool_doc")
+            add("task_complete")
         }
         return obj {
             addProperty("type", "object")
