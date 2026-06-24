@@ -8,7 +8,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.awt.ComposePanel
 import cn.jarryleo.insert_strings.InsertStringsManager
 import cn.jarryleo.insert_strings.UiCallback
-import cn.jarryleo.insert_strings.ai.AiProtocol
+import cn.jarryleo.insert_strings.ai.AiProvider
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.phrases.QuickPhrase
 import cn.jarryleo.insert_strings.sheets.SheetsManager
@@ -60,12 +60,38 @@ class InsertStringsUI(
     internal var showChat by mutableStateOf(false)
     internal var settingsTab by mutableStateOf(SettingsTab.AI)
 
-    // ============== AI 设置 state ==============
-    internal var aiUrl by mutableStateOf("")
-    internal var aiApiKey by mutableStateOf("")
-    internal var aiProtocol by mutableStateOf(AiProtocol.OPENAI)
-    internal var aiModel by mutableStateOf("qwen-plus")
+    // ============== AI 设置 state(多 provider 模型) ==============
+    /**
+     * 全部 AI provider 列表。展示在设置面板的「提供商列表」中,持久化在 [cn.jarryleo.insert_strings.ai.AiSettingsService]。
+     * UI 上任何增/删/改都同步写入 service。
+     */
+    internal val aiProviders = mutableStateListOf<AiProvider>()
+    /**
+     * 当前激活 provider 的 id(AI 调用时实际使用)。null 表示还没有任何 provider。
+     */
+    internal var currentAiProviderId by mutableStateOf<String?>(null)
+    /**
+     * 当前正在编辑的 provider 草稿。
+     * - 非 null 时,设置面板下方展开编辑表单;
+     * - null 时,设置面板不显示编辑表单。
+     * 编辑中字段 = 用户当前输入;Save 时由 controller 校验后写入 service 并同步到 [aiProviders]。
+     */
+    internal var editingAiProvider: AiProvider? by mutableStateOf(null)
+    /**
+     * 当前编辑的 provider 是「新建」还是「编辑已有」。
+     * - true:用户点 "+ Add" 进入新建,editingAiProvider.id 不在 [aiProviders] 中,Save 时按新增走;
+     * - false:用户点列表某条的「Edit」进入编辑,editingAiProvider.id 是已存在 provider 的 id。
+     * 用一个独立字段而不是「editingAiProvider.id 是否在列表中」来推导,避免编辑过程中
+     * 由于 save 后再编辑造成状态混乱。
+     */
+    internal var editingIsNew: Boolean = false
+    /**
+     * 编辑表单「Get Models」时拉取到的模型列表(供 ModelField 下拉使用)。
+     */
     internal val modelOptions = mutableStateListOf<String>()
+    /**
+     * 编辑表单「Get Models」状态文本("Loading models." / "Loaded N models." / 错误信息)。
+     */
     internal var modelFetchStatus by mutableStateOf("")
 
     // ============== Sheets 设置 state ==============
@@ -150,10 +176,10 @@ class InsertStringsUI(
                     showSettings = showSettings,
                     showChat = showChat,
                     settingsTab = settingsTab,
-                    aiUrl = aiUrl,
-                    aiApiKey = aiApiKey,
-                    aiProtocol = aiProtocol,
-                    aiModel = aiModel,
+                    aiProviders = aiProviders,
+                    currentAiProviderId = currentAiProviderId,
+                    editingAiProvider = editingAiProvider,
+                    editingIsNew = editingIsNew,
                     modelOptions = modelOptions,
                     modelFetchStatus = modelFetchStatus,
                     chatMessages = chatMessages,
@@ -164,12 +190,18 @@ class InsertStringsUI(
                     onCloseSettings = { showSettings = false },
                     onOpenChat = { showChat = true },
                     onCloseChat = { showChat = false },
-                    onAiUrlChange = { aiUrl = it },
-                    onAiApiKeyChange = { aiApiKey = it },
-                    onAiProtocolChange = { aiProtocol = it },
-                    onAiModelChange = { aiModel = it },
+                    onAddAiProvider = settingsController::beginAddProvider,
+                    onEditAiProvider = settingsController::beginEditProvider,
+                    onDeleteAiProvider = settingsController::deleteProvider,
+                    onUseAiProvider = settingsController::useProvider,
+                    onAiProviderNameChange = { name -> editingAiProvider = editingAiProvider?.copy(name = name) },
+                    onAiProviderUrlChange = { url -> editingAiProvider = editingAiProvider?.copy(url = url) },
+                    onAiProviderApiKeyChange = { key -> editingAiProvider = editingAiProvider?.copy(apiKey = key) },
+                    onAiProviderProtocolChange = { protocol -> editingAiProvider = editingAiProvider?.copy(protocol = protocol.name) },
+                    onAiProviderModelChange = { model -> editingAiProvider = editingAiProvider?.copy(model = model) },
                     onFetchModels = settingsController::fetchModels,
-                    onSaveAiSettings = settingsController::saveAiSettings,
+                    onSaveAiProvider = settingsController::saveEditingProvider,
+                    onCancelAiProviderEdit = settingsController::cancelEditingProvider,
                     sheetsDefaultSpreadsheetId = sheetsDefaultSpreadsheetId,
                     sheetsDefaultSheetName = sheetsDefaultSheetName,
                     sheetsConnectionStatus = sheetsConnectionStatus,

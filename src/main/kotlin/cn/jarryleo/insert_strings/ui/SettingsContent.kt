@@ -14,6 +14,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import cn.jarryleo.insert_strings.ai.AiProvider
 import cn.jarryleo.insert_strings.ai.AiProtocol
 import cn.jarryleo.insert_strings.phrases.QuickPhrase
 
@@ -26,18 +27,26 @@ fun SettingsContent(
     selectedTab: SettingsTab,
     onTabChange: (SettingsTab) -> Unit,
     onClose: () -> Unit,
-    aiUrl: String,
-    aiApiKey: String,
-    aiProtocol: AiProtocol,
-    aiModel: String,
+    // ===== AI 多 provider 模型 =====
+    aiProviders: List<AiProvider>,
+    currentAiProviderId: String?,
+    editingAiProvider: AiProvider?,
+    editingIsNew: Boolean,
     modelOptions: List<String>,
     modelFetchStatus: String,
-    onAiUrlChange: (String) -> Unit,
-    onAiApiKeyChange: (String) -> Unit,
-    onAiProtocolChange: (AiProtocol) -> Unit,
-    onAiModelChange: (String) -> Unit,
+    onAddAiProvider: () -> Unit,
+    onEditAiProvider: (AiProvider) -> Unit,
+    onDeleteAiProvider: (AiProvider) -> Unit,
+    onUseAiProvider: (AiProvider) -> Unit,
+    onAiProviderNameChange: (String) -> Unit,
+    onAiProviderUrlChange: (String) -> Unit,
+    onAiProviderApiKeyChange: (String) -> Unit,
+    onAiProviderProtocolChange: (AiProtocol) -> Unit,
+    onAiProviderModelChange: (String) -> Unit,
     onFetchModels: () -> Unit,
-    onSaveAiSettings: () -> Unit,
+    onSaveAiProvider: () -> Boolean,
+    onCancelAiProviderEdit: () -> Unit,
+    // ===== Sheets =====
     sheetsDefaultSpreadsheetId: String,
     sheetsDefaultSheetName: String,
     sheetsConnectionStatus: String,
@@ -48,6 +57,7 @@ fun SettingsContent(
     onTestSheetsConnection: () -> Unit,
     onSaveSheetsSettings: () -> Unit,
     onRefreshSheetsList: () -> Unit,
+    // ===== Quick Phrases =====
     phrases: List<QuickPhrase>,
     editingPhrase: QuickPhrase?,
     onAddPhrase: () -> Unit,
@@ -119,19 +129,25 @@ fun SettingsContent(
         }
 
         when (selectedTab) {
-            SettingsTab.AI -> AiSettingsContent(
-                aiUrl = aiUrl,
-                aiApiKey = aiApiKey,
-                aiProtocol = aiProtocol,
-                aiModel = aiModel,
+            SettingsTab.AI -> AiProvidersContent(
+                aiProviders = aiProviders,
+                currentAiProviderId = currentAiProviderId,
+                editingAiProvider = editingAiProvider,
+                editingIsNew = editingIsNew,
                 modelOptions = modelOptions,
                 modelFetchStatus = modelFetchStatus,
-                onAiUrlChange = onAiUrlChange,
-                onAiApiKeyChange = onAiApiKeyChange,
-                onAiProtocolChange = onAiProtocolChange,
-                onAiModelChange = onAiModelChange,
+                onAddProvider = onAddAiProvider,
+                onEditProvider = onEditAiProvider,
+                onDeleteProvider = onDeleteAiProvider,
+                onUseProvider = onUseAiProvider,
+                onProviderNameChange = onAiProviderNameChange,
+                onProviderUrlChange = onAiProviderUrlChange,
+                onProviderApiKeyChange = onAiProviderApiKeyChange,
+                onProviderProtocolChange = onAiProviderProtocolChange,
+                onProviderModelChange = onAiProviderModelChange,
                 onFetchModels = onFetchModels,
-                onSave = onSaveAiSettings,
+                onSaveEditing = { onSaveAiProvider() },
+                onCancelEditing = onCancelAiProviderEdit,
                 modifier = Modifier.fillMaxSize(),
                 colors = colors,
             )
