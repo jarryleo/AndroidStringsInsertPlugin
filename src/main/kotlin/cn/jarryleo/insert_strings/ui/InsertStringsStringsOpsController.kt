@@ -5,6 +5,7 @@ import cn.jarryleo.insert_strings.xml.ContextManager
 import cn.jarryleo.insert_strings.xml.KeySearchResult
 import cn.jarryleo.insert_strings.xml.KeyTextSearchResult
 import cn.jarryleo.insert_strings.xml.StringsService
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.project.Project
 import javax.swing.SwingUtilities
 
@@ -248,6 +249,112 @@ internal class InsertStringsStringsOpsController(
         }
     }
 
+    /**
+     * 检查一组待插入的 insert_strings 动作是否会在目标模块的默认语言(values)上
+     * 出现"已有 key 的翻译文本与待插入的 values 译文一致"的重复情况。
+     *
+     * 用于驱动层在写文件前给用户二次确认,避免重复入库。
+     *
+     * 规则:
+     * 1) 比对 values 语言文件(默认英语),因为这是用户在 UI 上最直观看到的源语言。
+     * 2) 若用户传入的 translations 没有 values,跳过该 action(后续系统会兜底)。
+     * 3) 跨模块兜底:如果目标模块没有重复,也扫一下其它模块,告诉用户"该项目里已有同样的 key"。
+     *    (因为同名翻译也常出现在不同模块,让用户决定是否复用。)
+     *
+     * @return 每个 action 的检测结果 + (有重复时)其它模块中的命中;空集合表示没有重复。
+     */
+    fun checkDuplicateKeys(
+        actions: List<AiAction.InsertStrings>,
+        targetModule: String
+    ): Map<String, List<ExistingKeyMatch>> {
+        if (actions.isEmpty()) return emptyMap()
+        val contextMgr = ContextManager.getInstance(project)
+        val contextInfo = contextMgr.contextInfo ?: return emptyMap()
+        // 目标模块的 values 译文 -> [(key, text)] 索引
+        val targetValuesIndex = buildValuesIndex(contextMgr, targetModule)
+
+        // 跨模块扫描结果(用于"是否复用其它模块现有 key"提示)
+        val crossModuleIndex: MutableMap<String, MutableList<Pair<String, String>>> = mutableMapOf()
+        contextInfo.modules.forEach { module ->
+            if (module.moduleName == targetModule) return@forEach
+            buildValuesIndex(contextMgr, module.moduleName).forEach { (text, keyList) ->
+                val list = crossModuleIndex.getOrPut(text) { mutableListOf() }
+                list += module.moduleName to keyList.first()
+            }
+        }
+
+        val out: MutableMap<String, List<ExistingKeyMatch>> = mutableMapOf()
+        actions.forEach { action ->
+            val textToCheck = action.translations[DEFAULT_LANGUAGE]?.trim().orEmpty()
+            if (textToCheck.isEmpty()) return@forEach
+            val matches = mutableListOf<ExistingKeyMatch>()
+            // 目标模块内重复
+            targetValuesIndex[textToCheck]?.forEach { key ->
+                matches.add(
+                    ExistingKeyMatch(
+                        key = key,
+                        module = targetModule,
+                        language = DEFAULT_LANGUAGE,
+                        existingText = textToCheck,
+                    )
+                )
+            }
+            // 跨模块重复(同翻译,不同模块的 key)
+            crossModuleIndex[textToCheck]?.forEach { (otherModule, key) ->
+                matches.add(
+                    ExistingKeyMatch(
+                        key = key,
+                        module = otherModule,
+                        language = DEFAULT_LANGUAGE,
+                        existingText = textToCheck,
+                    )
+                )
+            }
+            if (matches.isNotEmpty()) {
+                out[action.name] = matches
+            }
+        }
+        return out
+    }
+
+    /**
+     * 把指定模块的 values 语言文件的 (译文文本 -> key 列表) 索引出来,
+     * 供查重使用。空文本不会建索引,避免误命中。
+     */
+    private fun buildValuesIndex(
+        contextMgr: ContextManager,
+        moduleName: String
+    ): Map<String, List<String>> {
+        val files = contextMgr.getModuleFiles(moduleName)
+        val valuesFile = files.firstOrNull { it.first.name == DEFAULT_LANGUAGE }?.second ?: return emptyMap()
+        return try {
+            val doc = FileDocumentManager.getInstance().getDocument(valuesFile) ?: return emptyMap()
+            val xml = doc.text
+            parseAllStringNodes(xml)
+                .filter { it.value.isNotEmpty() }
+                .groupBy({ it.value.trim() }, { it.key })
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    private data class ParsedStringNode(val key: String, val value: String)
+
+    private fun parseAllStringNodes(xml: String): List<ParsedStringNode> {
+        val regex = """<string\b([^>]*?)>([\s\S]*?)</string>""".toRegex()
+        return regex.findAll(xml).map { match ->
+            val attrs = match.groupValues[1]
+            val key = """\bname\s*=\s*(['"])(.*?)\1""".toRegex()
+                .find(attrs)?.groupValues?.get(2).orEmpty()
+            ParsedStringNode(key, match.groupValues[2])
+        }.filter { it.key.isNotEmpty() }.toList()
+    }
+
+    /**
+     * 用 find_keys_by_text 同样的精确匹配能力,作为跨模块/跨语言去重的备选入口。
+     * 供 AI 通过 find_keys_by_text 工具调用使用 — 这里仅暴露给 driver 内部,
+     * 不参与 schema。
+     */
     fun runFindKeysByText(action: AiAction.FindKeysByText): String {
         val matchType = mapToServiceMatchType(action.matchType)
         val results: List<KeyTextSearchResult> = try {
@@ -304,3 +411,5 @@ internal class InsertStringsStringsOpsController(
  */
 internal fun truncateForLog(text: String, max: Int): String =
     if (text.length <= max) text else text.take(max) + "…"
+
+private const val DEFAULT_LANGUAGE = "values"

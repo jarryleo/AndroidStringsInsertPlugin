@@ -38,6 +38,7 @@ internal interface ChatStateHolder {
     var askUserCallCount: Int
     var toolDocLoadCount: Int
     var pendingSheetsInsert: PendingSheetsInsert?
+    var pendingStringsInsert: PendingStringsInsert?
     var showContextPopup: Boolean
     var chatContextText: String
 

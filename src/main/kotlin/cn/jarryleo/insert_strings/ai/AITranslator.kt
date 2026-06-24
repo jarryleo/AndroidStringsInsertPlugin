@@ -74,6 +74,13 @@ object AITranslator {
   - 若用户**明确指定了模块**(在消息里说"插到 feature 模块"或选了某行翻译),就用用户指定的模块(module 参数显式传)。
   - 需要保证模块内每个语种都有对应的翻译。
   - 注意:只操作 strings.xml 文件不操作 google sheet,插入前需检查 key 是否存在,若 key 已存在则提示用户是否覆盖。
+  - **插入翻译前的查重流程(系统会在写文件前自动跑)**:
+    1. 系统会扫描**目标模块的 values 译文**(以及其它模块的 values 译文,作为跨模块复用提示),找出与本次待插入 values 译文完全相同的现有 key。
+    2. 命中时弹出气泡让用户选:
+       - 「使用现有翻译」— 跳过写入,沿用现有 key,系统会回读现有翻译交给你比对是否需要修正(用 update_string 修缺漏);同时在 Extract 入口会自动把选区替换为现有 key。
+       - 「插入新的翻译」— 忽略查重,按原计划新增 key(可能产生重复文案的不同 key)。
+       - 「取消操作」— 放弃本次插入。
+    3. 你的 insert_strings 一次输出**覆盖多个 key**时,只要其中任何一个命中查重,整批都会暂停等待用户选择 — 不可只对部分 key 跳过查重。
 
 ## 强制终止规则(最重要)
 - 唯一的「合法终止」信号是调用 task_complete 工具。
@@ -145,6 +152,12 @@ object AITranslator {
             - 若上下文有 currentKeys，优先用第一个 key 作为 name；多 key 时可为每个 key 分别返回 insert_strings。
             - 可以同时返回多个 insert_strings 动作插入多个字符串。
             - 翻译内容中 XML 特殊字符需转义：&amp; &lt; &gt; &quot; &apos;。
+            - **重复 key 检查(系统自动跑,不要用 find_keys_by_text 重复跑)**:
+              - 在调用本工具前,你应**主动**用 find_keys_by_text 按 values 译文(默认英语)粗略扫一下目标模块,
+                看是否存在与待插入译文完全一致或高度相似的现有 key。若有,**改用 update_string 复用现有 key**,
+                或在 user 消息里告诉用户"我准备插入的翻译 X 看起来和现有 key Y 重复,我想…",让用户决策。
+              - 即使你事先扫过,系统在执行时也会再做一次确认(因为查重是文件级精确比对,比模型判断更可靠)。
+              - 一次 insert_strings 涉及多个 key 时,只要其中任何一个命中,整批都会暂停等用户选择。
             示例（5 个语种全覆盖）:
             {"type":"insert_strings","module":"app","name":"hello_world","translations":{"values":"Hello","values-zh-rCN":"你好","values-ja":"こんにちは","values-ko":"안녕하세요","values-fr":"Bonjour"}}
         """.trimIndent(),

@@ -299,6 +299,7 @@ private class AskAiChatHolder(
     override var askUserCallCount: Int = 0
     override var toolDocLoadCount: Int = 0
     override var pendingSheetsInsert: PendingSheetsInsert? = null
+    override var pendingStringsInsert: PendingStringsInsert? = null
     override var showContextPopup: Boolean by mutableStateOf(false)
     override var chatContextText: String by mutableStateOf("")
 

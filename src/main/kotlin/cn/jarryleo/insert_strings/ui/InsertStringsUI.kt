@@ -109,6 +109,7 @@ class InsertStringsUI(
      * 拆出去会让 ChatDriver 反向依赖过多,保留在 UI 上更直接。
      */
     override var pendingSheetsInsert: PendingSheetsInsert? = null
+    override var pendingStringsInsert: PendingStringsInsert? = null
 
     // ============== 协作类(延迟初始化,见 [createToolWindowContent]) ==============
     internal lateinit var actionsController: InsertStringsActionsController

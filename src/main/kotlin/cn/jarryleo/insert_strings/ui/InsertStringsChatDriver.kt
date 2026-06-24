@@ -135,6 +135,9 @@ internal class InsertStringsChatDriver(
         state.chatSending = false
         state.pendingAskUserToolCallId = null
         state.askUserCallCount = 0
+        // 清理挂起的重复 key 询问,避免新会话中误把旧 option 路由到旧 pending
+        state.pendingSheetsInsert = null
+        state.pendingStringsInsert = null
     }
 
     /**
@@ -169,6 +172,14 @@ internal class InsertStringsChatDriver(
         if (pending != null) {
             state.pendingSheetsInsert = null
             resolveDuplicateInsert(option, pending)
+            return
+        }
+
+        // Priority 3:系统发起的 strings.xml 重复 key 询问
+        val pendingStrings = state.pendingStringsInsert
+        if (pendingStrings != null) {
+            state.pendingStringsInsert = null
+            resolveDuplicateStringsInsert(option, pendingStrings)
             return
         }
 
@@ -1412,6 +1423,52 @@ internal class InsertStringsChatDriver(
             contextMgr.ensureLanguageFile(batchModule, lang)
         }
 
+        // 写之前查重:扫描目标模块 values 译文 + 跨模块索引,
+        // 命中"已有 key 与待插入 values 译文完全一致"时挂起,让用户选择「使用现有 / 插入新 / 取消」。
+        val duplicateMap = stringsOps.checkDuplicateKeys(actions, batchModule)
+        if (duplicateMap.isNotEmpty()) {
+            val existing = mutableListOf<ExistingKeyMatch>()
+            duplicateMap.values.forEach { existing.addAll(it) }
+            val pending = PendingStringsInsert(
+                actions = actions,
+                actionToolCallIds = entries.map { it.toolCallId },
+                existingKeys = existing,
+                targetModule = batchModule,
+                context = context,
+                iteration = iteration,
+            )
+            SwingUtilities.invokeLater {
+                state.pendingStringsInsert = pending
+                val msg = buildDuplicatePrompt(duplicateMap, batchModule, existing)
+                val lastIdx = state.chatMessages.lastIndex
+                if (lastIdx >= 0) {
+                    state.chatMessages[lastIdx] = state.chatMessages[lastIdx].copy(
+                        content = msg,
+                        thinking = "",
+                        options = listOf(
+                            "使用现有翻译(可顺带检查/修正)",
+                            "插入新的翻译",
+                            "取消操作"
+                        )
+                    )
+                } else {
+                    state.chatMessages.add(
+                        ChatMessage(
+                            role = "assistant",
+                            content = msg,
+                            options = listOf(
+                                "使用现有翻译(可顺带检查/修正)",
+                                "插入新的翻译",
+                                "取消操作"
+                            )
+                        )
+                    )
+                }
+                state.chatSending = false
+            }
+            return
+        }
+
         val results = actions.map { action ->
             val targetModule = batchModule
             val moduleStringsInfo = contextMgr.getModuleStringsInfo(targetModule)
@@ -1557,5 +1614,246 @@ internal class InsertStringsChatDriver(
         return grouped.entries.joinToString("、") { (name, count) ->
             if (count > 1) "$name×$count" else name
         }
+    }
+
+    /**
+     * 构造"重复 key"询问气泡的文本,告诉用户:
+     *  - 哪些待插入 key 与现有 key 重复(按 values 默认语言比对)
+     *  - 现有 key 在哪个模块(目标模块 / 其它模块)
+     *  - 给三个选项:使用现有 / 插入新 / 取消
+     */
+    private fun buildDuplicatePrompt(
+        duplicateMap: Map<String, List<ExistingKeyMatch>>,
+        targetModule: String,
+        existing: List<ExistingKeyMatch>
+    ): String {
+        val lines = mutableListOf<String>()
+        lines += "检测到待插入翻译在 strings.xml 中已存在相同文案的 key:"
+        duplicateMap.forEach { (newKey, matches) ->
+            val matchDesc = matches.joinToString(" / ") { m ->
+                if (m.module == targetModule) "key=${m.key}(本模块)" else "key=${m.key}(模块:${m.module})"
+            }
+            lines += "  • 待插入 newKey=$newKey → 已存在: $matchDesc"
+        }
+        if (existing.any { it.module != targetModule }) {
+            lines += "(其中包含其它模块的同名翻译,可考虑复用或合并)"
+        }
+        lines += ""
+        lines += "请选择:「使用现有翻译」保留现有 key,顺带让 AI 检查翻译是否需要修正;"
+        lines += "「插入新的翻译」按原计划新增 key;"
+        lines += "「取消操作」放弃本次插入。"
+        return lines.joinToString("\n")
+    }
+
+    /**
+     * 处理 strings.xml 重复 key 询问的用户选择:
+     *  - "使用现有翻译":跳过 insert_strings 的写操作,但仍要:
+     *      1) 触发 onInsertStringsInserted 回调(让 ExtractStrings 等入口把选区替换为现有 key)
+     *      2) 让 AI 拿到现有 key + 现有翻译,询问是否需要修正(走 update_string 修复缺漏)
+     *  - "插入新翻译":继续按原流程执行 insert_strings
+     *  - "取消":为每个 pending tool_call 添加「用户已取消」tool result
+     */
+    private fun resolveDuplicateStringsInsert(option: String, pending: PendingStringsInsert) {
+        when {
+            option.contains("使用现有") -> {
+                state.chatSending = true
+                SwingUtilities.invokeLater {
+                    val contextMgr = ContextManager.getInstance(project)
+                    val info = pending.existingKeys.first()
+                    val existingKey = info.key
+                    val existingModule = info.module
+
+                    // 把现有 key 的全语种翻译回读给 AI,让 AI 比对并修正缺漏
+                    val existingTranslations = contextMgr.scanModuleForKey(existingModule, existingKey)
+                        .associate { it.language to it.text }
+                        .filter { it.value.isNotEmpty() }
+                    val userNewKey = pending.actions.firstOrNull()?.name
+
+                    // 为每个 pending tool_call 添加成功 tool result(语义:沿用现有 key)
+                    pending.actionToolCallIds.forEachIndexed { i, toolCallId ->
+                        if (toolCallId.isNotEmpty()) {
+                            val action = pending.actions.getOrNull(i)
+                            val actionName = action?.name ?: "?"
+                            val content = buildString {
+                                append("[工具执行结果] insert_strings module=${pending.targetModule} ")
+                                append("name=$actionName 状态:跳过(使用现有 key=$existingKey @模块=$existingModule) ")
+                                append("理由:用户选择「使用现有翻译」")
+                                if (userNewKey != null && userNewKey != existingKey) {
+                                    append(" 待插入新 key=$userNewKey 已忽略")
+                                }
+                            }
+                            state.chatMessages.add(
+                                ChatMessage(
+                                    role = "tool",
+                                    content = content,
+                                    toolCallId = toolCallId
+                                )
+                            )
+                        }
+                    }
+
+                    // 触发入口回调(让 ExtractStrings 把选区替换为 @string/$existingKey)
+                    pending.actions.forEach { a ->
+                        state.onInsertStringsInserted(existingKey, existingModule)
+                    }
+                    state.closeChatView()
+
+                    // 追加 assistant 消息:把现有翻译交给 AI,问是否需要修正
+                    val transDesc = existingTranslations.entries.joinToString(", ") { (lang, text) ->
+                        val short = if (text.length > 60) text.take(60) + "…" else text
+                        "$lang=\"$short\""
+                    }
+                    state.chatMessages.add(
+                        ChatMessage(
+                            role = "assistant",
+                            content = "已沿用现有 key=$existingKey @模块=$existingModule(用户选择「使用现有翻译」)。\n" +
+                                "现有翻译:$transDesc\n" +
+                                "接下来请调用 read_string($existingKey) 取完整内容,对比用户期望:\n" +
+                                "  - 若翻译齐全且准确,直接 task_complete 即可;\n" +
+                                "  - 若需要补齐缺失语言或修正某语言,用 update_string 精准更新。\n" +
+                                "如果是在布局/代码里替换的 key,已通过回调写入编辑器选区。"
+                        )
+                    )
+                    state.chatSending = false
+                }
+            }
+            option.contains("插入新") -> {
+                // 按原计划继续 insert_strings:重新走 executeInsertActions 的后续流程。
+                // 简单地重新构造 entries 调用私有方法不便,改为:让用户再次发消息告诉 AI「忽略重复检查,继续插入」,
+                // 或者这里直接当作"无重复命中"重跑。这里采取最直接的做法:回退为重新走 driver 的继续流程,
+                // 但本次不再查重 — 改用一个标记状态来跳过本批的查重。
+                // 实现上:通过再次调用执行路径,但用临时变量 disableCheckDuplicate 跳过查重。
+                executeInsertActionsWithPending(
+                    actions = pending.actions,
+                    actionToolCallIds = pending.actionToolCallIds,
+                    targetModule = pending.targetModule,
+                    context = pending.context,
+                    iteration = pending.iteration,
+                    skipDuplicateCheck = true,
+                )
+            }
+            else -> {
+                // 取消
+                SwingUtilities.invokeLater {
+                    pending.actionToolCallIds.forEachIndexed { i, toolCallId ->
+                        if (toolCallId.isNotEmpty()) {
+                            val action = pending.actions.getOrNull(i)
+                            val name = action?.name ?: "?"
+                            state.chatMessages.add(
+                                ChatMessage(
+                                    role = "tool",
+                                    content = "[用户取消] insert_strings name=$name 未执行(检测到重复 key,用户取消)。",
+                                    toolCallId = toolCallId
+                                )
+                            )
+                        }
+                    }
+                    state.chatMessages.add(
+                        ChatMessage(
+                            role = "assistant",
+                            content = "已取消本次插入操作。"
+                        )
+                    )
+                    state.closeChatView()
+                    state.chatSending = false
+                }
+            }
+        }
+    }
+
+    /**
+     * 跳过查重的插入执行入口 — 当用户在"重复 key 询问"中选择了「插入新的翻译」时调用。
+     * 内部直接走原 executeInsertActions 的写文件逻辑,但不再次查重。
+     */
+    private fun executeInsertActionsWithPending(
+        actions: List<AiAction.InsertStrings>,
+        actionToolCallIds: List<String>,
+        targetModule: String,
+        context: String,
+        iteration: Int,
+        skipDuplicateCheck: Boolean,
+    ) {
+        val contextMgr = ContextManager.getInstance(project)
+        state.chatSending = true
+
+        // 预聚合语言,补齐文件
+        val allLanguagesNeeded = (actions.flatMap { it.translations.keys } + DEFAULT_LANGUAGE).toSet()
+        allLanguagesNeeded.forEach { lang ->
+            if (!lang.startsWith("values")) return@forEach
+            contextMgr.ensureLanguageFile(targetModule, lang)
+        }
+        if (!skipDuplicateCheck) {
+            // 理论上只有 skipDuplicateCheck=true 才会调到这里,这里做兜底
+            val dup = stringsOps.checkDuplicateKeys(actions, targetModule)
+            if (dup.isNotEmpty()) return resolveDuplicateStringsInsert("取消", PendingStringsInsert(actions, actionToolCallIds, dup.values.flatten(), targetModule, context, iteration))
+        }
+
+        val results = actions.map { action ->
+            val moduleStringsInfo = contextMgr.getModuleStringsInfo(targetModule)
+            if (moduleStringsInfo.isEmpty()) {
+                return@map "模块 $targetModule 没有 strings.xml 或缺少 res/ 目录" to false
+            }
+            val existingInfo = contextMgr.scanModuleForKey(targetModule, action.name)
+            val existingTranslations = existingInfo.associate { it.language to it.text }
+            val merged = existingTranslations.toMutableMap()
+            merged.putAll(action.translations)
+            if (DEFAULT_LANGUAGE !in merged) merged[DEFAULT_LANGUAGE] = ""
+            val targetModuleLanguages = contextMgr.getModuleFiles(targetModule).map { it.first.name }
+            val droppedLanguages = mutableListOf<String>()
+            val filledLanguages = mutableListOf<String>()
+            if (targetModuleLanguages.isNotEmpty()) {
+                val keysToRemove = merged.keys - targetModuleLanguages.toSet() - DEFAULT_LANGUAGE
+                keysToRemove.forEach { droppedLanguages.add(it); merged.remove(it) }
+                val fallbackSource = merged[DEFAULT_LANGUAGE]?.takeIf { it.isNotBlank() }
+                    ?: action.translations.values.firstOrNull { it.isNotBlank() }
+                    ?: existingTranslations.values.firstOrNull { it.isNotBlank() }
+                    ?: ""
+                for (lang in targetModuleLanguages) {
+                    if (lang !in merged) {
+                        merged[lang] = fallbackSource
+                        filledLanguages.add(lang)
+                    }
+                }
+            }
+            val (msg, ok) = try {
+                state.insertStringsManager.insertIntoModule(project, targetModule, mapOf(action.name to merged))
+                "成功 目标模块:$targetModule 兜底补语种:${filledLanguages.joinToString(",").ifEmpty { "(无)" }} 丢弃:${droppedLanguages.joinToString(",").ifEmpty { "(无)" }}" to true
+            } catch (e: Exception) {
+                "失败:${e.message ?: "unknown"}" to false
+            }
+            msg to ok
+        }
+        val allEntries = actions.map { action ->
+            KeyedStringsInfo(
+                action.name,
+                "",
+                contextMgr.scanModuleForKey(targetModule, action.name)
+            )
+        }
+        state.insertStringsManager.updateUI(allEntries)
+        val names = actions.joinToString(", ") { it.name }
+        state.showToast("Inserted: $names")
+        results.forEachIndexed { i, (_, ok) ->
+            if (ok) {
+                actions.getOrNull(i)?.let { a ->
+                    state.onInsertStringsInserted(a.name, targetModule)
+                }
+            }
+        }
+        state.closeChatView()
+        actionToolCallIds.forEachIndexed { i, toolCallId ->
+            val action = actions.getOrNull(i)
+            val (msg, _) = results.getOrNull(i) ?: ("" to false)
+            if (action != null && toolCallId.isNotEmpty()) {
+                state.chatMessages.add(
+                    ChatMessage(
+                        role = "tool",
+                        content = "[工具执行结果] insert_strings module=$targetModule name=${action.name} 状态:$msg",
+                        toolCallId = toolCallId
+                    )
+                )
+            }
+        }
+        continueToolLoopInBackground(context, iteration + 1)
     }
 }

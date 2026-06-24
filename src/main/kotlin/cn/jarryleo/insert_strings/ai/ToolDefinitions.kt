@@ -90,7 +90,8 @@ object ToolDefinitions {
             "可同时调用多次以插入多个字符串。" +
             "translations 必须始终包含 \"values\"(默认英语),并覆盖模块内的所有语言 —— 一字不差对照 `recommendedDefaultModule.xmlFiles[].language`(或显式 module 的 `xmlFiles[].language`)。" +
             "module 优先级:用户在消息中**明确指定** > 用户在 UI 中**选中行所在的模块** > 省略让系统用 `recommendedDefaultModule`(优先 currentModule,偏弱时退回最强模块)。" +
-            "若只想修改个别语言,请改用 update_string(部分语言更新,不覆写其他语言)。"
+            "若只想修改个别语言,请改用 update_string(部分语言更新,不覆写其他语言)。" +
+            "重复 key 检查:系统会在写文件前自动按 values 译文比对目标模块(及跨模块索引)是否已有相同 key;命中时整批暂停让用户选「使用现有翻译 / 插入新翻译 / 取消」,用户选「使用现有」后系统会回读现有翻译让你检查是否需要 update_string 修缺漏。一次插入多个 key 时,任一命中都会让整批暂停。"
 
     private const val DESC_UPDATE_STRING =
         "精准修改指定 key 的部分语言翻译,只动 translations 中列出的语言,其他语言保持原样。" +
