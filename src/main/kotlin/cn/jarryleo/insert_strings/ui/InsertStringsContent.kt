@@ -81,7 +81,7 @@ internal fun InsertStringsContent(
     onStopChat: () -> Unit,
     onQuickSend: (String) -> Unit,
     onNewChat: () -> Unit,
-    onOptionClick: (Int, String) -> Unit,
+    onOptionClick: (Int, Int, String) -> Unit,
     onOpenContext: () -> Unit,
     onCloseContext: () -> Unit,
     showContextPopup: Boolean,

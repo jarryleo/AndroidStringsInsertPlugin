@@ -59,6 +59,18 @@ internal class InsertStringsChatDriver(
         val toolCallId: String
     )
 
+    private enum class DuplicateStringsChoice {
+        USE_EXISTING,
+        INSERT_NEW,
+        CANCEL
+    }
+
+    private val duplicateStringsOptions = listOf(
+        "使用现有翻译(可顺带检查/修正)",
+        "插入新的翻译",
+        "取消操作"
+    )
+
     // PendingSheetsInsert 已抽到顶层 PendingSheetsInsert.kt,
     // 以便 ChatStateHolder 接口(以及其它跨 controller 类型)可以安全引用。
 
@@ -173,7 +185,7 @@ internal class InsertStringsChatDriver(
      * 对话气泡选项按钮点击回调。
      * 优先级:待响应的 ask_user 工具调用 > 系统发起的重复 key 询问 > 兜底普通消息。
      */
-    fun onChatOptionClick(messageIndex: Int, option: String) {
+    fun onChatOptionClick(messageIndex: Int, optionIndex: Int, option: String) {
         // 清除该消息的 options 使按钮消失
         if (messageIndex in state.chatMessages.indices) {
             val msg = state.chatMessages[messageIndex]
@@ -208,7 +220,10 @@ internal class InsertStringsChatDriver(
         val pendingStrings = state.pendingStringsInsert
         if (pendingStrings != null) {
             state.pendingStringsInsert = null
-            resolveDuplicateStringsInsert(option, pendingStrings)
+            resolveDuplicateStringsInsert(
+                choice = duplicateStringsChoiceFromOptionIndex(optionIndex),
+                pending = pendingStrings
+            )
             return
         }
 
@@ -1518,9 +1533,9 @@ internal class InsertStringsChatDriver(
                         content = msg,
                         thinking = "",
                         options = listOf(
-                            "使用现有翻译(可顺带检查/修正)",
-                            "插入新的翻译",
-                            "取消操作"
+                            duplicateStringsOptions[0],
+                            duplicateStringsOptions[1],
+                            duplicateStringsOptions[2]
                         )
                     )
                 } else {
@@ -1528,11 +1543,7 @@ internal class InsertStringsChatDriver(
                         ChatMessage(
                             role = "assistant",
                             content = msg,
-                            options = listOf(
-                                "使用现有翻译(可顺带检查/修正)",
-                                "插入新的翻译",
-                                "取消操作"
-                            )
+                            options = duplicateStringsOptions
                         )
                     )
                 }
@@ -1739,9 +1750,20 @@ internal class InsertStringsChatDriver(
      *  - "插入新翻译":继续按原流程执行 insert_strings
      *  - "取消":为每个 pending tool_call 添加「用户已取消」tool result
      */
-    private fun resolveDuplicateStringsInsert(option: String, pending: PendingStringsInsert) {
-        when {
-            option.contains("使用现有") -> {
+    private fun duplicateStringsChoiceFromOptionIndex(index: Int): DuplicateStringsChoice =
+        when (index) {
+            0 -> DuplicateStringsChoice.USE_EXISTING
+            1 -> DuplicateStringsChoice.INSERT_NEW
+            2 -> DuplicateStringsChoice.CANCEL
+            else -> DuplicateStringsChoice.CANCEL
+        }
+
+    private fun resolveDuplicateStringsInsert(
+        choice: DuplicateStringsChoice,
+        pending: PendingStringsInsert
+    ) {
+        when (choice) {
+            DuplicateStringsChoice.USE_EXISTING -> {
                 state.chatSending = true
                 SwingUtilities.invokeLater {
                     val contextMgr = ContextManager.getInstance(project)
@@ -1806,7 +1828,7 @@ internal class InsertStringsChatDriver(
                     state.chatSending = false
                 }
             }
-            option.contains("插入新") -> {
+            DuplicateStringsChoice.INSERT_NEW -> {
                 // 按原计划继续 insert_strings:重新走 executeInsertActions 的后续流程。
                 // 简单地重新构造 entries 调用私有方法不便,改为:让用户再次发消息告诉 AI「忽略重复检查,继续插入」,
                 // 或者这里直接当作"无重复命中"重跑。这里采取最直接的做法:回退为重新走 driver 的继续流程,
@@ -1821,7 +1843,7 @@ internal class InsertStringsChatDriver(
                     skipDuplicateCheck = true,
                 )
             }
-            else -> {
+            DuplicateStringsChoice.CANCEL -> {
                 // 取消
                 SwingUtilities.invokeLater {
                     pending.actionToolCallIds.forEachIndexed { i, toolCallId ->
@@ -1876,7 +1898,7 @@ internal class InsertStringsChatDriver(
             val dup = stringsOps.checkDuplicateKeys(actions, targetModule)
             if (dup.isNotEmpty()) {
                 return resolveDuplicateStringsInsert(
-                    "取消",
+                    DuplicateStringsChoice.CANCEL,
                     PendingStringsInsert(
                         actions = actions,
                         actionToolCallIds = actionToolCallIds,

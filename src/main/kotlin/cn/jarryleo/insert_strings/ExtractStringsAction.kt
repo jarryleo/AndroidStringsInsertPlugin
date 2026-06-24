@@ -127,16 +127,27 @@ class ExtractStringsAction : AnAction() {
         val state = ExtractStringsChatHolder(
             project = project,
             onKeyInserted = { key ->
-                // AI 完成 insert_strings 后,弹回 EDT 替换选区
-                SwingUtilities.invokeLater {
-                    replaceSelection(
+                // AI 完成 insert_strings / 复用 existing key 后,立即回到编辑器替换硬编码文本。
+                val doReplace = {
+                    val replaced = replaceSelection(
                         editor = editor,
+                        project = project,
                         file = currentFile,
                         selectedText = selectedText,
                         selectionStart = selectionStart,
                         selectionEnd = selectionEnd,
                         key = key,
                     )
+                    if (replaced) {
+                        dialog.dispose()
+                    }
+                    replaced
+                }
+                if (SwingUtilities.isEventDispatchThread()) {
+                    doReplace()
+                } else {
+                    SwingUtilities.invokeLater { doReplace() }
+                    true
                 }
             },
         )
@@ -241,13 +252,14 @@ class ExtractStringsAction : AnAction() {
      */
     private fun replaceSelection(
         editor: Editor,
+        project: Project,
         file: VirtualFile?,
         selectedText: String,
         selectionStart: Int,
         selectionEnd: Int,
         key: String,
-    ) {
-        if (key.isBlank()) return
+    ): Boolean {
+        if (key.isBlank()) return false
         val document = editor.document
         val range = findReplacementRange(
             editor = editor,
@@ -260,18 +272,20 @@ class ExtractStringsAction : AnAction() {
                 "Extract strings.xml",
                 Messages.getWarningIcon()
             )
-            return
+            return false
         }
 
         val replacement = if (isLayoutXmlFile(file)) "@string/$key" else "R.string.$key"
 
-        WriteCommandAction.runWriteCommandAction(editor.project) {
+        var replaced = false
+        WriteCommandAction.runWriteCommandAction(project) {
             try {
                 document.replaceString(range.first, range.second, replacement)
                 editor.selectionModel.removeSelection()
                 val caret = range.first + replacement.length
                 editor.caretModel.moveToOffset(caret)
                 editor.scrollingModel.scrollToCaret(ScrollType.MAKE_VISIBLE)
+                replaced = true
             } catch (e: Exception) {
                 Messages.showMessageDialog(
                     "Failed to replace selection: ${e.message ?: "unknown"}",
@@ -280,6 +294,7 @@ class ExtractStringsAction : AnAction() {
                 )
             }
         }
+        return replaced
     }
 
     /**
@@ -444,7 +459,7 @@ class ExtractStringsAction : AnAction() {
  */
 private class ExtractStringsChatHolder(
     override val project: Project,
-    private val onKeyInserted: (String) -> Unit,
+    private val onKeyInserted: (String) -> Boolean,
 ) : ChatStateHolder {
     override val insertStringsManager: InsertStringsManager =
         InsertStringsManager.getInstance(project)
@@ -470,6 +485,7 @@ private class ExtractStringsChatHolder(
 
     private var toastLabel: JBLabel? = null
     private var toastTimer: Timer? = null
+    private var replacementTriggered: Boolean = false
 
     fun bindToastLabel(label: JBLabel) {
         toastLabel = label
@@ -489,6 +505,9 @@ private class ExtractStringsChatHolder(
     }
 
     override fun onInsertStringsInserted(key: String, module: String?) {
-        onKeyInserted(key)
+        if (replacementTriggered) return
+        if (onKeyInserted(key)) {
+            replacementTriggered = true
+        }
     }
 }

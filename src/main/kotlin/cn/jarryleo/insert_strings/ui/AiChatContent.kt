@@ -48,7 +48,7 @@ fun AiChatContent(
     onSendChat: () -> Unit,
     onStopChat: () -> Unit,
     onQuickSend: (String) -> Unit,
-    onOptionClick: (Int, String) -> Unit,
+    onOptionClick: (Int, Int, String) -> Unit,
     onOpenContext: () -> Unit,
     onCloseContext: () -> Unit,
     showContextPopup: Boolean,
@@ -121,7 +121,7 @@ private fun AiChatBody(
     onSendChat: () -> Unit,
     onStopChat: () -> Unit,
     onQuickSend: (String) -> Unit,
-    onOptionClick: (Int, String) -> Unit,
+    onOptionClick: (Int, Int, String) -> Unit,
     colors: IdeColors,
     showHeader: Boolean = true,
     showQuickPhrases: Boolean = true,
@@ -419,7 +419,7 @@ private fun SelectedKeysPanel(
 private fun ChatBubble(
     message: ChatMessage,
     messageIndex: Int,
-    onOptionClick: (Int, String) -> Unit,
+    onOptionClick: (Int, Int, String) -> Unit,
     chatSending: Boolean,
     colors: IdeColors,
     taskSummary: String? = null,
@@ -527,10 +527,10 @@ private fun ChatBubble(
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
                 verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
-                message.options.forEach { option ->
+                message.options.forEachIndexed { optionIndex, option ->
                     CompactButton(
                         text = option,
-                        onClick = { onOptionClick(messageIndex, option) },
+                        onClick = { onOptionClick(messageIndex, optionIndex, option) },
                         enabled = !chatSending,
                         colors = colors,
                         tone = classifyOptionTone(option),
