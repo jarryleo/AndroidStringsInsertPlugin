@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.ai.AiAction
 import cn.jarryleo.insert_strings.ai.AiSettingsService
 import cn.jarryleo.insert_strings.ai.ChatMessage
+import cn.jarryleo.insert_strings.ClipboardManager
 import cn.jarryleo.insert_strings.sheets.SheetsManager
 import cn.jarryleo.insert_strings.ui.*
 import cn.jarryleo.insert_strings.xml.ContextManager
@@ -137,6 +138,9 @@ class ExtractStringsAction : AnAction() {
             selectionStart = selectionStart,
             selectionEnd = selectionEnd,
         )
+        // 同时把选中文本作为引用内容传递给 chat,顶部以独立气泡展示,
+        // 替代旧版「自动以首条 user 消息发出『解释选中代码』」这种隐式行为。
+        state.quoteContent = selectedText.takeIf { it.isNotBlank() }
 
         val composePanel = ComposePanel()
         val (titleBar, toastLabel) = createTitleBar(dialog, "Extract strings.xml")
@@ -214,6 +218,14 @@ class ExtractStringsAction : AnAction() {
                     showQuickPhrases = false,
                     showEnterHint = false,
                     messageListContentPadding = PaddingValues(8.dp),
+                    // 把编辑器选区作为引用气泡展示在 chat 顶部。
+                    quoteContent = state.quoteContent,
+                    onQuoteDismiss = { state.quoteContent = null },
+                    // 引用面板的「复制」按钮:写系统剪贴板 + 标题栏 toast 反馈。
+                    onCopyQuote = { text ->
+                        ClipboardManager.setSysClipboardText(text)
+                        state.showToast("已复制到剪贴板")
+                    },
                 )
             }
         }
@@ -365,6 +377,9 @@ private class ExtractStringsChatHolder(
     // 由 ChatStateHolder.chatEntry 写入上下文让 AI 知道:在用户选「使用现有 key:」时
     // **必须**先调 replace_selection 把 editorSelection 选中的硬编码文本替换掉。
     override val chatEntry: String = "extractStrings"
+    // 入口打开时携带的「引用内容」:编辑器选中的硬编码文本会作为引用气泡展示在 chat 顶部,
+    // 替代旧版「自动以首条 user 消息发出『解释选中代码』」这种隐式行为。
+    override var quoteContent: String? = null
 
     @Volatile
     override var stopRequested: Boolean = false

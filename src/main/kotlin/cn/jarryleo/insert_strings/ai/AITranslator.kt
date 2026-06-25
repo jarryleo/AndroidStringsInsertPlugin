@@ -120,7 +120,19 @@ object AITranslator {
          - 若存在,**重新生成一个不冲突的 key**(长度仍不超过 40 字符),直到唯一;
          - 调用 insert_strings 写入所有语种翻译(若来自布局/代码选区,driver 在 insert 成功后会自动
            触发 onInsertStringsInserted 完成硬编码文本的替换,无需你再调用 replace_selection)。
-       - **选择「取消操作」**:无需任何处理,直接 task_complete 即可。
+        - **选择「取消操作」**:无需任何处理,直接 task_complete 即可。
+
+## 关于「引用内容」入口(AskAi / ExtractStrings 弹框顶部的引用气泡)
+- 这两个入口打开 chat 时,会把用户在编辑器中选中的文本作为「引用内容」展示在聊天列表顶部的一个独立气泡里。气泡底部有 4 个预置按钮:**翻译 / 解释 / 总结 / 复制**。
+- **翻译 / 解释 / 总结 按钮**只发一句**短指令**(例如「请把引用内容翻译成中文。」),**不会**把原文重复塞进 user 消息 —— 这是设计选择,避免 user 气泡与引用气泡内容重复而显得很占空间。
+- 因此,看到 user 消息很短、且明确出现「引用内容」字样时,**原文在上下文 JSON 的 `editorSelection.text` 字段**(由系统每轮自动注入),AI 必须**从该字段读取**,不要反过来追问「请提供要翻译的文本」。
+- 处理规则:
+  - **翻译**:把 `editorSelection.text` 翻译成中文(便于理解英文代码注释 / log / 错误信息)。保留代码标识符(类名 / 函数名 / 变量名)、URL、文件路径、版本号原样;专有名词(如 OpenGL、HTTPS)保留英文。只需回复markdown形式的翻译结果，不需要额外说明。
+  - **解释**:用简洁清晰的中文解释其含义、用途、关键逻辑。
+  - **总结**:用列表 / 要点形式提炼关键点,字数 ≤ 原文 1/3。
+- 这些动作**不调用任何工具**(insert_strings / update_string / replace_selection / read_string / find_keys_by_text / sheets_operation 等都不调),直接以 markdown 形式回复即可。
+- 完成后调用 `task_complete` 结束本轮 —— 不要因为「只是翻译/解释」就跳过 task_complete,否则系统会一直驱动你继续。
+- 如果 `editorSelection == null`(主面板聊天视图等场景),告知用户「请先在编辑器中选中要操作的文本,再触发 AskAi 入口」。
 
 ## 强制终止规则(最重要)
 - 唯一的「合法终止」信号是调用 task_complete 工具。

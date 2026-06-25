@@ -23,7 +23,6 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBLabel
@@ -96,6 +95,12 @@ class AskAiAction : AnAction() {
             selectionStart = selectionStart,
             selectionEnd = selectionEnd,
         )
+        // 把选中文本作为「引用内容」交给 chat 顶部以独立气泡展示,
+        // 不再像旧版那样自动以首条 user 消息发出"解释选中代码" —— 旧行为隐式且无法关闭。
+        // 用户在输入框自行决定如何向 AI 提问;如确需"解释选中",可在输入框中直接敲 "解释"。
+        if (selectedText.isNotBlank()) {
+            state.quoteContent = selectedText
+        }
 
         val composePanel = ComposePanel()
         val (titleBar, toastLabel) = createTitleBar(dialog, "Ask AI")
@@ -176,20 +181,24 @@ class AskAiAction : AnAction() {
                     showEnterHint = false,
                     // 消息列表用更紧凑的 padding,让气泡更靠近弹框边缘
                     messageListContentPadding = PaddingValues(8.dp),
+                    // 入口打开时携带的引用内容(编辑器选区)。非空时会在消息列表顶部
+                    // 居中显示一个可折叠的气泡,随着聊天列表一起滚动。
+                    quoteContent = state.quoteContent,
+                    onQuoteDismiss = {
+                        state.quoteContent = null
+                    },
+                    // 引用面板的「复制」按钮:把引用文本写入系统剪贴板 + 走 state.showToast
+                    // 在标题栏中央弹 1.8s 提示。ClipboardManager 是项目自带的跨平台
+                    // AWT 剪贴板封装(基于 java.awt.Toolkit),与现有 copy 行为一致。
+                    onCopyQuote = { text ->
+                        ClipboardManager.setSysClipboardText(text)
+                        state.showToast("已复制到剪贴板")
+                    },
                 )
             }
         }
 
         dialog.isVisible = true
-
-        // 复刻原行为:有选中文字时,把"解释选中代码"作为首条 user 消息自动发出
-        if (selectedText.isNotBlank()) {
-            val firstMessage =
-                "请分析并解释以下从编辑器中选中的代码或文本内容。请用简洁清晰的中文回答，重点说明其含义、用途和关键逻辑。\n\n```\n$selectedText\n```"
-            ApplicationManager.getApplication().executeOnPooledThread {
-                driver.sendChatMessage(firstMessage)
-            }
-        }
     }
 
     /**
@@ -316,9 +325,14 @@ private class AskAiChatHolder(
     override val chatMessages: SnapshotStateList<ChatMessage> = mutableStateListOf()
     override var chatInput: String by mutableStateOf("")
     override var chatSending: Boolean by mutableStateOf(false)
+
     // 当前 chat 入口标识 —— AskAi 弹框固定 "askAi",由 ChatStateHolder.chatEntry 写入上下文
     // 让 AI 知道入口类型,避免「使用现有 key」后跳过 replace_selection。
     override val chatEntry: String = "askAi"
+
+    // 入口打开时携带的「引用内容」:编辑器选中的文本会作为引用气泡展示在 chat 顶部
+    // (不再自动以首条 user 消息发出"解释选中代码"这种隐式 prompt)。
+    override var quoteContent: String? = null
 
     @Volatile
     override var stopRequested: Boolean = false
@@ -329,6 +343,7 @@ private class AskAiChatHolder(
     override var showContextPopup: Boolean by mutableStateOf(false)
     override var chatContextText: String by mutableStateOf("")
     override var editorSelection: EditorSelectionContext? = null
+
     @Volatile
     override var editorReplacementTriggered: Boolean = false
 

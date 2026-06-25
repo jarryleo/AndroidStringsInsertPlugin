@@ -167,6 +167,9 @@ internal class InsertStringsChatDriver(
         state.pendingSheetsInsert = null
         // 清掉 AITranslator 上挂的旧回调,避免下次新会话的 RetrySupport 还把提示塞到这条旧 chat
         AITranslator.onRetryListener = null
+        // 引用内容是一次性的入口上下文,新会话不应继续展示旧引用 —— 避免「New Topic」之后
+        // 旧编辑器选区还挂在聊天列表顶部,造成新对话中用户/AI 误把旧内容当作上下文。
+        state.quoteContent = null
     }
 
     /**

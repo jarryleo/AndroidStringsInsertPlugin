@@ -1,16 +1,7 @@
 package cn.jarryleo.insert_strings.ui
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -77,6 +68,26 @@ fun AiChatContent(
      * - 该列表会随着用户重新选 key 同步更新(由外部传入最新值即可)。
      */
     selectedKeys: List<String> = emptyList(),
+    /**
+     * 入口打开时携带的「引用内容」(例如 AskAi 入口捕获的编辑器选区)。
+     * - 非空时在消息列表顶部居中渲染一个独立气泡,默认折叠成 3 行,
+     *   点击标题 / 「展开」可显示全文,再次点击折叠。
+     * - 该气泡作为 LazyColumn 的第一项渲染,会随着聊天列表一起滚动,
+     *   而非固定在消息区顶部 —— 与用户预期的"引用"语义一致。
+     * - 通过 [onQuoteDismiss] 可移除(把状态置 null),引用消失且不再随列表滚动出现。
+     */
+    quoteContent: String? = null,
+    /**
+     * 引用气泡的关闭回调。引用面板右上的「×」被点击时触发。
+     * 不传则不渲染关闭按钮(主面板 / 永久引用场景)。
+     */
+    onQuoteDismiss: (() -> Unit)? = null,
+    /**
+     * 引用气泡的「复制」按钮回调:把引用文本写入系统剪贴板 + 弹 toast 反馈。
+     * 不传则不渲染复制按钮(无 toast 反馈的场景)。
+     * 翻译/解释/总结三个按钮走 [onQuickSend],不再额外加回调。
+     */
+    onCopyQuote: ((String) -> Unit)? = null,
 ) {
     Box(modifier = modifier) {
         AiChatBody(
@@ -98,6 +109,9 @@ fun AiChatContent(
             showEnterHint = showEnterHint,
             messageListContentPadding = messageListContentPadding,
             selectedKeys = selectedKeys,
+            quoteContent = quoteContent,
+            onQuoteDismiss = onQuoteDismiss,
+            onCopyQuote = onCopyQuote,
         )
         if (showContextPopup) {
             ContextPopupOverlay(
@@ -129,7 +143,11 @@ private fun AiChatBody(
     showEnterHint: Boolean = true,
     messageListContentPadding: PaddingValues = PaddingValues(8.dp),
     selectedKeys: List<String> = emptyList(),
+    quoteContent: String? = null,
+    onQuoteDismiss: (() -> Unit)? = null,
+    onCopyQuote: ((String) -> Unit)? = null,
 ) {
+    val quotedContentState = remember { mutableStateOf(quoteContent) }
     val listState = rememberLazyListState()
     val renderItems = buildChatRenderItems(chatMessages)
     // 新消息加入时滚到末尾(用户期待看到刚发的内容)
@@ -205,7 +223,11 @@ private fun AiChatBody(
                 .border(BorderStroke(1.dp, colors.border), RoundedCornerShape(4.dp))
                 .background(colors.tableBackground, RoundedCornerShape(4.dp))
         ) {
-            if (chatMessages.isEmpty()) {
+            // 注意:即便 chatMessages 为空,只要 quoteContent 非空,也要把引用气泡渲染出来,
+            // 这样 AskAi 弹框打开后用户能立刻看到「我选中的内容」作为视觉锚。
+            // 引用作为 LazyColumn 的第一项,可以随着后续消息插入一起被滚走,
+            // 也符合"气泡"的语义(不应该固定在顶部像工具栏一样)。
+            if (chatMessages.isEmpty() && quotedContentState.value.isNullOrBlank()) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center,
@@ -223,6 +245,24 @@ private fun AiChatBody(
                     contentPadding = messageListContentPadding,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    // 引用气泡:作为列表的第一项,默认折叠成 3 行,可展开/收起,
+                    // 并随消息列表一起滚动。外观类似 user 消息气泡但居中、且字号略小,
+                    // 避免和真正的 user 消息混淆。
+                    if (!quotedContentState.value.isNullOrBlank()) {
+                        item(key = "quote") {
+                            QuoteBubble(
+                                text = quotedContentState.value ?: "",
+                                onDismiss = {
+                                    quotedContentState.value = null
+                                    onQuoteDismiss?.invoke()
+                                },
+                                onCopy = onCopyQuote,
+                                onQuickSend = onQuickSend,
+                                chatSending = chatSending,
+                                colors = colors,
+                            )
+                        }
+                    }
                     itemsIndexed(renderItems) { _, item ->
                         when (item) {
                             is ChatRenderItem.Message -> {
@@ -234,6 +274,7 @@ private fun AiChatBody(
                                     colors = colors,
                                 )
                             }
+
                             is ChatRenderItem.ToolGroup -> {
                                 ToolGroupBubble(
                                     messages = item.messages,
@@ -415,6 +456,230 @@ private fun SelectedKeysPanel(
     }
 }
 
+/**
+ * 引用气泡:AskAi / ExtractStrings 入口打开 chat 时携带的"上下文内容"
+ * (例如编辑器选中的文本)以一个独立气泡形式展示在消息列表顶部。
+ *
+ * 视觉与交互:
+ *  - 居中气泡(不像 user 消息靠右,也不像 assistant 靠左),宽度约 70% 列表宽,
+ *    最大不超过 480dp,呼应"引用"的视觉语义。
+ *  - 颜色用 `colors.fieldBackground` + `colors.border` 描边 —— 与助手气泡底色一致,
+ *    但顶部增加一个引用图标 + 「引用内容」小标签,告诉用户这是入口带进来的,
+ *    不是来自 AI 也不是用户输入的对话。
+ *  - 折叠态:固定 3 行(可纵向滚动查看更多),右侧有「展开 ▾」按钮;
+ *    展开态:无高度限制,内容按 markdown 渲染;再次点击「折叠 ▴」收回到 3 行。
+ *  - 列表右侧的「×」是可选的关闭按钮(由 [onQuoteDismiss] 启用),不传则不渲染。
+ *  - 内容走 [MarkdownContent] 渲染,意味着选中代码块、行内 code 等都能正确着色,
+ *    并且用 `bubbleColor` 让 inline code / fenced code 与气泡底色协调(不再白底白字)。
+ *  - 引用面板底部 4 个预置按钮(翻译/解释/总结/复制):
+ *      * 翻译 / 解释 / 总结 走 [onQuickSend],由 [QuoteActions.buildPrompt] 把选区
+ *        包成 user 消息发给 AI(显式禁止 AI 调任何工具,避免误触发 insert_strings);
+ *      * 复制 走 [onCopy],由调用方处理剪贴板 + toast 反馈;
+ *      * AI 正在生成(chatSending=true)时所有按钮禁用,避免触发竞态。
+ *      * 复制按钮不传 [onCopy] 时不渲染(例如主面板没接剪贴板回调的场景)。
+ */
+@Composable
+private fun QuoteBubble(
+    text: String,
+    onDismiss: (() -> Unit)?,
+    onCopy: ((String) -> Unit)?,
+    onQuickSend: (String) -> Unit,
+    chatSending: Boolean,
+    colors: IdeColors,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val bubbleColor = colors.fieldBackground
+    val bubbleTextColor = colors.text
+    val bubbleColors = colors.copy(text = bubbleTextColor, secondaryText = colors.secondaryText)
+    // 折叠 3 行时,单行高度 ~ 16sp(lineHeight) = 16dp,加 padding 12dp ≈ 60dp;
+    // 留点 padding 余量取 64dp。再长则内部 LazyColumn 滚动。
+    val collapsedHeight = 64.dp
+    // 不再 wrap 在 CenterHorizontally 里 —— 让气泡左对齐 (Alignment.Start) 贴向消息列表
+    // 的左侧,与助手气泡 (ChatBubble) 的贴边位置一致;消息列表自身的 contentPadding
+    // (8.dp) 即为「贴边间距」。这样引用与左右两侧的真气泡视觉一致,不再悬空居中。
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(bubbleColor, RoundedCornerShape(12.dp))
+                .border(BorderStroke(1.dp, colors.border), RoundedCornerShape(12.dp))
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                // 头部:左侧 ❝ + 引用内容 标题 + ▾ 折叠指示(整段点击切换展开) + 右侧 × 关闭按钮。
+                //
+                // 关键 —— 改用 Box 叠加而不是 Row 拼接:
+                // 旧版用 Row(weight 标题 + Box ×)实现"标题占满、× 贴右",但 Compose Desktop
+                // 实际表现是标题的 clickable 会**吞掉** × 区域的点击事件,导致关闭按钮无效。
+                // 这里改用 Box + Alignment 叠加:
+                //  - 标题段(❝ + 引用内容 + ▾)以 CenterStart 摆左,自带 clickable 切换展开;
+                //  - × 按钮以 CenterEnd 摆右,独立的 clickable 调用 onDismiss();
+                //  - 两个 clickable 分别绑在 Box 的两个子节点上,父级 Box 不参与命中,
+                //    从根本上消除"父级 clickable 拦截子级"的隐患。
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 24.dp),
+                ) {
+                    // 标题段:左对齐 + 自带 padding 让命中区域略大于文字,手感更稳。
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                            ) { expanded = !expanded }
+                            .padding(vertical = 2.dp, horizontal = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            // 引用图标
+                            text = "❝",
+                            color = colors.accent,
+                            style = compactTextStyle(colors.accent).copy(fontWeight = FontWeight.Bold),
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "引用内容",
+                            color = colors.secondaryText,
+                            style = compactTextStyle(colors.secondaryText),
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (expanded) "▴" else "▾",
+                            color = colors.secondaryText,
+                            style = compactTextStyle(colors.secondaryText),
+                        )
+                    }
+                    if (onDismiss != null) {
+                        // × 按钮:右对齐,独立 Box,独立 clickable。
+                        // 关键:这里不能再嵌套到任何带 clickable 的父节点里 —— Box 的
+                        // clickable 是命中这个 20dp 方块的唯一入口,父级 Box 不参与
+                        // 命中,自然不会被标题的 clickable 拦截。
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .size(20.dp)
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                ) { onDismiss() },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "×",
+                                color = colors.secondaryText,
+                                style = compactTextStyle(colors.secondaryText).copy(fontWeight = FontWeight.Bold),
+                            )
+                        }
+                    }
+                }
+                // 内容:折叠时套一个高度受限的 verticalScroll,展开时直接渲染。
+                // 折叠态使用 scrollable Column 而不是 LazyColumn 是为了避免和父级 LazyColumn
+                // 嵌套(虽然 Compose 支持,但 LazyColumn 嵌套会强制父级 "fill viewport" 行为,
+                // 引发整列被滚动锁定的体验问题)。
+                if (expanded) {
+                    SelectionContainer {
+                        MarkdownContent(
+                            markdown = text,
+                            colors = bubbleColors,
+                            bubbleColor = bubbleColor,
+                        )
+                    }
+                } else {
+                    val scrollState = rememberScrollState()
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = collapsedHeight)
+                            .verticalScroll(scrollState),
+                    ) {
+                        SelectionContainer {
+                            MarkdownContent(
+                                markdown = text,
+                                colors = bubbleColors,
+                                bubbleColor = bubbleColor,
+                            )
+                        }
+                    }
+                }
+                // 底部:4 个预置功能按钮(翻译/解释/总结/复制)。
+                // - 用 FlowRow 是为了在窄宽度场景下按钮换行,而不是被裁切。
+                // - 翻译/解释/总结 走 onQuickSend -> sendChatMessage,
+                //   会以"user"角色把 QuoteActions.buildPrompt 包装后的内容塞进对话。
+                // - 复制 走 onCopy,由调用方决定写剪贴板 + toast 的具体实现。
+                QuoteActionBar(
+                    quotedText = text,
+                    onQuickSend = onQuickSend,
+                    onCopy = onCopy,
+                    enabled = !chatSending,
+                    colors = colors,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 引用面板底部的预置功能按钮行(翻译 / 解释 / 总结 / 复制)。
+ *
+ *  - 4 个按钮共用 [CompactButton] 风格,**使用 NEUTRAL tone**(沿用 IDE 主题的常规按钮
+ *    配色),不染色 —— 保持引用面板视觉简洁,与气泡内的"操作型"按钮风格统一。
+ *  - 按钮宽度按 label 自适应(`wrapContentWidth`),4 个按钮总宽约 200~240dp,
+ *    在贴边布局的引用气泡中一行排得下,窄屏(弹框)FlowRow 自动换行,不影响。
+ *  - [enabled]=false 时由 CompactButton 自动用次要色渲染,给出"不可点"的视觉反馈。
+ *  - 翻译/解释/总结按钮的 onClick 会用 [QuoteActions.buildPrompt] 把 [quotedText]
+ *    包成 user 消息,经 [onQuickSend] 走 sendChatMessage 把消息塞进 chatMessages
+ *    并触发一轮 AI 调用。
+ *  - 复制按钮的 onClick 直接把 [quotedText] 透传给 [onCopy],由调用方实现
+ *    写剪贴板 + toast 反馈等具体逻辑。
+ */
+@Composable
+private fun QuoteActionBar(
+    quotedText: String,
+    onQuickSend: (String) -> Unit,
+    onCopy: ((String) -> Unit)?,
+    enabled: Boolean,
+    colors: IdeColors,
+) {
+    val buttons = remember(onCopy) {
+        // 复制按钮只在提供了 onCopy 回调时才显示,避免出现"点了没反应"的空气泡。
+        if (onCopy == null) {
+            QuoteActions.all.filter { it != QuoteActions.Kind.COPY }
+        } else {
+            QuoteActions.all
+        }
+    }
+    FlowRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        buttons.forEach { kind ->
+            CompactButton(
+                text = kind.label,
+                onClick = {
+                    when (kind) {
+                        QuoteActions.Kind.COPY -> onCopy?.invoke(quotedText)
+                        else -> onQuickSend(QuoteActions.buildPrompt(kind, quotedText))
+                    }
+                },
+                modifier = Modifier.wrapContentWidth().padding(horizontal = 5.dp),
+                colors = colors,
+                enabled = enabled,
+                tone = ButtonTone.NEUTRAL,
+            )
+        }
+    }
+}
+
 @Composable
 private fun ChatBubble(
     message: ChatMessage,
@@ -433,6 +698,10 @@ private fun ChatBubble(
     } else {
         Modifier.border(width = 1.dp, color = colors.border, RoundedCornerShape(12.dp))
     }
+    // 用户气泡底色是品牌色(蓝),默认 `colors.text`(深灰)在上面读不清;
+    // 助手气泡底色是 fieldBackground(白/近白),保持深色文字。
+    val bubbleTextColor = if (isUser) colors.accentText else colors.text
+    val bubbleColors = colors.copy(text = bubbleTextColor, secondaryText = bubbleTextColor)
     Column(
         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
     ) {
@@ -463,7 +732,7 @@ private fun ChatBubble(
             //  - 流式结束后若 thinking 为空(模型没产生思考文本),整个 Thinking 区消失,
             //    只留下 content 回复区(简洁,不强行造占位)。
             val showThinkingHeader = !isUser &&
-                (message.streaming || message.thinking.isNotBlank())
+                    (message.streaming || message.thinking.isNotBlank())
             val showThinkingBox = !isUser && message.thinking.isNotBlank()
             val showReply = !isUser && message.content.isNotBlank()
             val showUserContent = isUser && message.content.isNotBlank()
@@ -503,14 +772,16 @@ private fun ChatBubble(
                                 SelectionContainer {
                                     MarkdownContent(
                                         markdown = message.content,
-                                        colors = colors,
+                                        colors = bubbleColors,
+                                        bubbleColor = bubbleColor,
                                     )
                                 }
                             } else if (showUserContent) {
                                 SelectionContainer {
                                     MarkdownContent(
                                         markdown = message.content,
-                                        colors = colors,
+                                        colors = bubbleColors,
+                                        bubbleColor = bubbleColor,
                                     )
                                 }
                             }
@@ -1013,12 +1284,14 @@ private fun buildToolDisplaySummary(
     val success = when {
         content.contains("状态:成功") -> true
         content.contains("状态:失败") ||
-            content.contains("状态:解析失败") ||
-            content.contains("[工具执行异常]") ||
-            content.contains("[工具文档加载失败]") -> false
+                content.contains("状态:解析失败") ||
+                content.contains("[工具执行异常]") ||
+                content.contains("[工具文档加载失败]") -> false
+
         content.contains("状态:已跳过") ||
-            content.contains("[用户取消]") ||
-            content.contains("[已取消]") -> null
+                content.contains("[用户取消]") ||
+                content.contains("[已取消]") -> null
+
         else -> null
     }
     val statusLabel = when (success) {
@@ -1065,11 +1338,14 @@ private fun targetFromArgs(toolName: String, args: JsonObject?): String? {
     return when (toolName) {
         "insert_strings", "update_string", "delete_string", "read_string" ->
             args.getString("name")?.let { "key:$it${moduleSuffix()}" }
+
         "query_keys" ->
             args.getString("pattern")?.let { "pattern:$it${moduleSuffix()}" }
                 ?: args.getString("module")?.let { "module:$it" }
+
         "find_keys_by_text" ->
             args.getString("text")?.let { "text:${truncateText(it, 36)}" }
+
         "sheets_operation" -> {
             val sheet = args.getString("sheetName")?.let { "sheet:$it" }
             val range = args.getString("range")?.let { "range:$it" }
@@ -1078,20 +1354,28 @@ private fun targetFromArgs(toolName: String, args: JsonObject?): String? {
             val col = args.getString("columnIndex")?.let { "col:$it" }
             listOfNotNull(sheet, range, key, row, col).joinToString(" ").takeIf { it.isNotBlank() }
         }
+
         "find_rows_by_text" ->
             args.getString("text")?.let { "text:${truncateText(it, 36)}" }
+
         "read_file", "edit_file", "create_file" ->
             args.getString("path")?.let { "path:${truncateText(it, 48)}" }
+
         "search_in_files" ->
             args.getString("pattern")?.let { "pattern:${truncateText(it, 36)}" }
+
         "find_references" ->
             args.getString("symbol")?.let { "symbol:$it" }
+
         "list_files" ->
             args.getString("relativeDir")?.let { "dir:$it" }
+
         "load_tool_doc" ->
             args.getString("tool")?.let { "doc:$it" }
+
         "ask_user" ->
             args.getString("question")?.let { "question:${truncateText(it, 36)}" }
+
         else -> null
     }
 }

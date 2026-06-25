@@ -81,6 +81,22 @@ internal interface ChatStateHolder {
     val chatEntry: String
 
     /**
+     * 入口打开时携带的「引用内容」,由 chat 顶部以一个独立气泡展示给用户
+     * (默认折叠成 3 行,可点击展开,会随着消息列表一起滚动)。
+     *
+     * 典型用途:
+     *  - AskAi:用户在编辑器中选中的文本,不再自动以首条 user 消息发出,而是展示为引用,
+     *    由用户自行在输入框中决定如何提问(避免「不管三七二十一先问 AI 解释选中文字」的隐式行为)。
+     *  - ExtractStrings:被提取的硬编码文本。
+     *
+     * 实现要求:
+     *  - 引用内容必须支持清空(`newChat` / `close` 时由实现自行决定是否清空,
+     *    建议始终清空以避免污染下一次对话)。
+     *  - 实现必须保证跨线程可见(引用由 EDT 写入,UI 由 Compose 在 EDT 读取即可)。
+     */
+    var quoteContent: String?
+
+    /**
      * 标记「编辑器选区已被替换为对 key 的引用」,防止 insert_strings 触发的自动替换与
      * AI 后续显式调用 [AiAction.ReplaceSelection] 工具时发生双重替换。
      *

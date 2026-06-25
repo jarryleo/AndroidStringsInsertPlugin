@@ -6,6 +6,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.awt.ComposePanel
+import cn.jarryleo.insert_strings.ClipboardManager
 import cn.jarryleo.insert_strings.InsertStringsManager
 import cn.jarryleo.insert_strings.UiCallback
 import cn.jarryleo.insert_strings.ai.AiProvider
@@ -136,6 +137,8 @@ class InsertStringsUI(
     override var editorSelection: EditorSelectionContext? = null
     // 当前 chat 入口标识 —— 主面板固定 "mainPanel",见 ChatStateHolder.chatEntry 注释。
     override val chatEntry: String = "mainPanel"
+    // 主面板聊天视图无引用内容(无编辑器上下文),始终为 null。
+    override var quoteContent: String? = null
 
     /**
      * 「重复 key 插入」二次确认时持有的状态。
@@ -241,6 +244,14 @@ class InsertStringsUI(
                     // 用户在 strings.xml 中重新选 key 时,updateUI 会重建 keyEntries,
                     // 派生出的 selectedKeys 自动同步到聊天 UI。
                     selectedKeys = keyEntries.map { it.key },
+                    // 主面板聊天视图无引用内容,固定传 null。
+                    quoteContent = quoteContent,
+                    onQuoteDismiss = { quoteContent = null },
+                    // 主面板聊天视图无引用,实际不会触发;保留回调以保证签名一致 + 未来扩展。
+                    onCopyQuote = { text ->
+                        ClipboardManager.setSysClipboardText(text)
+                        showToast("已复制到剪贴板")
+                    },
                 )
             }
         }

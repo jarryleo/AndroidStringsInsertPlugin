@@ -98,6 +98,17 @@ internal fun InsertStringsContent(
      * 由父组件从 keyEntries 派生(随用户重新选 key 同步更新)。
      */
     selectedKeys: List<String> = emptyList(),
+    /**
+     * 入口携带的「引用内容」,聊天面板顶部以独立气泡展示。
+     * 主面板聊天视图始终传 null(无编辑器上下文);AskAi/ExtractStrings 弹框会传入选区文本。
+     */
+    quoteContent: String? = null,
+    onQuoteDismiss: (() -> Unit)? = null,
+    /**
+     * 引用面板「复制」按钮回调:由调用方写剪贴板 + 弹 toast。
+     * 主面板 / 弹框都需要,统一透传。
+     */
+    onCopyQuote: ((String) -> Unit)? = null,
 ) {
     val colors = rememberIdeColors()
 
@@ -175,6 +186,9 @@ internal fun InsertStringsContent(
                         chatContextText = chatContextText,
                         quickPhrases = phrases,
                         selectedKeys = selectedKeys,
+                        quoteContent = quoteContent,
+                        onQuoteDismiss = onQuoteDismiss,
+                        onCopyQuote = onCopyQuote,
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )

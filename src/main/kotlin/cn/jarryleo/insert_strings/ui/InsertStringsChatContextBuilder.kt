@@ -61,6 +61,10 @@ internal class InsertStringsChatContextBuilder(
             // AI「自行判断」的不可靠逻辑。AI 在收到「使用现有 key」选项时,**直接看
             // editorSelection 是否为 null**:非 null 表示有硬编码文本待替换,必须先
             // replace_selection 才能继续。
+            //
+            // 同时也是引用面板「翻译 / 解释 / 总结」按钮的**唯一文本来源**:这些按钮
+            // 不再把原文塞进 user 消息(避免与顶部引用气泡重复),AI 必须从这里的
+            // `text` 字段读取原文,详见 system prompt 中「关于「引用内容」入口」一节。
             if (editorSel != null) {
                 add("editorSelection", JsonObject().apply {
                     addProperty("text", editorSel.selectedText)
@@ -70,9 +74,12 @@ internal class InsertStringsChatContextBuilder(
                     addProperty(
                         "note",
                         "用户在 chat 入口打开时从编辑器中选中的硬编码文本。" +
-                            "如果当前任务是「插入翻译」且 chatEntry=extractStrings/askAi," +
-                            "AI 应把这段文本视为待翻译的原文,并在用户选「使用现有 key:<key>」时" +
-                            "**必须**先调 replace_selection(key=<key>) 把这段选区替换为对 key 的引用。"
+                            "**两个用途**:" +
+                            "(1) 插入翻译流程:若 chatEntry=extractStrings/askAi 且任务为「插入翻译」," +
+                            "AI 应把这段文本视为待翻译的原文,在用户选「使用现有 key:<key>」时" +
+                            "**必须**先调 replace_selection(key=<key>) 把这段选区替换为对 key 的引用。" +
+                            "(2) 引用面板快捷操作:用户点引用条目的「翻译 / 解释 / 总结」按钮时," +
+                            "按钮只发短指令(不重复带原文),AI 必须从本字段的 `text` 拿到原文,直接返回结果,不要调任何工具。"
                     )
                 })
             } else {

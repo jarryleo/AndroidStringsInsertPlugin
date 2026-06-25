@@ -9,6 +9,8 @@ import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -38,7 +40,18 @@ fun MarkdownContent(
     markdown: String,
     colors: IdeColors,
     modifier: Modifier = Modifier,
+    /**
+     * 承载 markdown 的气泡背景色。
+     *  - 助手气泡(深色 fieldBackground):blockquote / 行内 code 的"块底色"需要叠
+     *    一层半透明暗色才能与气泡拉开层次;
+     *  - 用户气泡(accent):行内 code 需要叠一层亮色压暗以保持可读;
+     *  - 默认(无气泡,引用气泡等):传 null,内部回退到 colors.fieldBackground。
+     * 用 null / Color.Unspecified 表示"无气泡主题",由调用方决定。
+     */
+    bubbleColor: Color? = null,
 ) {
+    val effectiveBubble = bubbleColor ?: colors.fieldBackground
+    val palette = MarkdownPalette.from(colors, effectiveBubble)
     val document = remember(markdown) { markdownParser.parse(markdown) }
     val uriHandler = LocalUriHandler.current
 
@@ -48,16 +61,79 @@ fun MarkdownContent(
     ) {
         var child = document.firstChild
         while (child != null) {
-            renderBlock(child, colors, uriHandler::openUri)
+            renderBlock(child, palette, uriHandler::openUri)
             child = child.next
         }
     }
 }
 
+/**
+ * Markdown 渲染所需的色板:把 IDE 主题色 + 气泡底色组合成
+ *  - codeBlockBackground / codeBlockBorder:围栏代码块底色 + 描边
+ *  - inlineCodeBackground:行内 code 底色(在气泡之上叠半透明)
+ *
+ * 关键约束:行内 code 的底色必须**与气泡底色**形成层次,而**不能简单沿用
+ * `colors.fieldBackground`** —— 用户气泡(accent)是品牌色,直接套 fieldBackground
+ * (白/近白)会形成"白底白字"的刺眼对比;助手气泡(fieldBackground)再叠一层
+ * fieldBackground 也看不出块底,导致行内 code 与正文无层次。
+ * 解决:在 bubbleColor 之上叠一层 alpha,顺势与气泡同色系(亮气泡压暗,暗气泡提亮)。
+ */
+private data class MarkdownPalette(
+    val text: Color,
+    val secondaryText: Color,
+    val accent: Color,
+    val fieldBorder: Color,
+    val codeBlockBackground: Color,
+    val codeBlockBorder: Color,
+    val inlineCodeBackground: Color,
+    val blockquoteBar: Color,
+) {
+    companion object {
+        fun from(colors: IdeColors, bubbleColor: Color): MarkdownPalette {
+            val isLight = bubbleColor.luminance() > 0.5f
+            // 行内 code:在气泡色上叠 alpha,与气泡同色系但拉出层次。
+            // 亮气泡 -> 压暗(黑 ~ 18% alpha);暗气泡 -> 提亮(白 ~ 22% alpha)。
+            val inlineCodeBg = if (isLight) {
+                Color.Black.copy(alpha = 0.14f).compositeOver(bubbleColor)
+            } else {
+                Color.White.copy(alpha = 0.22f).compositeOver(bubbleColor)
+            }
+            // 围栏代码块:背景进一步压/提,加 1dp 描边,与气泡视觉上明确分离。
+            val codeBlockBg = if (isLight) {
+                Color.Black.copy(alpha = 0.06f).compositeOver(bubbleColor)
+            } else {
+                Color.Black.copy(alpha = 0.32f).compositeOver(bubbleColor)
+            }
+            return MarkdownPalette(
+                text = colors.text,
+                secondaryText = colors.secondaryText,
+                accent = colors.accent,
+                fieldBorder = colors.fieldBorder,
+                codeBlockBackground = codeBlockBg,
+                codeBlockBorder = colors.fieldBorder,
+                inlineCodeBackground = inlineCodeBg,
+                blockquoteBar = colors.accent,
+            )
+        }
+    }
+}
+
+/**
+ * 把 [overlay] 以 src-over 合成在 [base] 之上,得到一个不透明的 Color。
+ * 比 `Color.copy(alpha = ...)` 直接覆盖 alpha 更准(后者忽略背景)。
+ */
+private fun Color.compositeOver(base: Color): Color {
+    val a = this.alpha
+    val r = this.red * a + base.red * (1f - a)
+    val g = this.green * a + base.green * (1f - a)
+    val b = this.blue * a + base.blue * (1f - a)
+    return Color(r.coerceIn(0f, 1f), g.coerceIn(0f, 1f), b.coerceIn(0f, 1f), 1f)
+}
+
 @Composable
 private fun renderBlock(
     node: Node,
-    colors: IdeColors,
+    palette: MarkdownPalette,
     openUri: (String) -> Unit,
 ) {
     when (node) {
@@ -72,7 +148,7 @@ private fun renderBlock(
             }
             Text(
                 text = collectInlineText(node),
-                color = colors.text,
+                color = palette.text,
                 fontSize = fontSize,
                 fontWeight = FontWeight.Bold,
                 lineHeight = (fontSize.value + 6).sp,
@@ -80,7 +156,7 @@ private fun renderBlock(
         }
 
         is Paragraph -> {
-            val annotated = buildInlineAnnotated(node, colors, openUri)
+            val annotated = buildInlineAnnotated(node, palette, openUri)
             if (annotated.getStringAnnotations("URL", 0, annotated.length).isNotEmpty()) {
                 ClickableText(
                     text = annotated,
@@ -88,12 +164,12 @@ private fun renderBlock(
                         annotated.getStringAnnotations("URL", offset, offset)
                             .firstOrNull()?.let { openUri(it.item) }
                     },
-                    style = compactTextStyle(colors.text),
+                    style = compactTextStyle(palette.text),
                 )
             } else {
                 Text(
                     text = annotated,
-                    style = compactTextStyle(colors.text),
+                    style = compactTextStyle(palette.text),
                 )
             }
         }
@@ -107,13 +183,13 @@ private fun renderBlock(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(colors.fieldBackground, RoundedCornerShape(4.dp))
-                    .border(1.dp, colors.fieldBorder, RoundedCornerShape(4.dp))
+                    .background(palette.codeBlockBackground, RoundedCornerShape(4.dp))
+                    .border(1.dp, palette.codeBlockBorder, RoundedCornerShape(4.dp))
                     .padding(horizontal = 8.dp, vertical = 6.dp)
             ) {
                 Text(
                     text = code.trimEnd('\n'),
-                    color = colors.text,
+                    color = palette.text,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
                     lineHeight = 16.sp,
@@ -126,7 +202,7 @@ private fun renderBlock(
             var index = 0
             while (item != null) {
                 if (item is ListItem) {
-                    renderListItem(item, colors, "•", openUri)
+                    renderListItem(item, palette, "•", openUri)
                     index++
                 }
                 item = item.next
@@ -138,7 +214,7 @@ private fun renderBlock(
             var index = node.startNumber
             while (item != null) {
                 if (item is ListItem) {
-                    renderListItem(item, colors, "$index.", openUri)
+                    renderListItem(item, palette, "$index.", openUri)
                     index++
                 }
                 item = item.next
@@ -151,7 +227,7 @@ private fun renderBlock(
                     modifier = Modifier
                         .width(3.dp)
                         .height(IntrinsicSize.Min)
-                        .background(colors.accent)
+                        .background(palette.blockquoteBar)
                 )
                 Column(
                     modifier = Modifier.padding(start = 8.dp),
@@ -159,7 +235,7 @@ private fun renderBlock(
                 ) {
                     var child = node.firstChild
                     while (child != null) {
-                        renderBlock(child, colors, openUri)
+                        renderBlock(child, palette, openUri)
                         child = child.next
                     }
                 }
@@ -172,18 +248,18 @@ private fun renderBlock(
                     .fillMaxWidth()
                     .padding(vertical = 4.dp)
                     .height(1.dp)
-                    .background(colors.border)
+                    .background(palette.fieldBorder)
             )
         }
 
         is TableBlock -> {
-            renderTable(node, colors, openUri)
+            renderTable(node, palette, openUri)
         }
 
         is HtmlBlock -> {
             Text(
                 text = node.literal.orEmpty().trim(),
-                color = colors.secondaryText,
+                color = palette.secondaryText,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 11.sp,
             )
@@ -192,7 +268,7 @@ private fun renderBlock(
         else -> {
             var child = node.firstChild
             while (child != null) {
-                renderBlock(child, colors, openUri)
+                renderBlock(child, palette, openUri)
                 child = child.next
             }
         }
@@ -202,7 +278,7 @@ private fun renderBlock(
 @Composable
 private fun renderListItem(
     item: ListItem,
-    colors: IdeColors,
+    palette: MarkdownPalette,
     prefix: String,
     openUri: (String) -> Unit,
 ) {
@@ -212,13 +288,13 @@ private fun renderListItem(
     ) {
         Text(
             text = prefix,
-            color = colors.text,
-            style = compactTextStyle(colors.text),
+            color = palette.text,
+            style = compactTextStyle(palette.text),
         )
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             var child = item.firstChild
             while (child != null) {
-                renderBlock(child, colors, openUri)
+                renderBlock(child, palette, openUri)
                 child = child.next
             }
         }
@@ -228,7 +304,7 @@ private fun renderListItem(
 @Composable
 private fun renderTable(
     tableBlock: TableBlock,
-    colors: IdeColors,
+    palette: MarkdownPalette,
     openUri: (String) -> Unit,
 ) {
     val headerCells = mutableListOf<String>()
@@ -274,21 +350,21 @@ private fun renderTable(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, colors.border, RoundedCornerShape(4.dp))
+            .border(1.dp, palette.fieldBorder, RoundedCornerShape(4.dp))
     ) {
         if (headerCells.isNotEmpty()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(colors.headerBackground)
+                    .background(palette.codeBlockBackground)
                     .padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
                 headerCells.forEachIndexed { i, text ->
                     Text(
                         text = text,
-                        color = colors.text,
+                        color = palette.text,
                         fontWeight = FontWeight.Bold,
-                        style = compactTextStyle(colors.text),
+                        style = compactTextStyle(palette.text),
                         modifier = if (i < headerCells.size - 1) Modifier.weight(1f) else Modifier,
                     )
                 }
@@ -297,7 +373,7 @@ private fun renderTable(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(1.dp)
-                    .background(colors.border)
+                    .background(palette.fieldBorder)
             )
         }
         bodyRows.forEach { row ->
@@ -309,8 +385,8 @@ private fun renderTable(
                 row.forEachIndexed { i, text ->
                     Text(
                         text = text,
-                        color = colors.text,
-                        style = compactTextStyle(colors.text),
+                        color = palette.text,
+                        style = compactTextStyle(palette.text),
                         modifier = if (i < row.size - 1) Modifier.weight(1f) else Modifier,
                     )
                 }
@@ -340,13 +416,13 @@ private fun collectInlineText(node: Node): String {
 
 private fun buildInlineAnnotated(
     node: Node,
-    colors: IdeColors,
+    palette: MarkdownPalette,
     openUri: (String) -> Unit,
 ): AnnotatedString {
     return buildAnnotatedString {
         var child = node.firstChild
         while (child != null) {
-            renderInlineNode(child, colors)
+            renderInlineNode(child, palette)
             child = child.next
         }
     }
@@ -354,7 +430,7 @@ private fun buildInlineAnnotated(
 
 private fun AnnotatedString.Builder.renderInlineNode(
     node: Node,
-    colors: IdeColors,
+    palette: MarkdownPalette,
 ) {
     when (node) {
         is Text -> append(node.literal.orEmpty())
@@ -362,7 +438,7 @@ private fun AnnotatedString.Builder.renderInlineNode(
             withStyle(
                 SpanStyle(
                     fontFamily = FontFamily.Monospace,
-                    background = colors.fieldBackground.copy(alpha = 0.3f),
+                    background = palette.inlineCodeBackground,
                     fontSize = 11.sp,
                 )
             ) {
@@ -377,7 +453,7 @@ private fun AnnotatedString.Builder.renderInlineNode(
             withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
                 var child = node.firstChild
                 while (child != null) {
-                    renderInlineNode(child, colors)
+                    renderInlineNode(child, palette)
                     child = child.next
                 }
             }
@@ -387,7 +463,7 @@ private fun AnnotatedString.Builder.renderInlineNode(
             withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
                 var child = node.firstChild
                 while (child != null) {
-                    renderInlineNode(child, colors)
+                    renderInlineNode(child, palette)
                     child = child.next
                 }
             }
@@ -398,13 +474,13 @@ private fun AnnotatedString.Builder.renderInlineNode(
             pushStringAnnotation(tag = "URL", annotation = url)
             withStyle(
                 SpanStyle(
-                    color = colors.accent,
+                    color = palette.accent,
                     textDecoration = TextDecoration.Underline,
                 )
             ) {
                 var child = node.firstChild
                 while (child != null) {
-                    renderInlineNode(child, colors)
+                    renderInlineNode(child, palette)
                     child = child.next
                 }
             }
@@ -414,7 +490,7 @@ private fun AnnotatedString.Builder.renderInlineNode(
         else -> {
             var child = node.firstChild
             while (child != null) {
-                renderInlineNode(child, colors)
+                renderInlineNode(child, palette)
                 child = child.next
             }
         }
