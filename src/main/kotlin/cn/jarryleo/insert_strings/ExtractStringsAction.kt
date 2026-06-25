@@ -58,7 +58,7 @@ import javax.swing.*
  *    行为完全一致。
  *
  * 「若 key 已存在则提示用户是否覆盖」由 AI 按 system prompt 中的规则通过 ask_user
- * 自然处理(已在 AITranslator.CHAT_SYSTEM_PROMPT 中说明),不在本类里重复实现。
+ * 自然处理(见 AITranslator.QUOTE_ENTRY_SYSTEM_PROMPT / CHAT_COMMON_RULES),不在本类里重复实现。
  */
 class ExtractStringsAction : AnAction() {
 

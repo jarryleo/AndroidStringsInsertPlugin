@@ -42,6 +42,20 @@ object ToolDefinitions {
         projectBase: String? = null
     ): JsonArray = buildAnthropicTools(sheetContext, projectBase)
 
+    /**
+     * 引用入口(AskAi / ExtractStrings 弹框)的精简工具集 —— 只暴露 strings.xml 操作
+     * + replace_selection + 通用工具。**不**包含 Google Sheets 与文件操作域(弹框场景
+     * 用不到,避免污染 AI 的工具视野和上下文)。
+     */
+    fun openAiToolsQuoteEntry(
+        sheetContext: SheetContext = SheetContext(null, emptyList())
+    ): JsonArray = buildOpenAiToolsQuoteEntry(sheetContext)
+
+    /** Anthropic 协议的引用入口工具集。 */
+    fun anthropicToolsQuoteEntry(
+        sheetContext: SheetContext = SheetContext(null, emptyList())
+    ): JsonArray = buildAnthropicToolsQuoteEntry(sheetContext)
+
     /** 工具名 → JSON Schema 的 properties 引用,供 driver 在解析 tool_call.arguments 时复用。 */
     val toolNames: List<String> = listOf(
         TOOL_INSERT_STRINGS,
@@ -88,42 +102,14 @@ object ToolDefinitions {
     // region 工具描述文案(主 prompt 引用,这里集中维护)
 
     private const val DESC_INSERT_STRINGS =
-        "向 Android strings.xml 插入或修改翻译字符串。" +
-            "可同时调用多次以插入多个字符串。" +
-            "translations 必须始终包含 \"values\"(默认英语),并覆盖模块内的所有语言 —— 一字不差对照 `recommendedDefaultModule.xmlFiles[].language`(或显式 module 的 `xmlFiles[].language`)。" +
-            "module 优先级:用户在消息中**明确指定** > 用户在 UI 中**选中行所在的模块** > 省略让系统用 `recommendedDefaultModule`(优先 currentModule,偏弱时退回最强模块)。" +
+        "向 Android strings.xml 插入或全量覆盖翻译字符串。" +
+            "可同时调用多次以插入多个字符串。**translations 必须始终包含 \"values\"(默认英语)," +
+            "并覆盖目标模块的全部语言** —— 一字不差对照 `recommendedDefaultModule.xmlFiles[].language`" +
+            "(或显式 module 的 `xmlFiles[].language`)。" +
+            "module 优先级:用户在消息中**明确指定** > UI 中选中行所在模块 > 省略让系统用 `recommendedDefaultModule`" +
+            "(优先 currentModule,偏弱时退回最强模块)。" +
             "若只想修改个别语言,请改用 update_string(部分语言更新,不覆写其他语言)。" +
-            "**插入前的两道查重均由 AI 自助完成,系统不再自动跑**:" +
-            "  1. **原文查重(必做,主要查重依据)**:用 find_keys_by_text 扫描**用户消息中的原始文本**" +
-            "(用户从布局/代码中选中的硬编码文本,或用户在消息中直接输入的待翻译文本)——" +
-            "**不传 language 参数**(跨所有语言目录搜,不限 values/),matchType=exact 跑一次、再 contains 兜底," +
-            "看是否已有与该原文完全一致或高度相似的现有 key。" +
-            "原因:用户选中的硬编码文本通常**就是目标语言翻译**(如中文「登录」)," +
-            "若仅用 AI 自己翻译后的 values 译文(英语)查重,会漏掉「原文已存在、values/ 英语译文用词不同」的场景。" +
-            "  2. **Key 名查重**:生成 key 后,用 query_keys(searchIn=key) 检查你打算用的 key 名是否已存在(避免插入后撞名)。" +
-            "两道查重均命中时,**用一次 ask_user 列出全部命中项**,options 统一格式(便于你后续按选项文本判断用户决策):" +
-            "  - **「使用现有 key:<existing_key>」** — key 名只允许 `[A-Za-z_][A-Za-z0-9_]*`;沿用现有 key,跳过本次写入。" +
-            "  - **「插入新 key」** — 忽略查重,按原计划新增 key(可能产生重复文案的不同 key)。" +
-            "  - **「取消操作」** — 放弃本次插入。" +
-            "**用户选择后的处理流程(由 AI 自行驱动,系统不再自动触发替换)**:" +
-            "  - 选「使用现有 key:<existing_key>」—— ⚠️ **强约束:必须按顺序执行以下两步,不可跳过第一步** ⚠️:" +
-            "    - **第一步(必做)**:**直接读上下文 JSON 里的 `chatEntry` 字段,不要再自己「判断」**:" +
-            "      - `chatEntry == \"extractStrings\"` 或 `chatEntry == \"askAi\"` 且 `editorSelection` 非 null" +
-            " —— 入口已捕获用户从布局/代码中选中的硬编码文本," +
-            "**必须先调用 replace_selection(key=<existing_key>)** 把该选区替换为" +
-            "`@string/<existing_key>`(XML 布局)或 `R.string/<existing_key>`(其它文件);" +
-            "工具返回成功后**才**进入第二步。" +
-            "      - `chatEntry == \"mainPanel\"` 或 `editorSelection == null` —— 跳过本步。" +
-            "      **常见错误:不要在 chatEntry=extractStrings/askAi 且 editorSelection 非 null 时" +
-            "直接调 read_string 跳过 replace_selection** —— 这会让硬编码文本保留在文件中。" +
-            "    - **第二步(必做)**:调用 read_string(<existing_key>) 取现有 key 的全语种翻译," +
-            "逐项检查是否准确、是否缺漏;若有修正需求,先 ask_user 询问用户是否修正," +
-            "得到肯定答复后用 update_string 精准补全;若已完整准确,直接 task_complete 结束。" +
-            "    - **不要**再调用 insert_strings(那个待插入的新 key 已被忽略)。" +
-            "  - 选「插入新 key」:用 query_keys 查你准备生成的 key 名是否已存在,若存在重新生成一个不冲突的 key(长度仍不超过 40 字符);" +
-            "然后调用 insert_strings(若来自布局/代码选区,driver 在写完后会自动触发 onInsertStringsInserted 完成硬编码文本的替换,无需你再调用 replace_selection)。" +
-            "  - 选「取消操作」:无需任何处理,直接 task_complete 即可。" +
-            "一次插入多个 key 时,任一命中都要用一次 ask_user 列出全部命中项,不可只对部分 key 跳过查重。"
+            "插入前的两道查重(原文查重 + key 名查重)与「使用现有 key:」后的处理流程,见 system prompt 与 load_tool_doc(\"insert_strings\")。"
 
     private const val DESC_UPDATE_STRING =
         "精准修改指定 key 的部分语言翻译,只动 translations 中列出的语言,其他语言保持原样。" +
@@ -140,123 +126,99 @@ object ToolDefinitions {
 
     private const val DESC_QUERY_KEYS =
         "列出或搜索模块内的字符串 key。" +
-            "pattern 为空时列出所有 key;非空时按正则匹配。" +
-            "searchIn 控制匹配范围:key(默认,只匹配 key 名)/ text(跨多语言翻译文本)/ both(并集)。" +
+            "pattern 正则(可空,空时列出全部);searchIn=key(默认,匹配 key 名)/ text(跨多语种翻译文本)/ both(并集);" +
             "includeTranslations=true 时返回各语言当前翻译(消耗较多 token,谨慎使用)。" +
-            "module 省略时按 recommendedDefaultModule → currentModule → 行数最多模块的优先级自动选。" +
-            "适用场景:用户说「找一下关于房间的 key」「列出所有错误提示的 key」,或 AI 需要先发现 key 名再修改。" +
-            "想反查某段翻译属于哪个 key 时,优先用 searchIn=text 而不是 find_keys_by_text —— 一次返回带 key 列表 + 全部语种。"
+            "module 省略时按 recommendedDefaultModule → currentModule → 行数最多模块 自动选。" +
+            "想反查某段翻译属于哪个 key 时,优先用 searchIn=text 而不是 find_keys_by_text —— 一次返回 key 列表 + 全部语种。" +
+            "详细字段 → load_tool_doc(\"query_keys\")。"
 
     private const val DESC_READ_STRING =
         "读取指定 key 在模块所有语言的当前翻译,返回 key+各语言文本+文件路径。" +
-            "适用场景:用户说「看看 X 现在怎么翻译的」,AI 在修改前先确认原文,避免覆盖已有正确翻译。"
+            "修改/删除前必先 read_string 确认原文,避免覆盖已有正确翻译。详细字段 → load_tool_doc(\"read_string\")。"
 
     private const val DESC_FIND_KEYS_BY_TEXT =
         "strings.xml 反查:通过翻译文本查找对应的 key。" +
-            "支持 exact(完全相等)/ contains(子串,默认)/ regex(正则) 三种匹配模式。" +
-            "可选限定 module(只查该模块)和 language(只查该语言目录,例 values-zh-rTW)。" +
-            "适用场景:用户看到一段文字想反查是哪个 key,排查重复翻译,跨语言确认某文本对应哪个 key。"
+            "支持 exact(完全相等)/ contains(子串,默认)/ regex 三种匹配模式;可选 module / language 限定。" +
+            "插入翻译前查重:不传 language 参数,matchType=exact 跑一次、再 contains 兜底。" +
+            "详细字段 → load_tool_doc(\"find_keys_by_text\")。"
 
     private const val DESC_FIND_ROWS_BY_TEXT =
         "Google Sheets 反查:在表格中按文本搜索行,返回行号+列名+整行内容。" +
-            "支持 exact/ contains(默认)/ regex 三种匹配模式,可选 column(只查指定列名)。" +
-            "适用场景:用户问「这个翻译对应表格里哪一行」,查重,定位某文案在 sheet 中的位置。" +
-            "注意:sheetName 参数必须**原样**使用下方工作表名(包含点、空格等特殊字符,不要加单引号)," +
-            "系统会按 Google Sheets A1 规则自动处理转义。"
+            "支持 exact/ contains(默认)/ regex,可限定 column。sheetName 必须**原样**使用(系统按 A1 规则自动转义)。" +
+            "详细字段 → load_tool_doc(\"find_rows_by_text\")。"
 
     // region 文件操作域描述(2026 新增)
 
     private const val DESC_GET_EDITOR_FILE =
-        "获取当前 IDE 编辑器中打开的文件信息:完整路径、文件名带后缀(用于判断文件类型,如 MainActivity.kt / activity_main.xml)、" +
-            "当前选中的文字、选区起止行号、文件总行数。" +
-            "适用场景:用户说「改一下我打开的这个文件」「解释我选中的代码」,AI 先调用本工具确认上下文;不传任何参数。" +
-            "返回 fileType 后缀(kt/java/xml/...)和 language 分类,kotlin/java/xml 可直接读,其它后缀注意可能是配置/资源文件。"
+        "获取当前 IDE 编辑器中打开的文件信息:路径、文件名后缀、选中文字、选区起止行、文件总行数。不接收参数。" +
+            "AI 拿到 filePath 后可继续 read_file / search_in_files / find_references。" +
+            "详细字段 → load_tool_doc(\"get_editor_file\")。"
 
     private const val DESC_READ_FILE =
-        "读取当前 IDE 项目内任意文件的内容(相对项目根路径或项目内的绝对路径)。" +
-            "适用场景:AI 拿到文件路径(从 get_editor_file / search_in_files / find_references / list_files 取得)后想看完整内容。" +
-            "默认从第 0 行读到末尾,大文件会按 maxLines(默认 600)截断,可用 startLine / endLine 翻页继续读。" +
-            "限制:单文件 > 1.5MB 会拒绝读取,改用 search_in_files 检索指定内容。"
+        "读取项目内任意文件的内容(相对项目根或项目内绝对路径)。" +
+            "默认从第 0 行读到末尾,大文件按 maxLines(默认 600)截断,可用 startLine / endLine 翻页。" +
+            "限制:单文件 > 1.5MB 拒绝读取,改用 search_in_files。" +
+            "详细字段 → load_tool_doc(\"read_file\")。"
 
     private const val DESC_EDIT_FILE =
-        "精准修改项目内任意文件的内容。" +
-            "两种模式(同时支持):" +
-            "  - **文本模式**(默认,useRegex=false):用 oldText 全文精确匹配,匹配 1 处时直接替换;0 处报错(让 AI 用 read_file 复查);" +
-            "    匹配 >1 处且 replaceAll=false 时也报错(让 AI 扩展 oldText 到唯一,或开启 replaceAll)。" +
-            "  - **正则模式**(useRegex=true):用 oldText 作 Kotlin 正则;同样默认要求唯一匹配,replaceAll=true 时全文替换。" +
-            "原子写:写失败不会污染原文件(临时文件 + rename)。" +
-            "适用场景:用户说「把第 X 行的 foo 改成 bar」「把所有 TODO 替换成 FIXME」,AI 先 read_file 拿原文,再用本工具改。" +
-            "限制:单文件 > 3MB 拒绝编辑,需拆为多次小范围操作。"
+        "精准修改项目内任意文件的内容。两种模式:" +
+            "  - **文本模式**(默认,useRegex=false):oldText 全文精确匹配,默认要求唯一匹配(0 处或 >1 处报错)。" +
+            "  - **正则模式**(useRegex=true):oldText 作 Kotlin 正则;replaceAll=true 全文替换。" +
+            "原子写:写失败不会污染原文件。限制:单文件 > 3MB 拒绝编辑。" +
+            "详细字段 → load_tool_doc(\"edit_file\")。"
 
     private val DESC_CREATE_FILE =
         "在项目内创建新文件(支持嵌套目录,自动 mkdirs)。" +
-            "参数:path 相对项目根或项目内绝对路径;content 文件内容;overwrite 文件已存在时是否覆盖(默认 false,防误覆盖)。" +
-            "适用场景:用户说「新建一个 util 类」「生成 README」「在 build.gradle 加一段配置(先用 read_file 看现有内容,再用 edit_file 改,而不是用本工具整文件覆盖)」。"
+            "overwrite 默认 false(防误覆盖);修改已存在文件请改用 edit_file。" +
+            "详细字段 → load_tool_doc(\"create_file\")。"
 
     private const val DESC_SEARCH_IN_FILES =
         "在项目内文件中按文本 / 正则搜索,返回文件路径+行号+列号+匹配内容。" +
-            "默认仅搜索 java / kt / xml 文件(也包括 gradle / kts / json / properties / txt / md),不搜图片/二进制。" +
-            "适用场景:用户说「在项目里找一下 XXX 的用法」「看哪个文件调用了 getResult」,AI 在调用 edit_file 前先用本工具定位修改点。" +
-            "可选 filePattern(glob,如 \"*.kt\")与 relativeDir(子目录,如 \"app/src/main\")缩小范围,避免大项目全量扫描慢。" +
-            "限制:单次最多返回 200 条命中,超出请收紧 pattern / 限定目录。"
+            "默认搜索 java / kt / xml / gradle / kts / json / properties / txt / md,不搜图片/二进制。" +
+            "可用 filePattern(glob)与 relativeDir 限定范围;单次最多返回 200 条。" +
+            "详细字段 → load_tool_doc(\"search_in_files\")。"
 
     private const val DESC_FIND_REFERENCES =
-        "查找符号在项目中的引用点(Java/Kotlin/XML 文件)。" +
-            "kind 取值:" +
-            "  - **id**:匹配 R.id.xxx / @+id/xxx / @id/xxx(资源 id 引用)" +
-            "  - **string**:匹配 R.string.xxx / @string/xxx(字符串资源引用)" +
-            "  - **layout**:匹配 R.layout.xxx / @layout/xxx(布局引用)" +
-            "  - **drawable**:匹配 R.drawable.xxx / @drawable/xxx(图标引用)" +
-            "  - **color**:匹配 R.color.xxx / @color/xxx(颜色引用)" +
-            "  - **class**:按标识符边界匹配类名" +
-            "  - **general**(默认):按标识符边界匹配任意符号名" +
-            "适用场景:用户说「这个 key / view id / 类名 在哪些地方被引用」,重构前评估影响面。" +
-            "与 search_in_files 的区别:本工具是「符号语义」搜索,自动适配资源引用的多种写法;search_in_files 是「字面文本」搜索。"
+        "按符号语义查找项目中的引用点(Java/Kotlin/XML)。" +
+            "kind: id / string / layout / drawable / color / class / general(默认)。" +
+            "与 search_in_files 的区别:本工具是「符号语义」搜索,自动适配资源引用的多种写法。" +
+            "详细字段 → load_tool_doc(\"find_references\")。"
 
     private const val DESC_LIST_FILES =
-        "列举项目内某目录下的文件 / 子目录,支持 glob 与递归。" +
-            "参数:relativeDir 相对项目根的子目录(\".\" 或空表示项目根);pattern glob(默认 \"*\");" +
-            "recursive 是否递归子目录(限制最多 10 层);includeDirs 是否包含目录。" +
-            "适用场景:用户说「项目里有哪些 layout 文件」「app/src/main/java 下都有什么包」,AI 探索项目结构。" +
-            "限制:单次最多返回 500 条;大目录请用 filePattern 限定(如 \"*.kt\")。"
+        "列举项目内某目录下的文件 / 子目录,支持 glob 与递归(最多 10 层)。" +
+            "relativeDir 默认 \".\"(项目根),pattern 默认 \"*\",maxEntries 默认 500。" +
+            "详细字段 → load_tool_doc(\"list_files\")。"
 
     // endregion
 
     private const val DESC_SHEETS_OPERATION =
-        "执行 Google 表格操作。operation 决定具体动作类型。" +
-            "不确定用法时先调用 load_tool_doc(\"sheets_basic\"/\"sheets_row_ops\"/...) 获取详细文档。" +
-            "需要一次性对大量单元格做混合修改(改值+填色+改文字色+删行…)时,优先用 batch_modify,把多个子操作合并到一次工具调用,后端自动分组成最少 Google API 请求,避免逐格调用触发工具调用次数上限。" +
-            "安全约束:修改/删除行前先用 search 定位行号;列操作需用户确认;全表检查/修正用 check_translations/fix_translations。" +
-            "重要:sheetName 参数必须**原样**使用下方工作表名(包含点、空格等特殊字符,不要加单引号)," +
-            "系统会按 Google Sheets A1 规则自动处理转义。省略时使用默认工作表。"
+        "执行 Google 表格操作(operation 决定具体动作类型)。" +
+            "大量单元格混合修改(改值+填色+改文字色+删行等)用 batch_modify 一次完成,避免循环调用触发工具调用次数上限。" +
+            "安全约束:修改/删除行前先用 search 定位行号;列操作需用户确认;全表审查/修正用 check_translations / fix_translations。" +
+            "sheetName 必须**原样**使用工作表名(系统按 A1 规则自动转义)。" +
+            "详细字段 → load_tool_doc(\"sheets_basic\")。"
 
     private const val DESC_ASK_USER =
-        "向用户提问并等待用户回复。options 非空时显示按钮供用户点击;options 为空时用户可在聊天输入框中输入回复内容。" +
-            "使用场景:关键参数缺失、风险操作确认、目标不明确需要澄清。" +
-            "重要:每次调用都会暂停 tool loop 等待用户响应,不会自动继续 — 因此若想退出循环,必须在收到用户回复后调用 task_complete 或采取其他操作,不能连续反复调用本工具。"
+        "向用户提问并等待回复。options 非空时显示按钮(优先用);为空时用户在输入框回复。" +
+            "每次调用都暂停 tool loop,不要反复调用;收到回复后用 task_complete 或操作推进。"
 
     private const val DESC_REPLACE_SELECTION =
         "把当前 IDE 编辑器选中的硬编码文本替换为对指定 key 的引用。" +
-            "XML 布局(res/layout* 等)文件替换为 `@string/<key>`,其它文件(Kotlin/Java/...)替换为 `R.string/<key>`。" +
-            "在 EDT 上 WriteCommandAction 中执行;**执行后聊天视图保持打开**,AI 继续调用 read_string / ask_user / update_string 推进翻译查重的后续流程。" +
-            "⚠️ **强约束:这是用户选「使用现有 key:<existing_key>」后必须执行的第一步** ⚠️ ——若插入来自布局/代码选区," +
-            "AI **必须**先调用本工具把硬编码文本替换为对 key 的引用,再调用 read_string 校验现有翻译。" +
-            "**绝不可**在用户选「使用现有 key」后跳过本工具直接调 read_string ——" +
-            "这会让硬编码文本保留在文件中,违反用户提取字符串的初衷。" +
-            "典型用法:" +
-            "  - **翻译查重 +「使用现有 key」**:用户点选 ask_user 的「使用现有 key:<existing_key>」选项后,AI 用本工具触发实际替换(然后继续检查现有翻译是否需要修正)。" +
-            "  - **AskAi 入口通用替换**:用户在 AskAi 弹框下选中一段硬编码文字,要求 AI 提取为 strings.xml 并替换为对 key 的引用。" +
-            "限制:仅在 chat 入口(Extract / AskAi 弹框)有效;主面板聊天视图无编辑器上下文,会返回失败信息。"
+            "XML 布局 → `@string/<key>`,其它文件 → `R.string/<key>`;执行后聊天视图保持打开。" +
+            "⚠️ 强约束:在 chatEntry=askAi/extractStrings 场景下,用户选「使用现有 key:」后**必须**先调本工具,再 read_string。" +
+            "限制:仅在 chat 弹框入口有效(主面板无编辑器上下文,会失败)。" +
+            "详细字段 → load_tool_doc(\"replace_selection\")。"
 
     private const val DESC_LOAD_TOOL_DOC =
         "按需加载工具的详细使用文档(枚举值、参数约束、示例)。" +
-            "返回的文档会作为工具结果回传给你,你据此继续返回实际执行动作,不要重复请求同一工具的文档。"
+            "返回的文档作为 tool 消息回传;不要重复请求同一工具的文档。" +
+            "系统对连续 load_tool_doc 有次数上限,一次最多加载 1-2 个,拿到后立即返回实际工具调用。"
 
     private const val DESC_TASK_COMPLETE =
         "声明任务已完成,结束当前对话循环。" +
-            "这是唯一的「合法终止」信号 — 没有调用本工具 = 你仍在执行,系统会持续驱动你继续。" +
-            "status 取值: success(完全达成) / partial(部分达成,如用户拒绝) / failed(执行失败)。" +
-            "调用本工具后不要在同一次回复中再调用其他工具。"
+            "唯一的合法终止信号;未调用 = 你仍在执行,系统会持续驱动。" +
+            "status: success(完全达成) / partial(部分达成,如用户拒绝) / failed(执行失败)。" +
+            "调用后不要在同一次回复中再调用其他工具。"
 
     // endregion
 
@@ -350,6 +312,42 @@ object ToolDefinitions {
             add(anthropicTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(anthropicTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(anthropicTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
+            add(anthropicTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
+        }
+    }
+
+    /**
+     * 引用入口(AskAi / ExtractStrings 弹框)的精简工具集。
+     * 只暴露 strings.xml 操作 + replace_selection + 通用工具,
+     * 不包含 Google Sheets 与文件操作域(弹框场景用不到)。
+     */
+    private fun buildOpenAiToolsQuoteEntry(@Suppress("UNUSED_PARAMETER") ctx: SheetContext): JsonArray {
+        return JsonArray().apply {
+            add(openAiTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
+            add(openAiTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
+            add(openAiTool(TOOL_DELETE_STRING, DESC_DELETE_STRING, openAiDeleteStringParams()))
+            add(openAiTool(TOOL_QUERY_KEYS, DESC_QUERY_KEYS, openAiQueryKeysParams()))
+            add(openAiTool(TOOL_READ_STRING, DESC_READ_STRING, openAiReadStringParams()))
+            add(openAiTool(TOOL_FIND_KEYS_BY_TEXT, DESC_FIND_KEYS_BY_TEXT, openAiFindKeysByTextParams()))
+            add(openAiTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
+            add(openAiTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
+            add(openAiTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
+            add(openAiTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
+        }
+    }
+
+    /** Anthropic 协议的引用入口工具集。 */
+    private fun buildAnthropicToolsQuoteEntry(@Suppress("UNUSED_PARAMETER") ctx: SheetContext): JsonArray {
+        return JsonArray().apply {
+            add(anthropicTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
+            add(anthropicTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
+            add(anthropicTool(TOOL_DELETE_STRING, DESC_DELETE_STRING, openAiDeleteStringParams()))
+            add(anthropicTool(TOOL_QUERY_KEYS, DESC_QUERY_KEYS, openAiQueryKeysParams()))
+            add(anthropicTool(TOOL_READ_STRING, DESC_READ_STRING, openAiReadStringParams()))
+            add(anthropicTool(TOOL_FIND_KEYS_BY_TEXT, DESC_FIND_KEYS_BY_TEXT, openAiFindKeysByTextParams()))
+            add(anthropicTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
+            add(anthropicTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
+            add(anthropicTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(anthropicTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
         }
     }
