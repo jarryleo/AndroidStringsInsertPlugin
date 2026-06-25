@@ -1154,10 +1154,13 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
      *
      * 回调约定:
      * - [onPartialText] 跑在**后台线程**(发请求的池化线程),每次有新 token 累计进来就触发一次,
-     *   参数是「到目前为止的完整 assistant 文本」(不是 delta)。
-     *   实现里应做去抖/节流(本函数内部已经按行+去 delta 推送,粒度较细;若调用方发现仍太密可自行节流)。
+     *   两个参数分别为「content(最终回答)截至目前的累计全文」与「reasoning(思考过程)截至目前的累计全文」
+     *   ——不是 delta。实现里应做去抖/节流(本函数内部已经按行+去 delta 推送,粒度较细;
+     *   若调用方发现仍太密可自行节流)。
+     * - 非推理模型 reasoning 始终为 "";推理模型(DeepSeek-R1、OpenAI o1/o3、Anthropic extended
+     *   thinking 等)reasoning 才有值。
      * - [onPartialText] 可能被调用 0 次(模型只返回 tool_calls,没有文字)。
-     * - 流结束后返回完整的 [AiReply](含 toolCalls / failedToolCalls),
+     * - 流结束后返回完整的 [AiReply](含 toolCalls / failedToolCalls / reasoning),
      *   与非流式 [chat] 行为一致,可直接复用下游分发逻辑。
      *
      * 错误处理:任何 HTTP 错误 / 解析异常,都通过返回的 [AiReply].reply 暴露错误文案,
@@ -1170,7 +1173,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
     fun chatStream(
         messages: List<ChatMessage>,
         context: String = "",
-        onPartialText: (String) -> Unit
+        onPartialText: (contentCumulative: String, reasoningCumulative: String) -> Unit
     ): AiReply {
         val settings = AiSettingsService.getInstance().state
         val protocol = AiProtocol.fromName(settings.protocol)
@@ -1219,18 +1222,23 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val stream = response.body()
                 streamStarted.set(true)
                 try {
-                    val text = StringBuilder()
-                    val parser = SseStreamParser(protocol) { deltaText ->
-                        if (deltaText.isNotEmpty()) {
-                            text.append(deltaText)
-                            onPartialText(text.toString())
-                        }
+                    val parser = SseStreamParser(protocol) { contentCumulative, reasoningCumulative ->
+                        onPartialText(contentCumulative, reasoningCumulative)
                     }
                     parser.parse(stream)
                     // 流结束后把累积的内容合成一个标准响应 JSON,复用 parseAiReply → toolCallToAction 全链路
+                    // content / reasoning 拆开写进合成体,parseAiReply 同样能区分抽取(详见 extractReasoningText)
                     val syntheticBody = when (protocol) {
-                        AiProtocol.OPENAI -> buildOpenAiSyntheticBody(text.toString(), parser.toolCalls)
-                        AiProtocol.ANTHROPIC -> buildAnthropicSyntheticBody(text.toString(), parser.toolCalls)
+                        AiProtocol.OPENAI -> buildOpenAiSyntheticBody(
+                            content = parser.contentText,
+                            reasoning = parser.reasoningText,
+                            toolCalls = parser.toolCalls,
+                        )
+                        AiProtocol.ANTHROPIC -> buildAnthropicSyntheticBody(
+                            content = parser.contentText,
+                            reasoning = parser.reasoningText,
+                            toolCalls = parser.toolCalls,
+                        )
                     }
                     parseAiReply(syntheticBody)
                 } finally {
@@ -1247,13 +1255,18 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
     /**
      * 把流式累积的 OpenAI tool_call 片段组装成与 [openAiChatBody] 同型的完整响应 JSON,
      * 供 [parseAiReply] 复用,避免为流式场景单独写一套 tool_call 解析逻辑。
+     *
+     * content / reasoning 分开存放,reasoning 走 OpenAI 兼容扩展字段 `reasoning_content`
+     * (DeepSeek-R1、OpenAI o1/o3、OpenRouter 等都用此字段),与真实非流式响应同型,
+     * [parseAiReply] / [extractReasoningText] 可以无差别抽取。
      */
     private fun buildOpenAiSyntheticBody(
-        text: String,
-        streamedToolCalls: List<SseStreamParser.StreamedToolCall>
+        content: String,
+        reasoning: String,
+        toolCalls: List<SseStreamParser.StreamedToolCall>
     ): String {
         val toolCallsArray = JsonArray().apply {
-            streamedToolCalls.forEach { tc ->
+            toolCalls.forEach { tc ->
                 add(JsonObject().apply {
                     addProperty("id", tc.id)
                     addProperty("type", "function")
@@ -1266,7 +1279,8 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         }
         val message = JsonObject().apply {
             addProperty("role", "assistant")
-            if (text.isNotEmpty()) addProperty("content", text)
+            if (content.isNotEmpty()) addProperty("content", content)
+            if (reasoning.isNotEmpty()) addProperty("reasoning_content", reasoning)
             if (toolCallsArray.size() > 0) add("tool_calls", toolCallsArray)
         }
         val choice = JsonObject().apply {
@@ -1282,20 +1296,34 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
 
     /**
      * 把流式累积的 Anthropic content block 组装成与 [anthropicChatBody] 同型的完整响应 JSON。
-     * text blocks 拼成单一 text block,tool_use blocks 保持原样。
+     *
+     * 拆开三个 block 类型:
+     * - type=thinking: extended thinking 模型的推理/思考过程(对应 SSE 的 thinking_delta)
+     * - type=text: 最终回答(对应 SSE 的 text_delta)
+     * - type=tool_use: 工具调用
+     *
+     * 这样 [parseAiReply] / [extractReasoningText] / [extractAssistantText] / [extractToolCalls]
+     * 都能与真实非流式响应无差别处理。
      */
     private fun buildAnthropicSyntheticBody(
-        text: String,
-        streamedToolCalls: List<SseStreamParser.StreamedToolCall>
+        content: String,
+        reasoning: String,
+        toolCalls: List<SseStreamParser.StreamedToolCall>
     ): String {
         val contentArray = JsonArray().apply {
-            if (text.isNotEmpty()) {
+            if (reasoning.isNotEmpty()) {
                 add(JsonObject().apply {
-                    addProperty("type", "text")
-                    addProperty("text", text)
+                    addProperty("type", "thinking")
+                    addProperty("thinking", reasoning)
                 })
             }
-            streamedToolCalls.forEach { tc ->
+            if (content.isNotEmpty()) {
+                add(JsonObject().apply {
+                    addProperty("type", "text")
+                    addProperty("text", content)
+                })
+            }
+            toolCalls.forEach { tc ->
                 add(JsonObject().apply {
                     addProperty("type", "tool_use")
                     addProperty("id", tc.id)
@@ -1309,7 +1337,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         }
         val root = JsonObject().apply {
             add("content", contentArray)
-            addProperty("stop_reason", if (streamedToolCalls.isNotEmpty()) "tool_use" else "end_turn")
+            addProperty("stop_reason", if (toolCalls.isNotEmpty()) "tool_use" else "end_turn")
         }
         return root.toString()
     }
@@ -1854,6 +1882,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         val root = runCatching { JsonParser.parseString(responseText).asJsonObject }.getOrNull()
             ?: return AiReply(responseText, emptyList(), emptyList(), emptyList())
         val text = extractAssistantText(root)
+        val reasoning = extractReasoningText(root)
         val rawToolCalls = extractToolCalls(root)
         val actions = mutableListOf<AiAction>()
         val parsedToolCalls = mutableListOf<ToolCall>()
@@ -1868,7 +1897,40 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 failedToolCalls.add(call)
             }
         }
-        return AiReply(text, actions, parsedToolCalls, failedToolCalls)
+        return AiReply(text, actions, parsedToolCalls, failedToolCalls, reasoning)
+    }
+
+    /**
+     * 从模型响应中抽取「思考/推理」文本(与 [extractAssistantText] 互补)。
+     *
+     * 兼容两种协议:
+     * - OpenAI 兼容扩展(DeepSeek-R1、OpenAI o1/o3、OpenRouter 等):
+     *   `choices[0].message.reasoning_content` 字段(字符串)
+     * - Anthropic extended thinking:
+     *   `content[].type="thinking"` 块,每块的 `thinking` 字段拼接
+     *
+     * 与 [extractAssistantText] 互斥:同一份响应里两者分别走不同字段,不会互相吃掉。
+     * 非推理模型的响应里没有对应字段,本函数返回空串,UI 上 Thinking 折叠区自然不出现。
+     */
+    private fun extractReasoningText(root: JsonObject): String {
+        // OpenAI: choices[0].message.reasoning_content
+        root.getAsJsonArray("choices")?.firstObject()?.getAsJsonObject("message")
+            ?.get("reasoning_content")
+            ?.takeIf { !it.isJsonNull && it.isJsonPrimitive }
+            ?.let { return it.asString }
+        // Anthropic: content[].type=thinking.thinking 拼接
+        root.getAsJsonArray("content")?.let { contentArray ->
+            val sb = StringBuilder()
+            contentArray.forEach { element ->
+                if (!element.isJsonObject) return@forEach
+                val obj = element.asJsonObject
+                if (obj.get("type")?.asString != "thinking") return@forEach
+                obj.get("thinking")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }
+                    ?.asString?.let { sb.append(it) }
+            }
+            if (sb.isNotEmpty()) return sb.toString()
+        }
+        return ""
     }
 
     /**

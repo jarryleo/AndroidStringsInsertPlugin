@@ -393,7 +393,17 @@ data class AiReply(
      * `tool_use.id 'xxx' was found without a corresponding tool_result block
      * immediately after`)。driver 层需要为这些 id 添加「解析失败」的 tool_result。
      */
-    val failedToolCalls: List<ToolCall> = emptyList()
+    val failedToolCalls: List<ToolCall> = emptyList(),
+    /**
+     * 推理/思考文本(模型在产出 [reply] 之前的中间发言)。
+     *
+     * - 仅用于 UI 展示(driver 会写入 `ChatMessage.thinking`,渲染为可折叠的 Thought 区);
+     * - **不**参与协议序列化(`toOpenAiMessage` / `toAnthropicMessage` 都不读它),
+     *   下一轮发回 AI 时,assistant 消息只携带 [reply] 作为正文。
+     * - 非推理模型(无 `reasoning_content` / `thinking` 块)始终为空串,UI 上
+     *   Thinking 折叠区自然不出现。
+     */
+    val reasoning: String = ""
 )
 
 /**

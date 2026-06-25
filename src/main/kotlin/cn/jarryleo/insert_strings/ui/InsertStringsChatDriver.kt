@@ -348,24 +348,30 @@ internal class InsertStringsChatDriver(
         val placeholderIdx = setup.placeholderIdx
 
         val reply: AiReply = try {
-            AITranslator.chatStream(
-                messages = messagesSnapshot,
-                context = context,
-                onPartialText = { fullText ->
-                    // 跑在后台线程,先做轻量 stop 检查
-                    if (state.stopRequested) return@chatStream
-                    // 把最新思考文本切回 EDT 写入 placeholder 的 thinking 字段
-                    // (注意:不写 content,留给最终 task_complete summary 或纯文本回复用)
-                    SwingUtilities.invokeLater {
-                        if (placeholderIdx < state.chatMessages.size) {
-                            val current = state.chatMessages[placeholderIdx]
-                            if (current.thinking != fullText) {
-                                state.chatMessages[placeholderIdx] = current.copy(thinking = fullText)
+                AITranslator.chatStream(
+                    messages = messagesSnapshot,
+                    context = context,
+                    onPartialText = { contentCumulative, reasoningCumulative ->
+                        // 跑在后台线程,先做轻量 stop 检查
+                        if (state.stopRequested) return@chatStream
+                        // content(最终回答)与 reasoning(思考过程)分别落到 message 的 content / thinking 字段
+                        // ——SSE parser 已经把 delta.content 与 delta.reasoning_content 拆开,这里直接接住。
+                        // 非推理模型 reasoningCumulative 始终为 "",UI 上 Thinking 折叠区自然不出现。
+                        SwingUtilities.invokeLater {
+                            if (placeholderIdx < state.chatMessages.size) {
+                                val current = state.chatMessages[placeholderIdx]
+                                if (current.content != contentCumulative ||
+                                    current.thinking != reasoningCumulative
+                                ) {
+                                    state.chatMessages[placeholderIdx] = current.copy(
+                                        content = contentCumulative,
+                                        thinking = reasoningCumulative,
+                                    )
+                                }
                             }
                         }
                     }
-                }
-            )
+                )
         } catch (e: Exception) {
             SwingUtilities.invokeLater {
                 if (placeholderIdx < state.chatMessages.size) {
@@ -433,19 +439,18 @@ internal class InsertStringsChatDriver(
         SwingUtilities.invokeLater {
             // 1) 把流式累积到的文本 / toolCalls 合并到 placeholder(或新建一条)
             //    字段布局原则:
-            //      - thinking: 模型在调用工具前的中间发言(「思考」语义),
-            //        流式时实时显示,流结束后折叠为可展开区。
+            //      - thinking: 模型的「思考/推理」文本,流式时实时显示,流结束后折叠为可展开区;
+            //        非推理模型 reasoning 为空时,UI 上 Thinking 区直接不出现。
             //      - content: 给用户看的「最终回复」——纯文本对话回合就是模型全文,
-            //        function-calling 回合则是「执行操作:xxx」或 task_complete summary。
-            //    在纯文本回合里两者可能重复,但 Thinking 区默认折叠,保留它能让用户
-            //    在每个 AI 回复气泡里回看流式思考文字。
+            //        function-calling 回合则是「执行操作:xxx」或 task_complete summary;
+            //        引用面板的「翻译/解释/总结」动作里,这里就是真正的翻译结果。
+            //    关键:之前两个分支都把 reply.reply 塞进 thinking、把 content 留给占位文案,
+            //    导致「翻译」动作的最终结果被折叠在 Thought 内。修后:
+            //      - 情况 A(无 tool_calls):content=reply.reply, thinking=reply.reasoning
+            //      - 情况 B(只 task_complete):content=reply.reply(由 handleTaskComplete 追加 summary),
+            //        thinking=reply.reasoning
             val realToolCalls = reply.toolCalls.filter { it.name != ToolDefinitions.TOOL_TASK_COMPLETE }
             val hasTaskComplete = reply.toolCalls.any { it.name == ToolDefinitions.TOOL_TASK_COMPLETE }
-            val existingThinking = if (placeholderIdx in 0 until state.chatMessages.size) {
-                state.chatMessages[placeholderIdx].thinking
-            } else {
-                ""
-            }
             // 关键修复:必须把「解析失败」的 tool_call 一起写入 assistant 消息的 toolCalls 字段,
             // 否则下一轮 OpenAI/DeepSeek 协议校验会失败:
             //   "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"
@@ -456,16 +461,17 @@ internal class InsertStringsChatDriver(
             // reply.actions(只含解析成功的),所以混入 failed 不会重复执行。
             val finalToolCalls = realToolCalls + reply.failedToolCalls
             val (finalContent, finalThinking) = when {
-                // 情况 A:模型纯文本回复(无工具调用)——内容就是回复本身,
-                // 流式累积文本保留在折叠 Thought 区。
+                // 情况 A:模型纯文本回复(无工具调用)——
+                // content 放最终回答(用户实际要看的),thinking 放思考过程(非推理模型时为空)。
                 finalToolCalls.isEmpty() -> {
-                    Pair(reply.reply, existingThinking)
+                    Pair(reply.reply, reply.reasoning)
                 }
                 // 情况 B:只有 task_complete 终止信号
-                // content 留空,由 handleTaskComplete 写入 summary;
-                // thinking 保留流式累积文本,作为「思考过程」展示
+                // content 放模型的真实文本回答(例如引用面板「翻译」动作的翻译结果),
+                //   handleTaskComplete 会在末尾追加 summary + notes 作为脚注,而不再覆盖整个 content;
+                // thinking 放思考过程。
                 realToolCalls.isEmpty() && hasTaskComplete -> {
-                    Pair("", reply.reply)
+                    Pair(reply.reply, reply.reasoning)
                 }
                 // 情况 C:有真实工具调用(可叠加 task_complete,但 task_complete 之后会被前面分支截走,
                 //    所以这里只可能是纯真实工具调用)
@@ -478,7 +484,8 @@ internal class InsertStringsChatDriver(
                     } else {
                         ""
                     }
-                    Pair(summary, reply.reply)
+                    // 工具调用回合:content 写一行「执行操作:xxx」占位,thinking 写思考过程。
+                    Pair(summary, reply.reasoning)
                 }
             }
 
@@ -878,15 +885,24 @@ internal class InsertStringsChatDriver(
                 append("\n\n").append(complete.notes)
             }
         }
-        // 把 task_complete summary 写入当前流式 assistant 气泡(同一条消息),
-        // 而不是再追加一条新消息——这样思考(流式累积的 thinking)和回复(content)
-        // 会落在同一个气泡内,符合"思考和回复在同一个气泡内"的设计。
+        // 把 task_complete 收尾到当前流式 assistant 气泡(同一条消息),而不是再追加一条新消息——
+        // 这样思考(流式累积的 thinking)和回复(content)会落在同一个气泡内,符合
+        // "思考和回复在同一个气泡内"的设计。
+        //
+        // 关键修改:如果 content 已经有内容(例如引用面板「翻译/解释/总结」动作,模型先回了
+        // 真实回答再调 task_complete),把 summary 作为脚注追加到尾部,而不是直接覆盖整个 content。
+        // 否则 content 为空时仍按 summary 单独填入(覆盖旧路径的兼容行为)。
         // 若对话历史里没有 assistant 消息(理论上不会发生,只是兜底),才追加新消息。
         val lastIdx = state.chatMessages.indexOfLast { it.role == "assistant" }
         if (lastIdx >= 0) {
             val current = state.chatMessages[lastIdx]
+            val newContent = if (current.content.isNotBlank()) {
+                current.content.trimEnd() + "\n\n" + text
+            } else {
+                text
+            }
             state.chatMessages[lastIdx] = current.copy(
-                content = text,
+                content = newContent,
                 streaming = false,
                 toolCalls = emptyList()
             )

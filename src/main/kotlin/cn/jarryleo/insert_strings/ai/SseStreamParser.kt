@@ -10,8 +10,17 @@ import java.nio.charset.StandardCharsets
  * SSE(Server-Sent Events)流解析器,按行读取 [InputStream] 解析 `data: ...` 事件。
  *
  * 支持 OpenAI / Anthropic 两种 chat completion 的流式响应,统一抽象成:
- * - 文本增量 → 调 [onDelta] 回调(参数是新增的字符串,调用方自己累加)
+ * - 文本增量 → 调 [onDelta] 回调,两个参数分别为「截至当前的 content 累计」与
+ *   「截至当前的 reasoning 累计」(不是 delta)。调用方自己根据累计值切 EDT 写 UI。
  * - 工具调用 → 内部按 protocol 累积,流结束后通过 [toolCalls] 一次性读出
+ *
+ * 拆分 content / reasoning 的目的:
+ * - 推理模型(DeepSeek-R1、QwQ、OpenAI o1/o3 等)会先在 `reasoning_content` /
+ *   `thinking_delta` 里吐出思考过程,再在 `content` / `text_delta` 里给出最终回答。
+ * - 旧版把两者合到同一个累加器,导致 UI 上 Thought 折叠区与主回复区显示同一段
+ *   「思考+回答」混合文本,翻译/解释/总结这类「直接给答案」的场景,答案会被折进
+ *   折叠区。拆开后,reply 字段(content)放最终回答,reasoning 字段(thinking)放
+ *   思考过程,各司其职,UI 上 Thinking 区仅在 reasoning 非空时出现。
  *
  * 为什么不把累加后的全文再 push 一次(全量回调):
  * - 全量回调在大回复时会重复构造整段字符串,Compose state diff 也会增大;
@@ -22,7 +31,13 @@ import java.nio.charset.StandardCharsets
  */
 internal class SseStreamParser(
     private val protocol: AiProtocol,
-    private val onDelta: (String) -> Unit
+    /**
+     * 增量文本回调。每收到一段 SSE 增量就触发一次,两个参数分别为:
+     * - contentCumulative: 截至目前**最终回答**文本的累计全文
+     * - reasoningCumulative: 截至目前**思考/推理**文本的累计全文
+     * 跑在后台线程,调用方自行切回 EDT。非推理模型的 reasoningCumulative 始终为 ""。
+     */
+    private val onDelta: (contentCumulative: String, reasoningCumulative: String) -> Unit
 ) {
     /**
      * 累积到的 tool_call 列表(按 tool_call 出现顺序)。
@@ -35,6 +50,18 @@ internal class SseStreamParser(
     )
 
     val toolCalls: MutableList<StreamedToolCall> = mutableListOf()
+
+    /** 内部累加器:content(最终回答)与 reasoning(思考/推理)分开维护。 */
+    private val contentBuf = StringBuilder()
+    private val reasoningBuf = StringBuilder()
+
+    /** 流解析结束后供调用方读取的「最终回答」全文(OpenAI content / Anthropic text)。 */
+    val contentText: String
+        get() = contentBuf.toString()
+
+    /** 流解析结束后供调用方读取的「思考/推理」全文(OpenAI reasoning_content / Anthropic thinking)。 */
+    val reasoningText: String
+        get() = reasoningBuf.toString()
 
     /** 解析 SSE 流,读完即返回。 */
     fun parse(stream: InputStream) {
@@ -96,7 +123,9 @@ internal class SseStreamParser(
                 err.isJsonPrimitive -> err.asString
                 else -> err.toString()
             }
-            onDelta("\n[stream error] $msg")
+            // 错误信息作为「最终回答」推到 content,UI 上当作文本展示
+            contentBuf.append("\n[stream error] $msg")
+            onDelta(contentBuf.toString(), reasoningBuf.toString())
             return
         }
         val choice = root.getAsJsonArray("choices")
@@ -104,25 +133,32 @@ internal class SseStreamParser(
             ?.asJsonObject ?: return
         val delta = choice.getAsJsonObject("delta") ?: return
 
-        // 文本增量
+        // 文本增量(最终回答)—— 进 content 累加器
         delta.get("content")?.let { contentEl ->
             val text = when {
                 contentEl.isJsonNull -> null
                 contentEl.isJsonPrimitive -> contentEl.asString
                 else -> contentEl.toString()
             }
-            if (!text.isNullOrEmpty()) onDelta(text)
+            if (!text.isNullOrEmpty()) {
+                contentBuf.append(text)
+                onDelta(contentBuf.toString(), reasoningBuf.toString())
+            }
         }
-        // OpenAI-compatible reasoning models(例如部分 DeepSeek/OpenRouter 模型)
-        // 会把思考过程放在 reasoning_content,普通 content 只保留最终回答。
-        // UI 的 Thinking 区块消费的正是 onDelta,所以这里也要纳入流式文本。
+        // OpenAI-compatible reasoning models(DeepSeek-R1、OpenAI o1/o3、部分
+        // OpenRouter 模型)把思考过程放在 reasoning_content,普通 content 只保留
+        // 最终回答。两者必须分开累加,否则 UI 上 Thought 折叠区会与主回复区
+        // 显示同一段「思考+回答」混合文本,把翻译/解释/总结的答案藏进折叠区。
         delta.get("reasoning_content")?.let { reasoningEl ->
             val text = when {
                 reasoningEl.isJsonNull -> null
                 reasoningEl.isJsonPrimitive -> reasoningEl.asString
                 else -> reasoningEl.toString()
             }
-            if (!text.isNullOrEmpty()) onDelta(text)
+            if (!text.isNullOrEmpty()) {
+                reasoningBuf.append(text)
+                onDelta(contentBuf.toString(), reasoningBuf.toString())
+            }
         }
 
         // 工具调用增量:delta.tool_calls 是稀疏数组(每项可能只含部分字段),按 index 合并
@@ -160,10 +196,13 @@ internal class SseStreamParser(
     private val anthropicBlocks: MutableList<AnthropicBlock> = mutableListOf()
 
     private data class AnthropicBlock(
-        val type: String,        // "text" 或 "tool_use"
+        val type: String,        // "text" / "thinking" / "tool_use"
         var id: String = "",
         var name: String = "",
+        // text_delta 进 textBuffer;thinking_delta 进 thinkingBuffer。
+        // 拆开两个 buffer,避免思考过程与最终回答被混进同一个累加器。
         var textBuffer: StringBuilder = StringBuilder(),
+        var thinkingBuffer: StringBuilder = StringBuilder(),
         var argsBuffer: StringBuilder = StringBuilder()
     )
 
@@ -175,7 +214,9 @@ internal class SseStreamParser(
                 val msg = if (err != null && err.isJsonObject) {
                     err.asJsonObject.get("message")?.asString ?: err.toString()
                 } else err.toString()
-                onDelta("\n[stream error] $msg")
+                // 错误信息作为「最终回答」推到 content,UI 上当作文本展示
+                contentBuf.append("\n[stream error] $msg")
+                onDelta(contentBuf.toString(), reasoningBuf.toString())
             }
             "content_block_start" -> {
                 val index = root.get("index")?.let { runCatching { it.asInt }.getOrNull() } ?: 0
@@ -199,12 +240,14 @@ internal class SseStreamParser(
                     "text_delta" -> {
                         val t = delta.get("text")?.asString ?: return
                         b.textBuffer.append(t)
-                        onDelta(t)
+                        contentBuf.append(t)
+                        onDelta(contentBuf.toString(), reasoningBuf.toString())
                     }
                     "thinking_delta" -> {
                         val t = delta.get("thinking")?.asString ?: return
-                        b.textBuffer.append(t)
-                        onDelta(t)
+                        b.thinkingBuffer.append(t)
+                        reasoningBuf.append(t)
+                        onDelta(contentBuf.toString(), reasoningBuf.toString())
                     }
                     "input_json_delta" -> {
                         val p = delta.get("partial_json")?.asString ?: return
