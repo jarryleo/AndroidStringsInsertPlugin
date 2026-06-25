@@ -106,8 +106,7 @@ object ToolDefinitions {
             "可同时调用多次以插入多个字符串。**translations 必须始终包含 \"values\"(默认英语)," +
             "并覆盖目标模块的全部语言** —— 一字不差对照 `recommendedDefaultModule.xmlFiles[].language`" +
             "(或显式 module 的 `xmlFiles[].language`)。" +
-            "module 优先级:用户在消息中**明确指定** > UI 中选中行所在模块 > 省略让系统用 `recommendedDefaultModule`" +
-            "(优先 currentModule,偏弱时退回最强模块)。" +
+            "module 优先级:用户在消息中**明确指定** > `recommendedDefaultModule` > UI 中选中行所在模块" +
             "若只想修改个别语言,请改用 update_string(部分语言更新,不覆写其他语言)。" +
             "插入前的两道查重(原文查重 + key 名查重)与「使用现有 key:」后的处理流程,见 system prompt 与 load_tool_doc(\"insert_strings\")。"
 

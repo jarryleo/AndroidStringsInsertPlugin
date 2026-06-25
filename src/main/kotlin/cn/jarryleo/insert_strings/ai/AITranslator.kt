@@ -82,7 +82,7 @@ object AITranslator {
 - 每次调用都会暂停 tool loop,不要反复调用;收到回复后用 `task_complete` 或操作推进。
 
 ## 写入规则
-- `module` 取自 `modules[].moduleName`,**不是** `androidProject.name`;有 `currentModule` 时默认用它,用户消息中明确指定模块时按用户来。
+- `module` 取自 `modules[].moduleName`,**不是** `androidProject.name`;优先使用 `recommendedDefaultModule`,用户消息中明确指定模块时按用户来。
 - 同一 AI 回合内的所有 `insert_strings` / `update_string` / `delete_string` 写入必须在同一模块(全部省略 module,或全部显式指定同一 module),**不要**用项目名当 module;系统会兜底拦截并把错误回传给你。
 - `delete_string` 是破坏性操作,执行前先 `read_string` 确认目标 key 与翻译,不确定时用 `ask_user` 与用户确认。
 
@@ -114,7 +114,7 @@ object AITranslator {
 - 实际语种以**目标模块的 `xmlFiles[].language`** 为准,不是 `availableLanguages`(后者可能只反映用户当前选中的行)。
 - `insert_strings` 的 `translations` **必须**覆盖目标模块全部语种,缺一会让那个语言在 UI 上显示空串/key 名;`values`(默认英语)始终要包含。
 - 不确定模块有哪些语种时,先 `query_keys` / `read_string` 探查,或直接读 `context.modules[].xmlFiles`;**不要**靠猜。
-- 「插入翻译」默认走 `recommendedDefaultModule`(优先 `currentModule`,偏弱时退回项目最强模块);用户明确指定模块时按用户来。
+- 「插入翻译」优先用 `recommendedDefaultModule`;用户明确指定模块时按用户来。
 - 操作 strings.xml 时**不要**触发 google sheet 写入。
 - 自动生成 key:snake_case,长度 ≤ 40 字符,查重后冲突则重新生成。
 
@@ -228,8 +228,7 @@ object AITranslator {
             字段：
             - module（可选）：目标 Android 模块名，取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。
               - 若用户在消息中**明确指定了模块**(例如「插到 feature 模块」「用 main 模块」「app 模块」),把 module 参数填上 — 这是用户意志,最高优先级。
-              - 若用户在 UI 中**选中了某行翻译**(见 `currentKeys` / `selectedRow`),该行所在模块就是用户当前工作模块 — 优先插入到该模块(把 module 显式写出来)。
-              - 否则省略 module,系统会自动用 `recommendedDefaultModule`(优先 currentModule,currentModule 偏弱时退回项目最强模块)。
+              - module 优先级:用户在消息中**明确指定** > `recommendedDefaultModule` > UI 中选中行所在模块"。
             - name（必填）：字符串 key，snake_case。
             - translations（必填）：键为语言目录名（如 values、values-zh-rCN、values-fr），值为对应翻译文本。
             规则（必须严格遵守,违反会导致 i18n 缺失）:
@@ -310,7 +309,7 @@ object AITranslator {
             ## read_string 详细用法
             读取指定 key 在模块所有语言的当前翻译。
             字段：
-            - module（可选）：目标 Android 模块名。省略时用 currentModule.moduleName。
+            - module（可选）：目标 Android 模块名。优先使用 `recommendedDefaultModule`,省略时用 currentModule.moduleName。
             - name（必填）：字符串 key 名。
             返回：key + 各语言当前翻译 + 各语言文件路径。若 key 不存在，返回「该 key 不存在」。
             典型场景：
@@ -327,7 +326,7 @@ object AITranslator {
             ## update_string 详细用法
             精准修改指定 key 的部分语言翻译（不动未列出的语言）。
             字段：
-            - module（可选）：目标 Android 模块名。省略时用 currentModule.moduleName。
+            - module（可选）：目标 Android 模块名。优先使用 `recommendedDefaultModule`,省略时用 currentModule.moduleName。
             - name（必填）：字符串 key，snake_case。
             - translations（必填）：键为语言目录名（values / values-zh-rCN / values-fr 等），值仅包含**需要修改**的翻译。
             关键规则：
@@ -343,7 +342,7 @@ object AITranslator {
             ## delete_string 详细用法
             删除指定 key 的翻译（破坏性操作）。
             字段：
-            - module（可选）：目标 Android 模块名。省略时用 currentModule.moduleName。
+            - module（可选）：目标 Android 模块名。优先使用 `recommendedDefaultModule`,省略时用 currentModule.moduleName。
             - name（必填）：字符串 key，snake_case。
             - languages（可选）：要删除的语言目录名列表（如 ["values-fr", "values-zh-rCN"]）。为空 / null / 省略时，删除该 key 在**所有语言**的翻译（整 key 被移除）；非空时，仅删除列表中指定语言的翻译，其他语言保持原样。
             安全约束：
