@@ -226,7 +226,7 @@ object AITranslator {
             ## insert_strings 详细用法
             向 Android strings.xml 插入或修改翻译字符串。
             字段：
-            - module（可选）：目标 Android 模块名，取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。
+            - module（可选）：目标 Android 模块名，取上下文 modules[].moduleName。
               - 若用户在消息中**明确指定了模块**(例如「插到 feature 模块」「用 main 模块」「app 模块」),把 module 参数填上 — 这是用户意志,最高优先级。
               - module 优先级:用户在消息中**明确指定** > `recommendedDefaultModule` > UI 中选中行所在模块"。
             - name（必填）：字符串 key，snake_case。

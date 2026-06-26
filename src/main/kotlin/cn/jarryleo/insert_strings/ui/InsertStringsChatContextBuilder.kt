@@ -3,7 +3,6 @@ package cn.jarryleo.insert_strings.ui
 import cn.jarryleo.insert_strings.sheets.SheetsManager
 import cn.jarryleo.insert_strings.sheets.SheetsSettingsService
 import cn.jarryleo.insert_strings.xml.ContextManager
-import cn.jarryleo.insert_strings.xml.KeyedStringsInfo
 import cn.jarryleo.insert_strings.xml.ModuleInfo
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
@@ -74,12 +73,12 @@ internal class InsertStringsChatContextBuilder(
                     addProperty(
                         "note",
                         "用户在 chat 入口打开时从编辑器中选中的硬编码文本。" +
-                            "**两个用途**:" +
-                            "(1) 插入翻译流程:若 chatEntry=extractStrings/askAi 且任务为「插入翻译」," +
-                            "AI 应把这段文本视为待翻译的原文,在用户选「使用现有 key:<key>」时" +
-                            "**必须**先调 replace_selection(key=<key>) 把这段选区替换为对 key 的引用。" +
-                            "(2) 引用面板快捷操作:用户点引用条目的「翻译 / 解释 / 总结」按钮时," +
-                            "按钮只发短指令(不重复带原文),AI 必须从本字段的 `text` 拿到原文,直接返回结果,不要调任何工具。"
+                                "**两个用途**:" +
+                                "(1) 插入翻译流程:若 chatEntry=extractStrings/askAi 且任务为「插入翻译」," +
+                                "AI 应把这段文本视为待翻译的原文,在用户选「使用现有 key:<key>」时" +
+                                "**必须**先调 replace_selection(key=<key>) 把这段选区替换为对 key 的引用。" +
+                                "(2) 引用面板快捷操作:用户点引用条目的「翻译 / 解释 / 总结」按钮时," +
+                                "按钮只发短指令(不重复带原文),AI 必须从本字段的 `text` 拿到原文,直接返回结果,不要调任何工具。"
                     )
                 })
             } else {
@@ -102,17 +101,24 @@ internal class InsertStringsChatContextBuilder(
             add("availableLanguages", JsonArray().apply {
                 availableLanguages.forEach { add(it) }
             })
-            add("currentKeys", JsonArray().apply {
-                state.keyEntries.forEach { entry ->
-                    add(JsonObject().apply {
-                        addProperty("key", entry.key)
-                        add("translations", JsonObject().apply {
-                            entry.stringsInfoList.filter { it.text.isNotEmpty() }.forEach {
-                                addProperty(it.language, it.text)
-                            }
+            add("currentSelectedKeys", JsonObject().apply {
+                addProperty(
+                    "note",
+                    "用户在主面板入口 mainPanel 打开时选择的strings.xml文件内的翻译文本,包含所有选中的key和翻译内容," +
+                            "用于翻译检查,修复,插入表格等需求。"
+                )
+                add("currentKeys", JsonArray().apply {
+                    state.keyEntries.forEach { entry ->
+                        add(JsonObject().apply {
+                            addProperty("key", entry.key)
+                            add("translations", JsonObject().apply {
+                                entry.stringsInfoList.filter { it.text.isNotEmpty() }.forEach {
+                                    addProperty(it.language, it.text)
+                                }
+                            })
                         })
-                    })
-                }
+                    }
+                })
             })
             add("googleSheets", JsonObject().apply {
                 addProperty("configured", sheetsConfigured)
