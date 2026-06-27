@@ -753,20 +753,26 @@ private fun ChatBubble(
             }
         } else {
             // === 助手气泡(assistant / user) ===
-            // 助手侧支持三段式结构:Thinking 区(可选) + content 回复区(可选) + options 区(可选)
-            // Thinking 区的展示规则:
-            //  - 始终在流式生成中展示(显示「Thinking」标题 + 动态脉动圆点,
-            //    如果还没有文本就只显示标题+圆点,让用户感知「模型正在思考」);
-            //  - 流式结束后,若积累了文本,就折叠成可点击展开的「Thought · N 行」区;
-            //  - 流式结束后若 thinking 为空(模型没产生思考文本),整个 Thinking 区消失,
-            //    只留下 content 回复区(简洁,不强行造占位)。
+            // 助手侧四段式结构:Thinking 区(可选) + content 正文区(可选) +
+            //                  askQuestion 询问文字区(可选,仅 ask_user) + options 区(下方)。
+            // 关键拆分 — 「思考 / 正文 / 询问文字」三段独立:
+            //  - Thinking 区:模型在调用工具/给出最终答案之前的中间发言,
+            //    UI 上折叠成可点击展开的「Thought · N 行」区;非推理模型或无文本时整个区消失。
+            //  - content 正文区:AI 同时返回的「前言/解释」等正文文本(finishWithReply 阶段
+            //    从 reply.reply 保留,ask_user 场景下不会被「执行操作: ask_user」占位覆盖)。
+            //  - askQuestion 询问文字区:仅 ask_user 工具调用携带的 question,由
+            //    [processAiReply] 的 AskUser 分支写入 ChatMessage.askQuestion 字段;
+            //    UI 上以「❓ Question」标签 + 问题正文渲染,与 content 正文视觉上完全分离,
+            //    避免旧实现把 question 覆盖进 content 时造成的"思考与正文被折叠在 Thought"误解。
+            //  - options 区:在气泡外部的 FlowRow 里渲染按钮,与 askQuestion 配套。
             val showThinkingHeader = !isUser &&
                     (message.streaming || message.thinking.isNotBlank())
             val showThinkingBox = !isUser && message.thinking.isNotBlank()
             val showReply = !isUser && message.content.isNotBlank()
+            val showAskQuestion = !isUser && !message.askQuestion.isNullOrBlank()
             val showUserContent = isUser && message.content.isNotBlank()
             // 只要有任何内容要展示,气泡外壳就要画出来
-            val hasAnyContent = showUserContent || showThinkingHeader || showReply
+            val hasAnyContent = showUserContent || showThinkingHeader || showReply || showAskQuestion
             if (hasAnyContent) {
                 Box(
                     modifier = Modifier.fillMaxWidth(),
@@ -788,8 +794,8 @@ private fun ChatBubble(
                                     colors = colors,
                                 )
                             }
-                            if (showThinkingHeader && showReply) {
-                                // 思考区与回复区之间的细分隔线
+                            // 思考区与正文/询问区之间的细分隔线:只要思考区存在 + 下方任一内容存在都画
+                            if (showThinkingHeader && (showReply || showAskQuestion)) {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -812,6 +818,44 @@ private fun ChatBubble(
                                         colors = bubbleColors,
                                         bubbleColor = bubbleColor,
                                     )
+                                }
+                            }
+                            // 询问文字区:仅 ask_user 消息渲染,顶部带「❓ Question」标签
+                            // 与下方 content 正文清晰分开,避免被吞进 Thought 折叠区。
+                            // 与正文区之间再加一条分隔线,保持三段式视觉一致。
+                            if (showAskQuestion) {
+                                if (showReply) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(1.dp)
+                                            .background(colors.grid)
+                                    )
+                                }
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        Text(
+                                            text = "❓",
+                                            color = colors.accent,
+                                            style = compactTextStyle(colors.accent),
+                                        )
+                                        Text(
+                                            text = "Question",
+                                            color = colors.accent,
+                                            style = compactTextStyle(colors.accent)
+                                                .copy(fontWeight = FontWeight.SemiBold),
+                                        )
+                                    }
+                                    SelectionContainer {
+                                        MarkdownContent(
+                                            markdown = message.askQuestion ?: "",
+                                            colors = bubbleColors,
+                                            bubbleColor = bubbleColor,
+                                        )
+                                    }
                                 }
                             }
                         }

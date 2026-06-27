@@ -29,6 +29,8 @@ data class ToolCall(
  * - [toolCalls]  助手消息携带的工具调用列表。
  * - [toolCallId] 工具结果消息关联的 tool_call_id(OpenAI 协议);Anthropic 协议下用同样的字段映射到 tool_use_id。
  * - [options]    UI 层 AskUser 按钮选项,与 AI 协议无关。
+ * - [askQuestion] AskUser 工具调用携带的「询问文字」,与 [content] 分开保存,避免与
+ *   AI 同时返回的「正文/前言」混淆;UI 端会把它渲染为独立的"❓ Question"区块。
  */
 data class ChatMessage(
     val role: String,
@@ -58,7 +60,21 @@ data class ChatMessage(
      * 流结束后 driver 会置为 false,UI 转为「可折叠的思考详情」形态。
      * 同上,本字段仅 UI 维护,不参与协议序列化。
      */
-    val streaming: Boolean = false
+    val streaming: Boolean = false,
+    /**
+     * AskUser 工具调用携带的「询问文字」(从 `ask_user` 工具的 `question` 参数读取)。
+     *
+     * 与 [content] 的关系:
+     * - [content] = AI 同时返回的「正文/前言」文本(可空,可能为「我需要问你一个问题」之类的引语);
+     * - [askQuestion] = 真正要展示给用户的问题文本,会被 UI 渲染为独立的"❓ Question"区块,
+     *   紧跟在 [content] 之后,与 [options] 按钮一起构成完整的「询问」交互单元;
+     * - 二者拆分是为了避免在 `processAiReply` 把 question 写进 [content] 时覆盖掉正文,
+     *   进而丢失"思考 / 正文 / 询问文字"三段式的清晰视觉。
+     *
+     * 仅 `processAiReply` 的 AskUser 分支会写入;非 ask_user 消息此字段为 null。
+     * 不参与 AI 协议序列化,仅 UI 渲染使用。
+     */
+    val askQuestion: String? = null,
 )
 
 object AITranslator {

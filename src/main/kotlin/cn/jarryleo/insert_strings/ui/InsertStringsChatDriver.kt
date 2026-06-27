@@ -476,15 +476,27 @@ internal class InsertStringsChatDriver(
                 // 情况 C:有真实工具调用(可叠加 task_complete,但 task_complete 之后会被前面分支截走,
                 //    所以这里只可能是纯真实工具调用)
                 else -> {
-                    val summary = if (realToolCalls.isNotEmpty()) {
-                        "执行操作: ${summarizeToolCalls(realToolCalls)}"
-                    } else if (reply.failedToolCalls.isNotEmpty()) {
-                        // 全部解析失败:在 content 上提示一下,用户能直接看到失败信息(否则 UI 上只看到一行「执行操作:」)
-                        "执行操作失败: ${summarizeToolCalls(reply.failedToolCalls)} 参数无法解析"
-                    } else {
-                        ""
+                    val hasAskUser = realToolCalls.any { it.name == ToolDefinitions.TOOL_ASK_USER }
+                    // 关键:当本轮含 ask_user 时,**不要**用「执行操作: ask_user」这种占位覆盖
+                    // content。ask_user 的「询问文字」会由 processAiReply 的 AskUser 分支单独存到
+                    // ChatMessage.askQuestion 字段,UI 端会把它渲染为独立的"❓ Question"区块;
+                    // content 字段则保留 reply.reply(AI 同时返回的「正文/前言」),这样最终气泡里
+                    // 「思考 / 正文 / 询问文字」三段式能清晰拆分,不会互相覆盖。
+                    val summary = when {
+                        realToolCalls.isNotEmpty() && !hasAskUser -> {
+                            "执行操作: ${summarizeToolCalls(realToolCalls)}"
+                        }
+                        reply.failedToolCalls.isNotEmpty() -> {
+                            // 全部解析失败:在 content 上提示一下,用户能直接看到失败信息(否则 UI 上只看到一行「执行操作:」)
+                            "执行操作失败: ${summarizeToolCalls(reply.failedToolCalls)} 参数无法解析"
+                        }
+                        else -> {
+                            // 含 ask_user(或纯 ask_user)时,正文由 reply.reply 承载;
+                            // reply.reply 为空则 content 也留空,避免「执行操作:」这种干扰阅读的占位。
+                            reply.reply
+                        }
                     }
-                    // 工具调用回合:content 写一行「执行操作:xxx」占位,thinking 写思考过程。
+                    // 工具调用回合:thinking 写思考过程;content 见上方分支注释。
                     Pair(summary, reply.reasoning)
                 }
             }
@@ -635,26 +647,31 @@ internal class InsertStringsChatDriver(
             }
 
             if (askAction.options.isNotEmpty()) {
-                // 带 options:把 question 写入 assistant 消息的 content(让用户看到问题),
+                // 带 options:把 question 写入 assistant 消息的 [ChatMessage.askQuestion](独立字段),
                 // options 挂到 options 字段(让 UI 渲染按钮)。记录 toolCallId,等待用户点击。
+                // 关键 — 拆分「询问文字」与「正文」:
+                //   * 旧实现把 question 直接写进 content 字段,会覆盖掉 finishWithReply
+                //     阶段保留的 AI 正文(reply.reply,例如「我需要问你一个问题」之类的引语);
+                //   * 新增 [ChatMessage.askQuestion] 字段后,question 单独存,UI 端
+                //     「思考 / 正文 / 询问文字 / 选项按钮」四段式能清晰展示,互不挤压。
                 // 修复:之前只挂 options,question 文本被吞掉,用户只看到「执行操作: ask_user」+ 按钮,
                 //      完全不知道 AI 在问什么(流式累积的 thinking 在回合结束后被折叠,看不到)。
                 // 保留 thinking:用户希望每个 AI 回复气泡都能展开查看思考文字。
-                // question 写入 content 后,折叠态仍以问题本身为主,思考只在用户展开时出现。
                 val lastIdx = state.chatMessages.lastIndex
                 if (lastIdx >= 0) {
                     state.chatMessages[lastIdx] = state.chatMessages[lastIdx].copy(
-                        content = askAction.question,
-                        options = askAction.options
+                        askQuestion = askAction.question,
+                        options = askAction.options,
                     )
                 }
             } else {
-                // 无 options:把 question 写入 assistant 消息的 content,
-                // 提示用户到输入框中回复;toast 作为辅助提示。thinking 保留为可展开详情。
+                // 无 options:同样把 question 写入 [ChatMessage.askQuestion] 而非 content,
+                // 保持拆分语义;UI 会渲染为独立的"❓ Question"区块,提示用户到输入框中回复。
+                // toast 作为辅助提示。thinking 保留为可展开详情。
                 val lastIdx = state.chatMessages.lastIndex
                 if (lastIdx >= 0) {
                     state.chatMessages[lastIdx] = state.chatMessages[lastIdx].copy(
-                        content = askAction.question
+                        askQuestion = askAction.question,
                     )
                 }
                 state.showToast(askAction.question)
