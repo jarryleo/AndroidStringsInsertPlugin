@@ -819,7 +819,7 @@ private fun ChatBubble(
                 // 气泡本身(不再有 32dp 边距,边距在 Row 上)
                 Box(
                     modifier = Modifier
-                        .weight(1f)
+                        .weight(1f, fill = false)
                         .background(bubbleColor, RoundedCornerShape(12.dp))
                         .then(border)
                         .padding(horizontal = 10.dp, vertical = 6.dp),

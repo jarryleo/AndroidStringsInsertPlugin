@@ -170,9 +170,10 @@ object ToolDefinitions {
     private const val DESC_TODO_ADD =
         "新增一条代办;title 必填,content / priority(LOW/NORMAL/HIGH/URGENT,默认 NORMAL)可选。" +
             "新条目默认未完成,优先级高的会浮在 Todo tab 列表顶部。" +
-            "**支持设置提醒**:可选 reminderTime(Unix 毫秒时间戳) + recurrence(NONE/DAILY/WEEKDAYS/WEEKLY/CUSTOM)" +
-            " + recurrenceDays(1-7 数组,仅 CUSTOM 生效);" +
-            "到点会在 IDE 右下角弹非模态提醒框,用户可选「完成 / 1m / 5m / 10m」。" +
+            "**支持设置提醒**:可选 reminderTime(Unix 毫秒时间戳) + recurrence(NONE/DAILY/CUSTOM,无 WEEKDAYS/WEEKLY)" +
+                " + recurrenceDays(1-7 数组,仅 CUSTOM 生效);" +
+                "**「工作日」= CUSTOM + [1,2,3,4,5],「周末」= CUSTOM + [6,7]**,不要传 WEEKDAYS / WEEKLY。" +
+                "到点会在 IDE 右下角弹非模态提醒框,用户可选「完成 / 1m / 5m / 10m」。" +
             "**典型场景**:用户说「提醒我周五前修 X」「5 分钟后提醒我喝水」「明天下午 3 点开周会」时," +
             "先调 current_time 拿时间戳,再 todo_add(title=..., reminderTime=..., recurrence=...);" +
             "循环提醒(每周一三五开会)用 recurrence=CUSTOM + recurrenceDays=[1,3,5]。" +
@@ -980,8 +981,6 @@ object ToolDefinitions {
         val recurrenceEnum = JsonArray().apply {
             add("NONE")
             add("DAILY")
-            add("WEEKDAYS")
-            add("WEEKLY")
             add("CUSTOM")
         }
         return obj {
@@ -1020,9 +1019,11 @@ object ToolDefinitions {
                     add("enum", recurrenceEnum)
                     addProperty(
                         "description",
-                        "可选,循环类型:NONE(默认,一次性)/ DAILY(每天固定时间)/ WEEKDAYS(周一至周五)/ " +
-                            "WEEKLY(每周同一天)/ CUSTOM(自定义,配合 recurrenceDays)。" +
-                            "省略 = NONE(一次性)。触发后:NONE 自动清除;DAILY/WEEKDAYS/WEEKLY/CUSTOM 自动滚动到下一次。"
+                        "可选,循环类型:NONE(默认,一次性)/ DAILY(每天固定时间)/ " +
+                            "CUSTOM(自定义星期几,配合 recurrenceDays)。" +
+                            "**没有 WEEKDAYS / WEEKLY 这两个值** —— 用户说「工作日」请传 CUSTOM + recurrenceDays=[1,2,3,4,5]," +
+                            "「周末」传 CUSTOM + recurrenceDays=[6,7]。" +
+                            "省略 = NONE(一次性)。触发后:NONE 自动清除;DAILY/CUSTOM 自动滚动到下一次。"
                     )
                 })
                 add("recurrenceDays", obj {
@@ -1032,8 +1033,10 @@ object ToolDefinitions {
                         addProperty(
                             "description",
                             "1=周一, 2=周二, ..., 7=周日。仅 recurrence=CUSTOM 时使用," +
-                                "其它 recurrence 忽略本字段。" +
-                                "例:用户说「每周一三五提醒开会」 → [1, 3, 5]。"
+                                "DAILY/NONE 忽略本字段。" +
+                                "例:用户说「每周一三五提醒开会」 → [1, 3, 5];" +
+                                "「工作日提醒我」 → [1, 2, 3, 4, 5];" +
+                                "「周末提醒我」 → [6, 7]。"
                         )
                     })
                     addProperty(
@@ -1050,8 +1053,6 @@ object ToolDefinitions {
         val recurrenceEnum = JsonArray().apply {
             add("NONE")
             add("DAILY")
-            add("WEEKDAYS")
-            add("WEEKLY")
             add("CUSTOM")
         }
         return obj {
@@ -1095,7 +1096,12 @@ object ToolDefinitions {
                 add("recurrence", obj {
                     addProperty("type", "string")
                     add("enum", recurrenceEnum)
-                    addProperty("description", "新循环类型(null = 不改;其它语义同 todo_add.recurrence)。")
+                    addProperty(
+                        "description",
+                        "新循环类型(null = 不改;其它语义同 todo_add.recurrence)。" +
+                            "**没有 WEEKDAYS / WEEKLY 这两个值** —— 「工作日」改用 CUSTOM + recurrenceDays=[1,2,3,4,5]," +
+                            "「周末」用 CUSTOM + recurrenceDays=[6,7]。"
+                    )
                 })
                 add("recurrenceDays", obj {
                     addProperty("type", "array")

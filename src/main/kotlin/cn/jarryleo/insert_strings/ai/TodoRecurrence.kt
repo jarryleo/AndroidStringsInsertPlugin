@@ -28,33 +28,44 @@ enum class TodoRecurrence {
     DAILY,
 
     /**
-     * 周一到周五(工作日)固定时间触发;周末跳过。
-     * 触发后滚动到「下一个工作日的同一时间」。
+     * 自定义每周哪几天(由 [TodoReminder.recurrenceDays] 决定,1-7 表示周一到周日)
+     * 固定时间触发。触发后滚动到「下一个匹配 day-of-week 的同一时间」。
+     *
+     * 包含 AI 端口语化的「工作日」(一/二/三/四/五)与「周末」(六/日),都通过
+     * CUSTOM + 对应 [recurrenceDays] 表示,不再单设枚举值。
      */
+    CUSTOM,
+
+    // ===== 以下两个枚举值为历史遗留,仅用于反序列化老 XML 数据 =====
+    // 触发后由 [TodoReminder.recurrence] setter 立即迁移到 [CUSTOM] + 对应 days,
+    // UI、AI 提示词、JSON schema 都不再暴露它们。新代码请勿直接引用。
+
+    /**
+     * @deprecated 已合并到 [CUSTOM] + recurrenceDays=[1,2,3,4,5];保留仅为
+     * 兼容 `insertStringsTodos.xml` 里的老数据。setter 会在反序列化时自动迁移。
+     */
+    @Deprecated("合并到 CUSTOM + recurrenceDays=[1,2,3,4,5],保留仅为反序列化兼容")
     WEEKDAYS,
 
     /**
-     * 每周固定一天(由原始 [TodoReminder.nextTriggerAt] 落在星期几决定)同一时间触发。
-     * 触发后滚动到「下周的同一天同一时间」。
+     * @deprecated 已合并到 [CUSTOM] + recurrenceDays=[原 nextTriggerAt 对应 day-of-week];
+     * 保留仅为兼容 `insertStringsTodos.xml` 里的老数据。setter 会在反序列化时自动迁移。
      */
+    @Deprecated("合并到 CUSTOM + recurrenceDays=[原 nextTriggerAt day-of-week],保留仅为反序列化兼容")
     WEEKLY,
-
-    /**
-     * 自定义每周哪几天(由 [TodoReminder.recurrenceDays] 决定,1-7 表示周一到周日)
-     * 固定时间触发。触发后滚动到「下一个匹配 day-of-week 的同一时间」。
-     */
-    CUSTOM;
+    ;
 
     /**
      * UI / 文档用的中文显示名。AI 通信仍用 enum name(英文),避免多语言歧义。
+     *
+     * WEEKDAYS / WEEKLY 不返回显示名(若被读到说明数据迁移未完成,UI 应走 CUSTOM 分支)。
      */
     val displayName: String
         get() = when (this) {
             NONE -> "一次性"
             DAILY -> "每日"
-            WEEKDAYS -> "工作日"
-            WEEKLY -> "每周"
             CUSTOM -> "自定义"
+            WEEKDAYS, WEEKLY -> "自定义"
         }
 
     companion object {
@@ -95,7 +106,7 @@ data class TodoTimeOfDay(
      * 把当前时间点滚动到「下一个匹配 day-of-week 的同一时间」。
      * - [from]: 从哪个时间开始往后算(通常 = now 或上次触发时间)
      * - [allowedDaysOfWeek]: 1-7 (周一到周日) 的可触发日集合;
-     *                        为空时退回到 from 后一天的同日(用于 WEEKLY 等单 day 场景)。
+     *                        为空时退回到 from 后一天的同日(用于 DAILY 等任意 day 场景)。
      * - 返回:严格 > from 的最近一次触发时间戳。
      *
      * 规则:

@@ -35,7 +35,7 @@ There is no `runIde` task. To test the plugin, install the ZIP from `build/distr
 - **Sheets** (`src/main/kotlin/.../sheets/`): `SheetsManager` + `SheetsSettingsService` + `SheetsSettingsState` for Google Sheets sync. OAuth client secret lives at `src/main/resources/META-INF/client_secret.json`.
 - **Phrases** (`src/main/kotlin/.../phrases/`): `QuickPhrase` / `QuickPhrasesService` (also `applicationService`) / `DefaultPhrases` — quick-phrase snippets.
 - **Todo + Reminders** (`src/main/kotlin/.../ai/Todo*.kt` + `ui/TodosContent.kt` + `ui/TodoReminderPopup.kt`):
-  `TodoItem` / `TodoService` 持久化代办;`TodoRecurrence` (NONE/DAILY/WEEKDAYS/WEEKLY/CUSTOM)
+  `TodoItem` / `TodoService` 持久化代办;`TodoRecurrence` (NONE/DAILY/CUSTOM)
   + `TodoReminder` 配置循环;`TodoReminderScheduler` (applicationService, 标注 `@Service`) 用
   `ScheduledExecutorService` 调度下一次触发;`TodoReminderStartupActivity` 在 IDE 启动时
   rescheduleAll 让磁盘上的未来提醒重新进入 Timer 队列;
@@ -46,7 +46,7 @@ There is no `runIde` task. To test the plugin, install the ZIP from `build/distr
   - 过期清理: 24h+ 过期的「一次性」提醒在 scheduler 启动时静默清除(用户已确认);
     临近过期的一次性提醒立即触发弹框;循环提醒无论过期多久都滚动到下一次。
   - AI 工具参数: `todo_add` / `todo_update` 暴露 `reminderTime` (Unix 毫秒时间戳) +
-    `recurrence` (NONE/DAILY/WEEKDAYS/WEEKLY/CUSTOM) + `recurrenceDays` (1-7 数组) +
+    `recurrence` (NONE/DAILY/CUSTOM,无 WEEKDAYS/WEEKLY) + `recurrenceDays` (1-7 数组) +
     `clearReminder` (bool)。AI 自行把「5 分钟后」「明天下午 3 点」「每周一三五」转成结构化参数。
 
 ## Key Conventions

@@ -176,12 +176,13 @@ sealed class AiAction {
      *                        AI 转换「5 分钟后」「明天下午 3 点」时,自己算好时间戳再传。
      *                        一次性提醒时 = 触发时间;循环提醒时 = 首次触发时间,
      *                        后续按 [recurrence] 滚动。
-     * @param recurrence     可选,循环类型(NONE/DAILY/WEEKDAYS/WEEKLY/CUSTOM);null/未知 = NONE。
+     * @param recurrence     可选,循环类型(NONE/DAILY/CUSTOM,无 WEEKDAYS/WEEKLY);null/未知 = NONE。
      *                        NONE 时,触发后自动清除提醒;
-     *                        DAILY/WEEKDAYS/WEEKLY/CUSTOM 时,触发后滚动到下一次。
+     *                        DAILY/CUSTOM 时,触发后滚动到下一次。
+     *                        AI 转换「工作日」用 CUSTOM + [1,2,3,4,5],「周末」用 CUSTOM + [6,7]。
      * @param recurrenceDays 可选,自定义循环的星期几(1=周一,...,7=周日);
      *                        仅 [recurrence] = CUSTOM 时使用,其它类型忽略。
-     *                        AI 转换「每周一三五」时传 [1, 3, 5]。
+     *                        AI 转换「每周一三五」时传 [1, 3, 5];"工作日"传 [1,2,3,4,5];"周末"传 [6,7]。
      */
     data class TodoAdd(
         val title: String,

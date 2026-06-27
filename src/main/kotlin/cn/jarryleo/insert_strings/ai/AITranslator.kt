@@ -186,7 +186,10 @@ object AITranslator {
   - 用户说「5 分钟后提醒我喝水」/「明天下午 3 点开周会」→ 涉及**绝对时间**必须先调 `current_time` 拿 timestamp,
     再用 `todo_add(title=..., reminderTime=<时间戳>, recurrence=...)` 写提醒;`recurrence` 不传默认 NONE(一次性)。
   - 用户说「每周一三五提醒开会」/「每天早上 9 点提醒 X」→ `recurrence="CUSTOM"` 配合 `recurrenceDays=[1,3,5]`,
-    或 `recurrence="DAILY"` / `"WEEKDAYS"` / `"WEEKLY"`。
+    或 `recurrence="DAILY"`(DAILY 无需 recurrenceDays)。
+  - 用户说「工作日提醒我 X」/「上班日 9 点」→ **`recurrence="CUSTOM"` + `recurrenceDays=[1,2,3,4,5]`**(没有 WEEKDAYS 这个枚举值)。
+  - 用户说「周末提醒我 X」/「周六周日」→ **`recurrence="CUSTOM"` + `recurrenceDays=[6,7]`**(没有 WEEKLY 这个枚举值)。
+  - 用户说「每周一」/「每周三下午 4 点」→ `recurrence="CUSTOM"` + `recurrenceDays=[1]` / `[3]`,单 day 即可。
   - 用户说「把 X 标为完成」→ 先 `todo_list` 拿 id,再 `todo_update(id=..., isCompleted=true)`(系统自动写 completedAt)。
   - 用户说「把 X 改成 URGENT」/「X 不用了取消」/「X 改到 6 点提醒」/「X 改成每天 9 点」/
     「X 改成每周一三五」/「X 的提醒删了」→ 全部走 `todo_update(id=..., <字段>=...)`,按需传
@@ -962,7 +965,7 @@ object AITranslator {
               // "reminder": {
               //   "enabled": true,
               //   "nextTriggerAt": 1700003600000,    // 下一次触发的绝对时间戳(毫秒)
-              //   "recurrence": "DAILY",              // NONE/DAILY/WEEKDAYS/WEEKLY/CUSTOM
+              //   "recurrence": "DAILY",              // NONE/DAILY/CUSTOM(无 WEEKDAYS/WEEKLY)
               //   "timeOfDay": {"hour":15,"minute":0},// 一天中的固定时分(循环提醒用)
               //   "recurrenceDays": []                 // 1-7 表示周一到周日,仅 CUSTOM 生效
               // }
@@ -997,20 +1000,27 @@ object AITranslator {
               用户说「明天下午 3 点」→ 用本地时区算次日 15:00 的时间戳再传(系统按本地时区解析)。
             - recurrence(可选,默认 "NONE"):循环类型,
               枚举 "NONE"(一次性,触发后自动清除)/ "DAILY"(每天固定时间)/
-              "WEEKDAYS"(周一至周五)/ "WEEKLY"(每周同一天)/ "CUSTOM"(自定义,配合 recurrenceDays)。
-              触发后:NONE 自动清除整条 reminder;DAILY/WEEKDAYS/WEEKLY/CUSTOM 自动滚动 nextTriggerAt 到下一次。
+              "CUSTOM"(自定义,配合 recurrenceDays)。
+              **没有 WEEKDAYS / WEEKLY 这两个枚举值** —— 用户说「工作日」请传
+              recurrence="CUSTOM" + recurrenceDays=[1,2,3,4,5],「周末」传
+              recurrence="CUSTOM" + recurrenceDays=[6,7]。「每周 X」同理用 CUSTOM + 单 day 列表。
+              触发后:NONE 自动清除整条 reminder;DAILY/CUSTOM 自动滚动 nextTriggerAt 到下一次。
             - recurrenceDays(可选,默认 []):自定义循环的星期几列表,1=周一...7=周日;
-              **仅 recurrence=CUSTOM 时生效**,其它循环类型忽略本字段。
+              **仅 recurrence=CUSTOM 时生效**,DAILY/NONE 忽略本字段。
               至少要选一天,否则系统会校验失败。
-              例:用户说「每周一三五提醒开会」→ recurrence="CUSTOM", recurrenceDays=[1,3,5]。
+              例:用户说「每周一三五提醒开会」→ recurrence="CUSTOM", recurrenceDays=[1,3,5];
+              「工作日提醒我」→ recurrence="CUSTOM", recurrenceDays=[1,2,3,4,5];
+              「周末提醒我」→ recurrence="CUSTOM", recurrenceDays=[6,7]。
             返回:新条目的完整对象(包含 id 与 reminder),你可以在下一轮用 todo_update / todo_delete 引用这个 id。
             典型场景:
             - 用户说「提醒我周五前修 X bug」→ title="修 X bug",priority=HIGH, 不设 reminder(只记录)。
             - 用户说「5 分钟后提醒我喝水」→ 先 current_time 拿 timestamp,
               再 todo_add(title="喝水", reminderTime=timestamp+5*60*1000, recurrence="NONE")。
             - 用户说「明天下午 3 点开周会」→ 先 current_time + 本地时区算 15:00 时间戳,
-              再 todo_add(title="开周会", reminderTime=timestamp, recurrence="WEEKLY")。
+              再 todo_add(title="开周会", reminderTime=timestamp, recurrence="CUSTOM", recurrenceDays=[2])。
             - 用户说「每周一三五提醒开会」→ recurrence="CUSTOM", recurrenceDays=[1,3,5],reminderTime 传下一个匹配日的具体时间。
+            - 用户说「工作日 9 点提醒我打卡」→ recurrence="CUSTOM", recurrenceDays=[1,2,3,4,5],reminderTime 传下一个工作日 9 点的本地时间戳。
+            - 用户说「周末提醒我买菜」→ recurrence="CUSTOM", recurrenceDays=[6,7],reminderTime 传下一个周末的本地时间戳。
             - AI 主动建议「我帮你记下来?」并得到用户肯定 → 调本工具。
             注意:
             - 不需要先 todo_list 再 add,直接 add 即可(id 由系统分配)。
@@ -1022,8 +1032,9 @@ object AITranslator {
             {"type":"todo_add","title":"修登录页 bug","priority":"HIGH"}
             {"type":"todo_add","title":"联系客户 Y","content":"谈 v2.0 上线时间","priority":"NORMAL"}
             {"type":"todo_add","title":"喝水","reminderTime":1730000000000,"recurrence":"NONE"}
-            {"type":"todo_add","title":"开周会","reminderTime":1730011200000,"recurrence":"WEEKLY"}
-            {"type":"todo_add","title":"开周会","reminderTime":1730011200000,"recurrence":"CUSTOM","recurrenceDays":[1,3,5]}
+            {"type":"todo_add","title":"工作日 9 点打卡","reminderTime":1730011200000,"recurrence":"CUSTOM","recurrenceDays":[1,2,3,4,5]}
+            {"type":"todo_add","title":"周末买菜","reminderTime":1730011200000,"recurrence":"CUSTOM","recurrenceDays":[6,7]}
+            {"type":"todo_add","title":"开周会","reminderTime":1730011200000,"recurrence":"CUSTOM","recurrenceDays":[2]}
         """.trimIndent(),
 
         "todo_update" to """
@@ -1041,6 +1052,7 @@ object AITranslator {
               仅替换 nextTriggerAt;若想整体改成一次性,显式传 recurrence="NONE")。
             - recurrence(可选,默认 null):新循环类型(null = 不改;其它枚举同 todo_add.recurrence)。
               "NONE" = 一次性,触发后自动清除整条 reminder;循环类型触发后自动滚动到下一次。
+              **没有 WEEKDAYS / WEEKLY 这两个值**;「改成工作日提醒」用 CUSTOM + recurrenceDays=[1,2,3,4,5] 同时传。
             - recurrenceDays(可选,默认 null):新 CUSTOM 循环的星期几列表(null = 不改);
               1=周一...7=周日,仅 recurrence=CUSTOM 时使用,其它类型忽略。
             - clearReminder(可选,默认 false):显式清除整条提醒(等价于把 TodoItem.reminder 置 null,
@@ -1054,6 +1066,8 @@ object AITranslator {
             - 用户说「把 X 改到 6 点提醒」→ todo_update(id=..., reminderTime=<新时间戳>)。
             - 用户说「把 X 改成每天 9 点提醒」→ todo_update(id=..., reminderTime=<新时间戳>, recurrence="DAILY")。
             - 用户说「把 X 改成每周一三五」→ todo_update(id=..., recurrence="CUSTOM", recurrenceDays=[1,3,5])。
+            - 用户说「把 X 改成工作日提醒」→ todo_update(id=..., recurrence="CUSTOM", recurrenceDays=[1,2,3,4,5])。
+            - 用户说「把 X 改成周末提醒」→ todo_update(id=..., recurrence="CUSTOM", recurrenceDays=[6,7])。
             - 用户说「X 的提醒删了」/「X 不用再提醒了」→ todo_update(id=..., clearReminder=true)。
             - 想同时改多个字段(标题+优先级+提醒)→ 一次 todo_update(id=..., title=..., priority=..., reminderTime=...)。
             注意:
@@ -1066,6 +1080,8 @@ object AITranslator {
             {"type":"todo_update","id":"abc-123","priority":"URGENT","title":"紧急:修登录页"}
             {"type":"todo_update","id":"abc-123","reminderTime":1730011200000,"recurrence":"DAILY"}
             {"type":"todo_update","id":"abc-123","recurrence":"CUSTOM","recurrenceDays":[1,3,5]}
+            {"type":"todo_update","id":"abc-123","recurrence":"CUSTOM","recurrenceDays":[1,2,3,4,5]}
+            {"type":"todo_update","id":"abc-123","recurrence":"CUSTOM","recurrenceDays":[6,7]}
             {"type":"todo_update","id":"abc-123","clearReminder":true}
         """.trimIndent(),
 

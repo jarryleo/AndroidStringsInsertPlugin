@@ -224,18 +224,19 @@ class TodoReminderPopup(
         return area
     }
 
+    @Suppress("DEPRECATION")
     private fun buildNextLabel(reminder: TodoReminder): String {
         val now = timeFormatter.format(Date())
         val next = reminder.nextTriggerAt?.let { timeFormatter.format(Date(it)) } ?: "-"
         val recurrenceDesc = when (reminder.recurrence) {
             TodoRecurrence.NONE -> "一次性"
             TodoRecurrence.DAILY -> "每日"
-            TodoRecurrence.WEEKDAYS -> "工作日"
-            TodoRecurrence.WEEKLY -> "每周"
             TodoRecurrence.CUSTOM -> {
                 val days = reminder.recurrenceDays.sorted().joinToString(",")
                 "自定义($days)"
             }
+            // 兼容老数据:setter 已自动迁移,这里兜底按 CUSTOM 显示。
+            TodoRecurrence.WEEKDAYS, TodoRecurrence.WEEKLY -> "自定义(${reminder.recurrenceDays.sorted().joinToString(",")})"
         }
         val timeOfDay = reminder.timeOfDay?.format() ?: "-"
         return "触发:$now  ·  循环:$recurrenceDesc  ·  下次:$next  ·  时分:$timeOfDay"

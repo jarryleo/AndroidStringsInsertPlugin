@@ -35,12 +35,37 @@ class TodoService : PersistentStateComponent<TodoState> {
 
     override fun getState(): TodoState = state
 
+    @Suppress("DEPRECATION")
     override fun loadState(state: TodoState) {
         this.state = state
         // 防御性:历史数据可能缺 id(早期版本或外部导入);为缺 id 的条目补一个 UUID,
         // 避免后续 update/delete 时无法定位。
         state.items.forEach { item ->
             if (item.id.isBlank()) item.id = UUID.randomUUID().toString()
+        }
+        // 防御性:磁盘上的老 XML 仍可能含 WEEKDAYS / WEEKLY 这两种已合并的循环类型。
+        // XmlSerializer 在反序列化时调 setter 走 [TodoReminder] 上的迁移逻辑即可,
+        // 这里再补一次保证:任何从 state.items 直接读出来的 reminder 都已是新枚举。
+        // (setter 已处理了反序列化路径,这里只兜底「未来若有人跳过 setter 直接赋值」的情况。)
+        state.items.forEach { item ->
+            val r = item.reminder ?: return@forEach
+            when (r.recurrence) {
+                TodoRecurrence.WEEKDAYS -> {
+                    r.recurrence = TodoRecurrence.CUSTOM
+                    if (r.recurrenceDays.isEmpty()) r.recurrenceDays = (1..5).toMutableSet()
+                }
+                TodoRecurrence.WEEKLY -> {
+                    r.recurrence = TodoRecurrence.CUSTOM
+                    if (r.recurrenceDays.isEmpty()) {
+                        val at = r.nextTriggerAt ?: System.currentTimeMillis()
+                        val dow = TodoTimeOfDay.toCalendarDayOfWeek(
+                            java.util.Calendar.getInstance().apply { timeInMillis = at }
+                        )
+                        r.recurrenceDays = mutableSetOf(dow)
+                    }
+                }
+                else -> Unit
+            }
         }
     }
 

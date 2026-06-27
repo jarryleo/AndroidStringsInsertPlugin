@@ -464,19 +464,19 @@ private fun formatReminderTime(timestamp: Long): String {
 }
 
 /**
- * 循环类型的简短描述,例如「每日 09:30」「工作日」「每周 09:30」「周一/三/五 09:30」「一次性」。
+ * 循环类型的简短描述,例如「每日 09:30」「周一/三/五 09:30」「一次性」。
  */
 private fun formatRecurrence(r: TodoReminder): String {
     val tod = r.timeOfDay?.format() ?: "-"
     return when (r.recurrence) {
         TodoRecurrence.NONE -> "一次性 $tod"
         TodoRecurrence.DAILY -> "每日 $tod"
-        TodoRecurrence.WEEKDAYS -> "工作日 $tod"
-        TodoRecurrence.WEEKLY -> "每周 $tod"
         TodoRecurrence.CUSTOM -> {
             val days = r.recurrenceDays.sorted().joinToString("") { dowToShort(it) }
             "每周$days $tod"
         }
+        // 兼容老数据:setter 会立即迁移,理论上这里看不到;兜底走 CUSTOM 显示。
+        TodoRecurrence.WEEKDAYS, TodoRecurrence.WEEKLY -> "每周 ${r.recurrenceDays.sorted().joinToString("") { dowToShort(it) }} $tod"
     }
 }
 
@@ -772,13 +772,15 @@ private fun TodoReminderSection(
             )
         }
 
-        // 循环类型下拉(用 5 个 CompactButton 模拟,避免引入 DropdownMenu)
+        // 循环类型下拉(用 CompactButton 模拟,避免引入 DropdownMenu)
+        // 只展示 NONE/DAILY/CUSTOM 三个;WEEKDAYS/WEEKLY 已合并到 CUSTOM,UI 不再提供。
         SettingsLabel("Recurrence", colors)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            TodoRecurrence.entries.forEach { r ->
+            val visible = listOf(TodoRecurrence.NONE, TodoRecurrence.DAILY, TodoRecurrence.CUSTOM)
+            visible.forEach { r ->
                 CompactButton(
                     text = r.displayName,
                     onClick = { recurrence = r },
