@@ -146,6 +146,14 @@ class TodoReminderScheduler : Disposable {
      *
      * 这里用 itemId 而不是 TodoItem 引用,避免后台线程持有 UI 状态(可能已被 UI 重排)。
      *
+     * **已完成拦截**(2026.x):用户已勾选完成的代办不应再弹提醒 —
+     * Timer 到期时若发现 isCompleted=true,**不弹框、不触发 AI**,
+     * 改为 rescheduleAll 让调度器把"下一条最早该弹的"代办重新入队。
+     * 这样:
+     * - 一次性:rescheduleAll 后这条代办已不在 activeReminders 列表里,自然不再被调度;
+     * - 循环型:用户取消勾选时,UI 调 setCompleted(false) → notifyReminderChanged → rescheduleAll,
+     *   重新算 nextTriggerAt 并入队,弹框能继续。
+     *
      * **AI 触发**(2026.x 新增):弹框同时,通过 [TodoAiResponder] 把"提醒 X 已触发"
      * 作为系统消息发给 AI,等待一段简短友好的中文回复(1-2 句),
      * AI 回复到后用 IDE 通知气泡在右下角展示,与弹框互补:
@@ -161,6 +169,12 @@ class TodoReminderScheduler : Disposable {
             if (reminder.nextTriggerAt == null) {
                 TodoService.getInstance().setReminder(itemId, null)
                 refreshUiList()
+                return@invokeLater
+            }
+            // 已勾选完成 → 静默跳过 + 重新调度(让下一条最早该弹的代办入队,或循环型等用户取消勾选)。
+            // 兜底:即便 UI 端 setCompleted 没通知调度器,这里也能自愈。
+            if (item.isCompleted) {
+                rescheduleAll()
                 return@invokeLater
             }
             // 1) 弹原始终端弹框(用户能点 snooze/done)

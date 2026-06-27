@@ -383,10 +383,17 @@ private fun TodoRow(
                     val next = reminder.nextTriggerAt
                     val nextText = if (next != null) formatReminderTime(next) else "(未设置)"
                     val recurrenceText = formatRecurrence(reminder)
+                    val isExpired = isReminderExpired(reminder)
+                    val expiredLabel = if (isExpired) "  ·  ⚠ 已过期" else ""
+                    val displayColor = when {
+                        isCompleted -> colors.secondaryText
+                        isExpired -> EXPIRED_REMINDER_COLOR
+                        else -> colors.accent
+                    }
                     Text(
-                        text = "⏰ 下次:$nextText  ·  $recurrenceText",
-                        color = if (isCompleted) colors.secondaryText else colors.accent,
-                        style = compactTextStyle(if (isCompleted) colors.secondaryText else colors.accent),
+                        text = "⏰ 下次:$nextText  ·  $recurrenceText$expiredLabel",
+                        color = displayColor,
+                        style = compactTextStyle(displayColor),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -453,6 +460,23 @@ private fun ReminderIndicator(reminder: TodoReminder?, isEditing: Boolean) {
         // 占位:维持 14sp 宽度的空白,避免 checkbox 与优先级色块挤压
         Spacer(modifier = Modifier.size(0.dp))
     }
+}
+
+/**
+ * 已过期提醒的标注色(深红,与普通 accent 蓝形成对比,显眼但不至于扎眼)。
+ * 与 [TodoReminderSection] 里校验失败的红色保持一致以视觉统一。
+ */
+private val EXPIRED_REMINDER_COLOR = Color(0xFFB91C1C)
+
+/**
+ * 判断 [r] 是否处于「已过期」状态:仅当下一次触发时间已过去才算。
+ * - 关闭的(enabled=false)不算过期(用户已主动停用);
+ * - nextTriggerAt 为 null(草稿态)也不算。
+ * - 用于列表副标题、编辑面板 Save 时的提示、AI 工具结果。
+ */
+private fun isReminderExpired(r: TodoReminder, now: Long = System.currentTimeMillis()): Boolean {
+    val at = r.nextTriggerAt ?: return false
+    return r.enabled && at < now
 }
 
 /**
@@ -935,6 +959,44 @@ private fun TodoReminderSection(
             )
         }
 
+        // 实时过期检测(2026.x):enabled 且用户已设完整时间时,如果草稿 timestamp < now,
+        // 提示「该时间已过期」。这样用户在改时分 / 日期时能立刻看到状态变化,不用等点 Save。
+        // 计算用 try/catch 兜底:日期不合法时 h/m/d 解析可能抛错,此时不显示过期提示(避免误导)。
+        if (enabled && hourValid && minuteValid) {
+            val draftTrigger: Long? = try {
+                val h = hourText.toInt().coerceIn(0, 23)
+                val m = minuteText.toInt().coerceIn(0, 59)
+                if (recurrence == TodoRecurrence.NONE) {
+                    val y = yearText.toIntOrNull() ?: 0
+                    val mo = monthText.toIntOrNull() ?: 0
+                    val d = dayText.toIntOrNull() ?: 0
+                    if (y < 1970 || mo !in 1..12 || d !in 1..31) null
+                    else Calendar.getInstance().apply {
+                        clear()
+                        set(y, mo - 1, d, h, m, 0)
+                        set(Calendar.MILLISECOND, 0)
+                    }.timeInMillis
+                } else {
+                    Calendar.getInstance().apply {
+                        timeInMillis = System.currentTimeMillis()
+                        set(Calendar.HOUR_OF_DAY, h)
+                        set(Calendar.MINUTE, m)
+                        set(Calendar.SECOND, 0)
+                        set(Calendar.MILLISECOND, 0)
+                    }.timeInMillis
+                }
+            } catch (e: Exception) {
+                null
+            }
+            if (draftTrigger != null && draftTrigger < System.currentTimeMillis()) {
+                Text(
+                    text = "⚠ 该时间已过期,保存后会立即触发(< 24h)或被静默清除(≥ 24h)。",
+                    color = EXPIRED_REMINDER_COLOR,
+                    style = compactTextStyle(EXPIRED_REMINDER_COLOR),
+                )
+            }
+        }
+
         // 自定义星期多选(仅 CUSTOM 时显示)
         if (recurrence == TodoRecurrence.CUSTOM) {
             SettingsLabel("Days of week", colors)
@@ -1043,13 +1105,21 @@ private fun TodoReminderSection(
                         error = validateErr
                         return@CompactButton
                     }
+                    // 过期检测(2026.x):让用户设当前时间之前的提醒时,UI 提示「该时间已过期」;
+                    // 不阻止保存(用户可能就是想「立即提醒」,scheduler 会按 24h 内立即触发 / 超 24h 静默清除处理),
+                    // 但要让用户清楚后果,避免误以为下次会按这个时间点触发。
+                    val expired = isReminderExpired(reminder)
                     val ok = onSave(reminder)
                     if (!ok) {
                         error = "保存提醒失败。"
                     } else {
                         error = ""
                         val next = formatReminderTime(finalTrigger)
-                        onShowToast("已保存提醒,下次触发: $next")
+                        if (expired) {
+                            onShowToast("已保存提醒 ⚠ 该时间已过期,触发会立即/在 24h 静默期内弹出")
+                        } else {
+                            onShowToast("已保存提醒,下次触发: $next")
+                        }
                     }
                 },
                 colors = colors,

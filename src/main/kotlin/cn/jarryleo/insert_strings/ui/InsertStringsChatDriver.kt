@@ -2060,9 +2060,13 @@ internal class InsertStringsChatDriver(
         val triggerInMinutes = if (at != null) {
             (at - System.currentTimeMillis()) / 60_000L
         } else -1L
+        // 2026.x 增强:暴露 expired 字段,让 AI 在用户说「提醒我 X」「我有什么提醒」时
+        // 能立刻判断「这条已经过期」并主动告知(否则 AI 看到 nextTriggerAt 在过去只能瞎猜)。
+        // 仅当 reminder 启用 + 有 nextTriggerAt + 已过 now 时为 true。
+        val expired = r.enabled && at != null && at < System.currentTimeMillis()
         return "{\"nextTriggerAt\":$nextTs,\"nextTriggerAtFormatted\":\"$nextFormatted\"," +
-            "\"triggerInMinutes\":$triggerInMinutes,\"recurrence\":\"${r.recurrence.name}\"," +
-            "\"timeOfDay\":\"$tod\",\"days\":\"$days\"}"
+            "\"triggerInMinutes\":$triggerInMinutes,\"expired\":$expired," +
+            "\"recurrence\":\"${r.recurrence.name}\",\"timeOfDay\":\"$tod\",\"days\":\"$days\"}"
     }
 
     /**

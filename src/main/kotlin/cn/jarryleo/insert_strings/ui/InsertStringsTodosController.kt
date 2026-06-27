@@ -175,8 +175,19 @@ internal class InsertStringsTodosController(
      * 而跳过重组。
      */
     fun setCompleted(item: TodoItem, completed: Boolean) {
+        val prev = item.isCompleted
         item.completeState.value = completed
         TodoService.getInstance().setCompleted(item.id, completed)
+        // 完成态切换时通知调度器重新调度(2026.x 增强):
+        // - 勾选完成(isCompleted false→true):把已完成的代办从调度队列里摘掉,
+        //   避免 Timer 到期时 fireById 才发现"哦这条已完成"再 skip + reschedule 的浪费;
+        // - 取消勾选(true→false):循环型代办应恢复正常调度,rescheduleAll 会重新算
+        //   nextTriggerAt 并入队;一次性如果 reminder 还在也恢复(否则 reminder 已被
+        //   勾选时清掉的逻辑就保留清掉状态——见 [TodoService.setReminder])。
+        // 只在状态实际发生变化时通知,避免无谓的 rescheduleAll。
+        if (prev != completed) {
+            TodoReminderScheduler.getInstance().notifyReminderChanged(item.id)
+        }
         reloadTodos()
     }
 

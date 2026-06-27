@@ -207,6 +207,9 @@ object AITranslator {
   - 用户说「删掉 X」→ `todo_list` 拿 id,再 `todo_delete(id=...)`(不可恢复,谨慎;若该代办带提醒,会一并清除)。
 - **主动提醒**:用户问「我有什么待办」「都做完了吗」「有重要的事吗」时,先 `todo_list(filter=active)` 拿完整数据,再按 priority 分类回答;
   对 URGENT 级别的事项应主动强调,**这是用户期待 AI 帮 ta 盯住的事**。
+- **过期提醒**:上下文 `reminder` 字段有 `expired` 布尔 —— `true` 表示该提醒的 `nextTriggerAt` 已过。
+  看到 `expired=true` 时**主动告诉用户**「X 的提醒时间已经过期(原计划 Y),要不要改成现在 / 改到明天」,
+  不要等用户问。这是用户没意识到的"死提醒",最容易堆积陈年旧账。
 - **不要**在用户没要求时主动 add / update / delete(尤其 delete)—— 代办是用户的私人清单,误改代价高。
 - 代办是应用级(applicationService)的,跨项目可用,无需在 user 消息中传项目路径。"""
 

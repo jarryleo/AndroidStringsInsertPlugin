@@ -237,6 +237,13 @@ internal class InsertStringsChatContextBuilder(
                                                 TRIGGER_DATE_FMT.format(java.util.Date(at))
                                             )
                                         }
+                                        // 2026.x 增强:暴露 expired 字段,让 AI 看到 nextTriggerAt 在过去时
+                                        // 直接知道"该提醒已过期",主动告知用户(否则只能靠 triggerInMinutes
+                                        // 是负数去猜)。仅当 reminder 启用 + 有 nextTriggerAt + 已过 now 时为 true。
+                                        addProperty(
+                                            "expired",
+                                            r.enabled && at != null && at < nowMillis
+                                        )
                                         addProperty("recurrence", r.recurrence.name)
                                         if (tod != null) {
                                             addProperty("timeOfDay", tod.format())
