@@ -12,6 +12,8 @@ import cn.jarryleo.insert_strings.UiCallback
 import cn.jarryleo.insert_strings.ai.AiProvider
 import cn.jarryleo.insert_strings.ai.AiRole
 import cn.jarryleo.insert_strings.ai.ChatMessage
+import cn.jarryleo.insert_strings.ai.TodoItem
+import cn.jarryleo.insert_strings.ai.TodoPriority
 import cn.jarryleo.insert_strings.phrases.QuickPhrase
 import cn.jarryleo.insert_strings.sheets.SheetsManager
 import cn.jarryleo.insert_strings.xml.ContextManager
@@ -139,6 +141,25 @@ class InsertStringsUI(
      */
     internal var editingRole: AiRole? by mutableStateOf(null)
 
+    // ============== 代办 state ==============
+    /**
+     * 已保存的代办列表(应用级持久化)。
+     * 在 tool window 打开时由 [InsertStringsTodosController.loadTodos] 加载,
+     * 之后任何修改都立即落库 + 整体重排(active 按 priority + createdAt 倒序,completed 按 completedAt 倒序)。
+     */
+    internal val todos = mutableStateListOf<TodoItem>()
+    /**
+     * 当前正在行内编辑的代办(null 表示列表模式)。
+     * 编辑态下,对应行就地展开为编辑表单(Title + Content + Priority + Save / Cancel)。
+     * 新增时 id 分配 UUID 但尚未落库,Save 时由 controller 写入 service 并加入列表。
+     */
+    internal var editingTodo: TodoItem? by mutableStateOf(null)
+    /**
+     * Todo tab 的过滤模式(All / Active / Completed)。仅在 Todo tab 显示时生效,
+     * 切到其它顶级 tab 不重置,用户从 Todo 切走再切回时保留上次的过滤。
+     */
+    internal var todoFilter by mutableStateOf(TodoFilter.ALL)
+
     // ============== Chat state ==============
     override val chatMessages = mutableStateListOf<ChatMessage>()
     override var chatInput by mutableStateOf("")
@@ -179,6 +200,8 @@ class InsertStringsUI(
     internal lateinit var phrasesController: InsertStringsPhrasesController
         private set
     internal lateinit var rolesController: InsertStringsRolesController
+        private set
+    internal lateinit var todosController: InsertStringsTodosController
         private set
     internal lateinit var stringsOpsController: InsertStringsStringsOpsController
         private set
@@ -262,6 +285,22 @@ class InsertStringsUI(
                     onDraftRolePromptChange = { prompt -> editingRole = editingRole?.copy(prompt = prompt) },
                     onSaveRoleEdit = rolesController::saveEdit,
                     onCancelRoleEdit = rolesController::cancelEdit,
+                    // ===== Todo 透传给 InsertStringsContent,主面板 chat / settings tab 不用这些参数 =====
+                    todos = todos,
+                    todoFilter = todoFilter,
+                    activeTodoCount = todos.count { !it.isCompleted },
+                    completedTodoCount = todos.count { it.isCompleted },
+                    editingTodo = editingTodo,
+                    onTodoFilterChange = { todoFilter = it },
+                    onAddTodo = todosController::beginAdd,
+                    onEditTodo = todosController::beginEdit,
+                    onDeleteTodo = todosController::delete,
+                    onSetTodoCompleted = todosController::setCompleted,
+                    onDraftTodoTitleChange = { title -> editingTodo = editingTodo?.copy(title = title) },
+                    onDraftTodoContentChange = { content -> editingTodo = editingTodo?.copy(content = content) },
+                    onDraftTodoPriorityChange = { priority -> editingTodo = editingTodo?.copy(priority = priority) },
+                    onSaveTodoEdit = todosController::saveEdit,
+                    onCancelTodoEdit = todosController::cancelEdit,
                     onChatInputChange = { chatInput = it },
                     onSendChat = chatDriver::sendChat,
                     onStopChat = chatDriver::stopChat,
@@ -309,6 +348,7 @@ class InsertStringsUI(
         settingsController.loadSheetsSettings()
         phrasesController.loadPhrases()
         rolesController.loadRoles()
+        todosController.loadTodos()
 
         // 3) 拉取默认表格的工作表列表
         settingsController.refreshSheetsList()
@@ -322,6 +362,7 @@ class InsertStringsUI(
         settingsController = InsertStringsSettingsController(this)
         phrasesController = InsertStringsPhrasesController(this)
         rolesController = InsertStringsRolesController(this)
+        todosController = InsertStringsTodosController(this)
         stringsOpsController = InsertStringsStringsOpsController(this)
         sheetsOpsController = InsertStringsSheetsOpsController(this)
         fileOpsController = InsertStringsFileOpsController(this)

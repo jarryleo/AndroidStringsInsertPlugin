@@ -73,6 +73,10 @@ object ToolDefinitions {
         TOOL_SEARCH_IN_FILES,
         TOOL_FIND_REFERENCES,
         TOOL_LIST_FILES,
+        TOOL_TODO_LIST,
+        TOOL_TODO_ADD,
+        TOOL_TODO_UPDATE,
+        TOOL_TODO_DELETE,
         TOOL_ASK_USER,
         TOOL_LOAD_TOOL_DOC,
         TOOL_REPLACE_SELECTION,
@@ -94,6 +98,10 @@ object ToolDefinitions {
     const val TOOL_SEARCH_IN_FILES = "search_in_files"
     const val TOOL_FIND_REFERENCES = "find_references"
     const val TOOL_LIST_FILES = "list_files"
+    const val TOOL_TODO_LIST = "todo_list"
+    const val TOOL_TODO_ADD = "todo_add"
+    const val TOOL_TODO_UPDATE = "todo_update"
+    const val TOOL_TODO_DELETE = "todo_delete"
     const val TOOL_REPLACE_SELECTION = "replace_selection"
     const val TOOL_ASK_USER = "ask_user"
     const val TOOL_LOAD_TOOL_DOC = "load_tool_doc"
@@ -145,6 +153,36 @@ object ToolDefinitions {
         "Google Sheets 反查:在表格中按文本搜索行,返回行号+列名+整行内容。" +
             "支持 exact/ contains(默认)/ regex,可限定 column。sheetName 必须**原样**使用(系统按 A1 规则自动转义)。" +
             "详细字段 → load_tool_doc(\"find_rows_by_text\")。"
+
+    // region 代办(2026.x 新增) — 用户在主页 Todo tab 维护的清单,AI 可读写并主动提醒
+
+    private const val DESC_TODO_LIST =
+        "读取代办列表(可限定 active / completed / all 过滤模式)。" +
+            "返回的每条代办都带 id 字段,后续 todo_update / todo_delete 必须用这个 id 定位。" +
+            "系统已经在聊天上下文中注入了 active 代办的简要摘要(便于你主动提醒用户)," +
+            "但用本工具可以拿到完整字段(content / createdAt / completedAt 等),用于核对细节。" +
+            "详细字段 → load_tool_doc(\"todo_list\")。"
+
+    private const val DESC_TODO_ADD =
+        "新增一条代办;title 必填,content 可选,priority 可选(LOW/NORMAL/HIGH/URGENT,默认 NORMAL)。" +
+            "新条目默认未完成,优先级高的会浮在 Todo tab 列表顶部。" +
+            "新增后系统会返回新条目的 id,你可以在下一轮用 todo_update / todo_delete 引用它。" +
+            "**典型场景**:用户说「提醒我周五前修 X」「记下来要联系 Y」时,先调本工具写进去,再 task_complete 总结。" +
+            "详细字段 → load_tool_doc(\"todo_add\")。"
+
+    private const val DESC_TODO_UPDATE =
+        "按 id 更新一条已有代办;只需传要改的字段,其它字段保持原值。" +
+            "**isCompleted = true** 即可「勾选完成」(系统自动写 completedAt 时间戳);" +
+            "**isCompleted = false** 取消完成(系统清空 completedAt)。" +
+            "id 不存在时返回错误,先 todo_list 拿到正确 id 再更新。" +
+            "详细字段 → load_tool_doc(\"todo_update\")。"
+
+    private const val DESC_TODO_DELETE =
+        "按 id 删除一条代办(破坏性操作,删除前建议先 todo_list 确认目标)。" +
+            "id 不存在时返回错误,不会静默成功。" +
+            "详细字段 → load_tool_doc(\"todo_delete\")。"
+
+    // endregion
 
     // region 文件操作域描述(2026 新增)
 
@@ -276,6 +314,11 @@ object ToolDefinitions {
             add(openAiTool(TOOL_SEARCH_IN_FILES, descSearch, openAiSearchInFilesParams()))
             add(openAiTool(TOOL_FIND_REFERENCES, DESC_FIND_REFERENCES, openAiFindReferencesParams()))
             add(openAiTool(TOOL_LIST_FILES, descList, openAiListFilesParams()))
+            // 代办域:用户在主页 Todo tab 维护的清单,AI 可读写
+            add(openAiTool(TOOL_TODO_LIST, DESC_TODO_LIST, openAiTodoListParams()))
+            add(openAiTool(TOOL_TODO_ADD, DESC_TODO_ADD, openAiTodoAddParams()))
+            add(openAiTool(TOOL_TODO_UPDATE, DESC_TODO_UPDATE, openAiTodoUpdateParams()))
+            add(openAiTool(TOOL_TODO_DELETE, DESC_TODO_DELETE, openAiTodoDeleteParams()))
             add(openAiTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(openAiTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(openAiTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
@@ -308,6 +351,11 @@ object ToolDefinitions {
             add(anthropicTool(TOOL_SEARCH_IN_FILES, descSearch, openAiSearchInFilesParams()))
             add(anthropicTool(TOOL_FIND_REFERENCES, DESC_FIND_REFERENCES, openAiFindReferencesParams()))
             add(anthropicTool(TOOL_LIST_FILES, descList, openAiListFilesParams()))
+            // 代办域
+            add(anthropicTool(TOOL_TODO_LIST, DESC_TODO_LIST, openAiTodoListParams()))
+            add(anthropicTool(TOOL_TODO_ADD, DESC_TODO_ADD, openAiTodoAddParams()))
+            add(anthropicTool(TOOL_TODO_UPDATE, DESC_TODO_UPDATE, openAiTodoUpdateParams()))
+            add(anthropicTool(TOOL_TODO_DELETE, DESC_TODO_DELETE, openAiTodoDeleteParams()))
             add(anthropicTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(anthropicTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(anthropicTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
@@ -876,6 +924,106 @@ object ToolDefinitions {
             })
         }
     }
+
+    // region 代办 JSON Schema(2026.x 新增)
+
+    private fun openAiTodoListParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("filter", obj {
+                    addProperty("type", "string")
+                    add("enum", JsonArray().apply {
+                        add("active")
+                        add("completed")
+                        add("all")
+                    })
+                    addProperty("description", "过滤模式:active=未完成(默认) / completed=已完成 / all=全部。")
+                })
+                add("limit", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "最大返回条数(默认 50);不传或 null 时取 50。")
+                })
+            })
+        }
+    }
+
+    private fun openAiTodoAddParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("title", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,代办的标题(trim 后非空)。空字符串会被拒绝并返回错误 tool_result。")
+                })
+                add("content", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "可选,详细描述(多行,允许为空)。")
+                })
+                add("priority", obj {
+                    addProperty("type", "string")
+                    add("enum", JsonArray().apply {
+                        add("LOW")
+                        add("NORMAL")
+                        add("HIGH")
+                        add("URGENT")
+                    })
+                    addProperty("description", "可选,优先级;为空/未知时回退 NORMAL。URGENT/HIGH 会浮在 Todo tab 列表顶部。")
+                })
+            })
+            add("required", JsonArray().apply { add("title") })
+        }
+    }
+
+    private fun openAiTodoUpdateParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("id", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,代办的稳定 id(由 todo_list / todo_add 返回)。id 不存在时返回错误。")
+                })
+                add("title", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "新标题(null = 不改;trim 后空 = 校验失败)。")
+                })
+                add("content", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "新描述(null = 不改;空串 = 清空描述)。")
+                })
+                add("priority", obj {
+                    addProperty("type", "string")
+                    add("enum", JsonArray().apply {
+                        add("LOW")
+                        add("NORMAL")
+                        add("HIGH")
+                        add("URGENT")
+                    })
+                    addProperty("description", "新优先级(null = 不改;大小写不敏感 / 未知回退 NORMAL)。")
+                })
+                add("isCompleted", obj {
+                    addProperty("type", "boolean")
+                    addProperty("description", "新完成状态(null = 不改;true / false 直接赋值;true 时系统自动写 completedAt 时间戳)。")
+                })
+            })
+            add("required", JsonArray().apply { add("id") })
+        }
+    }
+
+    private fun openAiTodoDeleteParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("id", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,代办的稳定 id。id 不存在时返回错误,不会静默成功。")
+                })
+            })
+            add("required", JsonArray().apply { add("id") })
+        }
+    }
+
+    // endregion
 
     private fun openAiReplaceSelectionParams(): JsonObject {
         return obj {

@@ -123,6 +123,7 @@ object AITranslator {
 - **strings.xml**:query_keys / read_string / find_keys_by_text / insert_strings / update_string / delete_string
 - **Google Sheets**:sheets_operation(基础/行列/冻结/审查/颜色/批量) / find_rows_by_text
 - **文件 / 编辑器**:get_editor_file / read_file / edit_file / create_file / search_in_files / find_references / list_files
+- **代办**:todo_list / todo_add / todo_update / todo_delete(用户主页 Todo tab 维护的清单,可读写)
 - **通用**:ask_user / load_tool_doc / task_complete
 - 详细字段 / 枚举值 / 示例 → 先调 `load_tool_doc("<tool>")` 获取,再发起实际调用。
 
@@ -150,7 +151,21 @@ object AITranslator {
 ## Google Sheets
 - `spreadsheetId` / `sheetName` 可省略,默认用上下文 `googleSheets` 配置;`configured=false` 时不要调用,先提示用户去设置。
 - 修改/删除行前先用 `search` 定位行号;列操作需用户确认;全表审查/修正用 `check_translations` / `fix_translations`,不要 `read` 整表。
-- 大批量混合修改(改值+填色+改文字色+删行+插入行等)**必须用 `batch_modify` 一次完成**,不要循环调用 `fill_color` / `update_row` / `append_row` —— 那会瞬间用光工具调用次数预算。"""
+- 大批量混合修改(改值+填色+改文字色+删行+插入行等)**必须用 `batch_modify` 一次完成**,不要循环调用 `fill_color` / `update_row` / `append_row` —— 那会瞬间用光工具调用次数预算。
+
+## 代办
+- 系统已经在每轮 chat 上下文中注入了 `todos.active` 字段(active 代办前 20 条,按 priority + createdAt 排序);
+  看到这些条目**就足够做出简单提醒**(例如「你有 3 项待办,其中 1 项是 URGENT 优先级」)。
+- 需要精确字段(content / completedAt 等)或查看已完成列表 → 调 `todo_list(filter=...)`。
+- **写操作**:
+  - 用户说「提醒我 X」「记下要 Y」→ 调 `todo_add(title=..., priority=...)`,title 必填,priority 不传默认 NORMAL。
+  - 用户说「把 X 标为完成」→ 先 `todo_list` 拿 id,再 `todo_update(id=..., isCompleted=true)`(系统自动写 completedAt)。
+  - 用户说「把 X 改成 URGENT」/「X 不用了取消」→ `todo_update(id=..., priority=...)` / `(isCompleted=false)`。
+  - 用户说「删掉 X」→ `todo_list` 拿 id,再 `todo_delete(id=...)`(不可恢复,谨慎)。
+- **主动提醒**:用户问「我有什么待办」「都做完了吗」「有重要的事吗」时,先 `todo_list(filter=active)` 拿完整数据,再按 priority 分类回答;
+  对 URGENT 级别的事项应主动强调,**这是用户期待 AI 帮 ta 盯住的事**。
+- **不要**在用户没要求时主动 add / update / delete(尤其 delete)—— 代办是用户的私人清单,误改代价高。
+- 代办是应用级(applicationService)的,跨项目可用,无需在 user 消息中传项目路径。"""
 
     /**
      * AskAi / ExtractStrings 弹框的 system prompt(chatEntry=askAi 或 extractStrings)。
@@ -645,6 +660,7 @@ object AITranslator {
               - sheets_basic、sheets_row_ops、sheets_column_ops、sheets_freeze、sheets_review、sheets_color、sheets_batch_modify
               - find_rows_by_text
               - get_editor_file、read_file、edit_file、create_file、search_in_files、find_references、list_files
+              - todo_list、todo_add、todo_update、todo_delete
               - ask_user、load_tool_doc、task_complete
             使用规则：
             - 不确定工具字段时再调本工具，不要在每次任务开始时一次性加载所有文档。
@@ -891,7 +907,88 @@ object AITranslator {
             - 不会自动检测重复 key（与 append_row 不同）；append_rows 后由系统提示用户确认。
             - 颜色格式同 fill_color / set_text_color（hex 或命名色）。
             - 优先用 batch_modify 而不是循环调用 fill_color/set_text_color/update_row，避免工具调用次数累积。
-        """.trimIndent()
+        """.trimIndent(),
+
+        // ============== 代办(2026.x 新增) ==============
+        "todo_list" to """
+            ## todo_list 详细用法
+            读取代办列表,返回每条的 id / title / content / priority / isCompleted / createdAt / completedAt。
+            字段:
+            - filter(可选,默认 "active"):过滤模式,枚举 "active" / "completed" / "all"。
+            - limit(可选,默认 50):最大返回条数;不传或 null 时取 50。
+            返回:JSON 数组,每条形如 `{"id":"uuid","title":"...","content":"...","priority":"NORMAL","isCompleted":false,"createdAt":1700000000000,"completedAt":null}`。
+            典型场景:
+            - 用户说「我有什么代办」/「看看我之前记了什么」→ filter=active 或 all。
+            - 用户说「我都完成了什么」→ filter=completed。
+            - 想「勾选完成」前先 todo_list 拿 id,再用 todo_update(id=..., isCompleted=true)。
+            注意:
+            - 系统已经在每轮 chat 上下文中注入了 active 代办的简要摘要(便于你主动提醒用户),
+              本工具用于拿到完整字段(content / completedAt 等)。
+            - limit 默认 50,绝大多数场景够用;不要为了「看全部」而传很大的 limit,会爆 token。
+            示例:
+            {"type":"todo_list"}
+            {"type":"todo_list","filter":"all","limit":100}
+        """.trimIndent(),
+
+        "todo_add" to """
+            ## todo_add 详细用法
+            新增一条代办;写入后用户主页 Todo tab 立即可见。
+            字段:
+            - title(必填):代办的标题(trim 后非空);空字符串会被拒绝并返回错误 tool_result。
+            - content(可选):详细描述(多行,允许为空)。
+            - priority(可选,默认 NORMAL):优先级,枚举 "LOW" / "NORMAL" / "HIGH" / "URGENT";
+              未知值 / 大小写不敏感时回退 NORMAL。
+            返回:新条目的完整对象(包含 id),你可以在下一轮用 todo_update / todo_delete 引用这个 id。
+            典型场景:
+            - 用户说「提醒我周五前修 X bug」→ title="修 X bug",priority=HIGH。
+            - 用户说「记一下要联系 Y」→ title="联系 Y",content="..."。
+            - AI 主动建议「我帮你记下来?」并得到用户肯定 → 调本工具。
+            注意:
+            - 不需要先 todo_list 再 add,直接 add 即可(id 由系统分配)。
+            - 新条目默认 isCompleted=false;勾选完成用 todo_update。
+            示例:
+            {"type":"todo_add","title":"修登录页 bug","priority":"HIGH"}
+            {"type":"todo_add","title":"联系客户 Y","content":"谈 v2.0 上线时间","priority":"NORMAL"}
+        """.trimIndent(),
+
+        "todo_update" to """
+            ## todo_update 详细用法
+            按 id 更新一条已有代办;只改传入的非 null 字段,其它字段保持原值。
+            字段:
+            - id(必填):代办的稳定 id(由 todo_list / todo_add 返回)。id 不存在时返回错误。
+            - title(可选):新标题(null = 不改;trim 后空 = 校验失败)。
+            - content(可选):新描述(null = 不改;空串 = 清空描述)。
+            - priority(可选):新优先级(null = 不改;大小写不敏感 / 未知回退 NORMAL)。
+            - isCompleted(可选):新完成状态(null = 不改;true / false 直接赋值;true 时系统自动写 completedAt 时间戳)。
+            返回:更新后的完整对象(便于核对是否生效)。
+            典型场景:
+            - 用户说「把 X 标为完成」→ 先 todo_list 拿 id,再 todo_update(id=..., isCompleted=true)。
+            - 用户说「把 X 改成 URGENT 优先级」→ todo_update(id=..., priority="URGENT")。
+            - 用户说「X 不用了,取消完成」→ todo_update(id=..., isCompleted=false),系统自动清空 completedAt。
+            - 想同时改多个字段(标题+优先级)→ 一次 todo_update(id=..., title=..., priority=...)。
+            注意:
+            - 不传某个字段 = 不改,与「传 null」效果相同(JSON 里省略或显式 null 都行)。
+            - 不要用 todo_delete + todo_add 来「重命名」(会丢 createdAt 时间戳),用 todo_update。
+            示例:
+            {"type":"todo_update","id":"abc-123","isCompleted":true}
+            {"type":"todo_update","id":"abc-123","priority":"URGENT","title":"紧急:修登录页"}
+        """.trimIndent(),
+
+        "todo_delete" to """
+            ## todo_delete 详细用法
+            按 id 删除一条代办(破坏性操作)。
+            字段:
+            - id(必填):代办的稳定 id。id 不存在时返回错误,不会静默成功。
+            典型场景:
+            - 用户说「删掉 X」/「这条不用记了」→ 先 todo_list 拿 id,再 todo_delete。
+            - 批量清理过期 completed 代办 → 先 todo_list(filter=completed,limit=100) 看一遍,
+              再逐条 todo_delete(谨慎,一次性删多条的提示先 ask_user)。
+            注意:
+            - 删除不可恢复(没有回收站);如不确定先 ask_user 让用户确认。
+            - 取消完成 ≠ 删除;只是"改主意了"用 todo_update(isCompleted=false),不再需要这条才用本工具。
+            示例:
+            {"type":"todo_delete","id":"abc-123"}
+        """.trimIndent(),
     )
 
     /**
@@ -2232,6 +2329,35 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 if (summary.isEmpty() || status.isEmpty()) return null
                 val notes = args.get("notes")?.asString?.trim()?.takeIf { it.isNotEmpty() }
                 AiAction.TaskComplete(summary, status, notes)
+            }
+            // ===== 代办工具(2026.x 新增) =====
+            ToolDefinitions.TOOL_TODO_LIST -> {
+                // filter / limit 都允许缺省;空字符串或缺失都按默认值处理
+                val filter = args.get("filter")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: "active"
+                val limit = args.get("limit")?.let { runCatching { it.asInt }.getOrNull() }
+                AiAction.TodoList(filter, limit)
+            }
+            ToolDefinitions.TOOL_TODO_ADD -> {
+                // title 必填;缺失 / 空 / 非字符串 → 返回 null(让 driver 生成「解析失败」tool_result)
+                val title = args.get("title")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+                val content = args.get("content")?.asString.orEmpty()
+                val priority = args.get("priority")?.asString.orEmpty()
+                AiAction.TodoAdd(title, content, priority)
+            }
+            ToolDefinitions.TOOL_TODO_UPDATE -> {
+                // id 必填;缺失 / 空 / 非字符串 → 返回 null
+                val id = args.get("id")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+                val title = args.get("title")?.asString
+                val content = args.get("content")?.asString
+                val priority = args.get("priority")?.asString
+                val isCompleted = args.get("isCompleted")?.let {
+                    if (it.isJsonNull) null else runCatching { it.asBoolean }.getOrNull()
+                }
+                AiAction.TodoUpdate(id, title, content, priority, isCompleted)
+            }
+            ToolDefinitions.TOOL_TODO_DELETE -> {
+                val id = args.get("id")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+                AiAction.TodoDelete(id)
             }
             ToolDefinitions.TOOL_SHEETS_OPERATION -> {
                 val operationText = args.get("operation")?.asString ?: return null

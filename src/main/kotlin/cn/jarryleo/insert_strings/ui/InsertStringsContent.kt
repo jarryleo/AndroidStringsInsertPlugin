@@ -18,6 +18,8 @@ import cn.jarryleo.insert_strings.ai.AiProvider
 import cn.jarryleo.insert_strings.ai.AiProtocol
 import cn.jarryleo.insert_strings.ai.AiRole
 import cn.jarryleo.insert_strings.ai.ChatMessage
+import cn.jarryleo.insert_strings.ai.TodoItem
+import cn.jarryleo.insert_strings.ai.TodoPriority
 import cn.jarryleo.insert_strings.phrases.QuickPhrase
 
 /**
@@ -122,6 +124,42 @@ internal fun InsertStringsContent(
     onDraftRolePromptChange: (String) -> Unit,
     onSaveRoleEdit: (title: String, prompt: String) -> Boolean,
     onCancelRoleEdit: () -> Unit,
+    // ===== Todo =====
+    /**
+     * 已保存的代办列表(按 controller 排序好的:active 在上,completed 在下)。
+     * 由 [InsertStringsTodosController.loadTodos] / 任何 add/update/delete/complete 后重排写入。
+     */
+    todos: List<TodoItem>,
+    /**
+     * 当前 Todo tab 的过滤模式(All / Active / Completed)。
+     */
+    todoFilter: TodoFilter,
+    /**
+     * 未完成 todo 的总数(用于 toolbar 上 Active tab 旁的数字)。
+     */
+    activeTodoCount: Int,
+    /**
+     * 已完成 todo 的总数(用于 toolbar 上 Completed tab 旁的数字)。
+     */
+    completedTodoCount: Int,
+    /**
+     * 当前正在行内编辑的 todo(null 表示列表模式)。
+     * 编辑态下,对应行就地展开为编辑表单(Title + Content + Priority + Save / Cancel)。
+     */
+    editingTodo: TodoItem?,
+    /**
+     * 切换 Todo 过滤的回调,直接写回 [InsertStringsUI.todoFilter]。
+     */
+    onTodoFilterChange: (TodoFilter) -> Unit,
+    onAddTodo: () -> Unit,
+    onEditTodo: (TodoItem) -> Unit,
+    onDeleteTodo: (TodoItem) -> Unit,
+    onSetTodoCompleted: (TodoItem, Boolean) -> Unit,
+    onDraftTodoTitleChange: (String) -> Unit,
+    onDraftTodoContentChange: (String) -> Unit,
+    onDraftTodoPriorityChange: (TodoPriority) -> Unit,
+    onSaveTodoEdit: (title: String, content: String, priority: TodoPriority) -> Boolean,
+    onCancelTodoEdit: () -> Unit,
     // ===== Chat =====
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
@@ -230,6 +268,27 @@ internal fun InsertStringsContent(
                         // "New Topic" / "Context" 仍保留。
                         showHeader = true,
                     )
+                    MainTab.TODOS -> TodosContent(
+                        // 按当前过滤模式筛选展示,保持 controller 排序(active 在上 / completed 在下)。
+                        // 过滤是 UI 行为,不在 controller 里做(避免每次切 tab 都要重新 load)。
+                        todos = filterTodos(todos, todoFilter),
+                        activeCount = activeTodoCount,
+                        completedCount = completedTodoCount,
+                        currentFilter = todoFilter,
+                        onFilterChange = onTodoFilterChange,
+                        editingTodo = editingTodo,
+                        onAdd = onAddTodo,
+                        onEdit = onEditTodo,
+                        onDelete = onDeleteTodo,
+                        onSetCompleted = onSetTodoCompleted,
+                        onDraftTitleChange = onDraftTodoTitleChange,
+                        onDraftContentChange = onDraftTodoContentChange,
+                        onDraftPriorityChange = onDraftTodoPriorityChange,
+                        onSaveEdit = onSaveTodoEdit,
+                        onCancelEdit = onCancelTodoEdit,
+                        modifier = Modifier.fillMaxSize(),
+                        colors = colors,
+                    )
                     MainTab.SETTINGS -> SettingsContent(
                         selectedTab = settingsTab,
                         onTabChange = onSettingsTabChange,
@@ -331,6 +390,15 @@ private fun MainTabBar(
             onClick = { onTabChange(MainTab.CHAT) },
             colors = colors,
         )
+        // Todo tab:位于 Chat 与 Settings 之间,展示代办列表(主面板专属)。
+        // 不在 tab label 上加计数(避免标签过长,让 toolbar 的 TabButton 保持统一宽度);
+        // 计数信息在 [TodosContent] 内部的过滤 tab 上展示。
+        TabButton(
+            text = "Todo",
+            selected = selected == MainTab.TODOS,
+            onClick = { onTabChange(MainTab.TODOS) },
+            colors = colors,
+        )
         TabButton(
             text = "Settings",
             selected = selected == MainTab.SETTINGS,
@@ -427,5 +495,19 @@ private fun TranslationsTabContent(
                 primary = true,
             )
         }
+    }
+}
+
+/**
+ * 按 [TodoFilter] 过滤代办列表。
+ *
+ * 输入的 [todos] 已经是 controller 排好序的(active 在上 / completed 在下);
+ * 这里只做"是否显示",不再重排。
+ */
+private fun filterTodos(todos: List<TodoItem>, filter: TodoFilter): List<TodoItem> {
+    return when (filter) {
+        TodoFilter.ALL -> todos
+        TodoFilter.ACTIVE -> todos.filter { !it.isCompleted }
+        TodoFilter.COMPLETED -> todos.filter { it.isCompleted }
     }
 }

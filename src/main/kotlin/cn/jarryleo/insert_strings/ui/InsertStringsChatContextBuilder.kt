@@ -1,5 +1,6 @@
 package cn.jarryleo.insert_strings.ui
 
+import cn.jarryleo.insert_strings.ai.TodoService
 import cn.jarryleo.insert_strings.sheets.SheetsManager
 import cn.jarryleo.insert_strings.sheets.SheetsSettingsService
 import cn.jarryleo.insert_strings.xml.ContextManager
@@ -18,6 +19,12 @@ internal class InsertStringsChatContextBuilder(
 
     companion object {
         private const val DEFAULT_LANGUAGE = "values"
+        /**
+         * 聊天上下文里注入 active 代办的最大条数。
+         * 选 20 兼顾「足够多让 AI 看到全貌」和「不爆 token」(每条约 30~60 字符,20 条 ≈ 1KB JSON)。
+         * 超过时 AI 想看更多细节用 todo_list 工具按需取。
+         */
+        private const val TODO_CONTEXT_LIMIT = 20
     }
 
     fun build(): String {
@@ -129,6 +136,42 @@ internal class InsertStringsChatContextBuilder(
                         availableSheetNames.forEach { add(it) }
                     })
                 }
+            })
+            // ===== 代办列表(2026.x 新增) =====
+            // 注入 active 代办的简要摘要 + 总数,让 AI 主动提醒用户 / 在合适时机用 todo_* 工具。
+            // 只取前 [TODO_CONTEXT_LIMIT] 条 active(避免 token 爆炸),其它细节让 AI 用 todo_list 工具
+            // 按需深取。
+            add("todos", JsonObject().apply {
+                val todoService = TodoService.getInstance()
+                val active = todoService.listActive()
+                addProperty("activeCount", active.size)
+                addProperty("completedCount", todoService.listCompleted().size)
+                add("active", JsonArray().apply {
+                    active
+                        .sortedWith(
+                            compareByDescending<cn.jarryleo.insert_strings.ai.TodoItem> { it.priority.ordinal }
+                                .thenByDescending { it.createdAt }
+                        )
+                        .take(TODO_CONTEXT_LIMIT)
+                        .forEach { item ->
+                            add(JsonObject().apply {
+                                addProperty("id", item.id)
+                                addProperty("title", item.title)
+                                addProperty("priority", item.priority.name)
+                                if (item.content.isNotBlank()) {
+                                    addProperty("content", item.content)
+                                }
+                            })
+                        }
+                })
+                addProperty(
+                    "note",
+                    "这是用户主页 Todo tab 维护的待办清单(active 部分前 ${TODO_CONTEXT_LIMIT} 条)。" +
+                        "AI 可通过 todo_list / todo_add / todo_update / todo_delete 工具读写," +
+                        "完整字段(content / completedAt 等)用 todo_list 拿。" +
+                        "**典型用法**:用户说「提醒我 X」「记下 Y」时,调 todo_add;用户问「我有什么待办」/「都做完了吗」时," +
+                        "调 todo_list 拿完整数据,本字段只够简单提醒场景。"
+                )
             })
         }
         return root.toString()

@@ -755,6 +755,23 @@ internal class InsertStringsChatDriver(
             return
         }
 
+        // Priority 6.5: 代办操作域(todo_list / todo_add / todo_update / todo_delete)
+        // 放在 sheets 之后、文件操作之前 —— 代办操作极轻量(纯本地 service CRUD),
+        // 让 AI 在「读完 Sheets → 提醒用户」一类连续动作里能紧接着把代办加好,
+        // 不必跨过几个耗时工具(读大文件 / edit_file 等)才能落库。
+        val todoEntries = unprocessed.filter {
+            it.action is AiAction.TodoList ||
+                it.action is AiAction.TodoAdd ||
+                it.action is AiAction.TodoUpdate ||
+                it.action is AiAction.TodoDelete
+        }
+        if (todoEntries.isNotEmpty()) {
+            unprocessed.removeAll(todoEntries)
+            executeTodoActions(todoEntries, context, iteration)
+            addSkippedToolResults(unprocessed, "因已执行代办操作而跳过")
+            return
+        }
+
         // Priority 7: 文件操作域(get_editor_file / read_file / edit_file /
         //   create_file / search_in_files / find_references / list_files)
         val fileEntries = unprocessed.filter {
@@ -821,6 +838,10 @@ internal class InsertStringsChatDriver(
                 is AiAction.ListFiles -> "list_files"
                 is AiAction.ReplaceSelection -> "replace_selection"
                 is AiAction.TaskComplete -> "task_complete"
+                is AiAction.TodoList -> "todo_list"
+                is AiAction.TodoAdd -> "todo_add"
+                is AiAction.TodoUpdate -> "todo_update"
+                is AiAction.TodoDelete -> "todo_delete"
             }
             state.chatMessages.add(
                 ChatMessage(
@@ -1489,6 +1510,219 @@ internal class InsertStringsChatDriver(
             }
         }
     }
+
+    /**
+     * 执行代办操作域(本地 service CRUD,无需后台线程)。
+     *
+     * 与 strings / sheets 域不同,代办操作是**纯本地**:
+     * - 写操作:todo_add / todo_update / todo_delete 直接调 [cn.jarryleo.insert_strings.ai.TodoService];
+     * - 读操作:todo_list 走 [cn.jarryleo.insert_strings.ai.TodoService.list] /
+     *   [cn.jarryleo.insert_strings.ai.TodoService.listActive] / listCompleted 三种;
+     *
+     * 每个动作都返回 [cn.jarryleo.insert_strings.ai.TodoItem](读) / 操作结果(写)作为
+     * tool_result,让 AI 在下一轮看到完整对象,可以做"读完改"、"改完再读"等连续动作。
+     *
+     * UI 同步:写操作完成后调 [cn.jarryleo.insert_strings.ui.InsertStringsTodosController]
+     * 的等效方法(controller 内部会重排 todos 列表),让用户的 Todo tab 立即反映 AI 的改动。
+     *
+     * 错误处理:
+     * - todo_add 时 title trim 后为空 → AITranslator 解析阶段就 return null,
+     *   不会走到这里;真走到这里时 title 必非空。
+     * - todo_update / todo_delete 的 id 不存在 → 给该 tool_call 发 [工具执行异常] tool_result,
+     *   不抛异常中断流程(让 AI 能看到错误并自行修正)。
+     */
+    private fun executeTodoActions(
+        entries: List<ActionWithToolCall>,
+        context: String,
+        iteration: Int
+    ) {
+        val ui = state as? cn.jarryleo.insert_strings.ui.InsertStringsUI
+        val service = cn.jarryleo.insert_strings.ai.TodoService.getInstance()
+        entries.forEach { (action, toolCallId) ->
+            when (action) {
+                is AiAction.TodoList -> {
+                    val items: List<cn.jarryleo.insert_strings.ai.TodoItem> = when (action.filter.lowercase()) {
+                        "completed" -> service.listCompleted()
+                        "all" -> service.list()
+                        else -> service.listActive()
+                    }
+                    val limit = action.limit ?: 50
+                    val limited = items.take(limit.coerceAtLeast(1))
+                    val payload = limited.joinToString("\n") { item ->
+                        // 输出 id + title + priority + isCompleted + content(若有),
+                        // 格式:JSON-like 一行一条,AI 解析后能直接拿去 todo_update / todo_delete。
+                        buildString {
+                            append("{\"id\":\"").append(item.id).append("\",")
+                            append("\"title\":\"").append(escapeJson(item.title)).append("\",")
+                            append("\"priority\":\"").append(item.priority.name).append("\",")
+                            append("\"isCompleted\":").append(item.isCompleted)
+                            if (item.content.isNotBlank()) {
+                                append(",\"content\":\"").append(escapeJson(item.content)).append("\"")
+                            }
+                            append("}")
+                        }
+                    }
+                    val totalCount = items.size
+                    val shown = limited.size
+                    val header = when (action.filter.lowercase()) {
+                        "completed" -> "[代办列表] 过滤:completed,共 $totalCount 条,展示前 $shown 条。"
+                        "all" -> "[代办列表] 过滤:all,共 $totalCount 条,展示前 $shown 条。"
+                        else -> "[代办列表] 过滤:active,共 $totalCount 条,展示前 $shown 条。"
+                    }
+                    val content = if (limited.isEmpty()) {
+                        "$header\n(无符合条件的代办)"
+                    } else {
+                        "$header\n$payload"
+                    }
+                    if (toolCallId.isNotEmpty()) {
+                        state.chatMessages.add(
+                            ChatMessage(
+                                role = "tool",
+                                content = "[工具执行结果] 类型:todo_list 状态:成功\n$content",
+                                toolCallId = toolCallId
+                            )
+                        )
+                    }
+                }
+                is AiAction.TodoAdd -> {
+                    val title = action.title.trim()
+                    if (title.isEmpty()) {
+                        if (toolCallId.isNotEmpty()) {
+                            state.chatMessages.add(
+                                ChatMessage(
+                                    role = "tool",
+                                    content = "[工具执行异常] 类型:todo_add 状态:失败 信息:title 不能为空(trim 后为空)。",
+                                    toolCallId = toolCallId
+                                )
+                            )
+                        }
+                    } else {
+                        val priority = cn.jarryleo.insert_strings.ai.TodoPriority.fromName(action.priority)
+                        val newItem = cn.jarryleo.insert_strings.ai.TodoItem(
+                            title = title,
+                            content = action.content,
+                            priority = priority,
+                            isCompleted = false,
+                            createdAt = System.currentTimeMillis(),
+                            completedAt = null,
+                        )
+                        service.upsert(newItem)
+                        // 同步 UI 列表:走 controller 的 reloadTodos()(内部按 active/completed 排序后
+                        // 整体替换 ui.todos),让用户的 Todo tab 立即看到 AI 新增的条目。
+                        ui?.todosController?.reloadTodos()
+                        if (toolCallId.isNotEmpty()) {
+                            state.chatMessages.add(
+                                ChatMessage(
+                                    role = "tool",
+                                    content = "[工具执行结果] 类型:todo_add 状态:成功\n" +
+                                        "{\"id\":\"${newItem.id}\",\"title\":\"${escapeJson(newItem.title)}\"," +
+                                        "\"priority\":\"${newItem.priority.name}\",\"isCompleted\":false}",
+                                    toolCallId = toolCallId
+                                )
+                            )
+                        }
+                    }
+                }
+                is AiAction.TodoUpdate -> {
+                    val current = service.get(action.id)
+                    if (current == null) {
+                        if (toolCallId.isNotEmpty()) {
+                            state.chatMessages.add(
+                                ChatMessage(
+                                    role = "tool",
+                                    content = "[工具执行异常] 类型:todo_update 状态:失败 信息:未找到 id=${action.id} 的代办。请先 todo_list 拿到正确 id 再更新。",
+                                    toolCallId = toolCallId
+                                )
+                            )
+                        }
+                    } else {
+                        val newTitle = action.title?.trim()?.takeIf { it.isNotEmpty() } ?: current.title
+                        val newContent = action.content ?: current.content
+                        val newPriority = if (action.priority != null) {
+                            cn.jarryleo.insert_strings.ai.TodoPriority.fromName(action.priority)
+                        } else current.priority
+                        val newCompleted = action.isCompleted ?: current.isCompleted
+                        // 校验:title 不能 trim 后为空(AITranslator 阶段会校验,但本轮也兜底)
+                        if (action.title != null && action.title.trim().isEmpty()) {
+                            if (toolCallId.isNotEmpty()) {
+                                state.chatMessages.add(
+                                    ChatMessage(
+                                        role = "tool",
+                                        content = "[工具执行异常] 类型:todo_update 状态:失败 信息:title 不能为空(trim 后为空)。",
+                                        toolCallId = toolCallId
+                                    )
+                                )
+                            }
+                            return@forEach
+                        }
+                        val updated = current.copy(
+                            title = newTitle,
+                            content = newContent,
+                            priority = newPriority,
+                            isCompleted = newCompleted,
+                        )
+                        service.upsert(updated)
+                        // 完成态切换时同时维护 completedAt 时间戳(同 [TodoService.setCompleted] 语义)。
+                        if (action.isCompleted != null && action.isCompleted != current.isCompleted) {
+                            service.setCompleted(action.id, newCompleted)
+                        }
+                        ui?.todosController?.reloadTodos()
+                        if (toolCallId.isNotEmpty()) {
+                            state.chatMessages.add(
+                                ChatMessage(
+                                    role = "tool",
+                                    content = "[工具执行结果] 类型:todo_update 状态:成功\n" +
+                                        "{\"id\":\"${updated.id}\",\"title\":\"${escapeJson(updated.title)}\"," +
+                                        "\"priority\":\"${updated.priority.name}\",\"isCompleted\":${updated.isCompleted}}",
+                                    toolCallId = toolCallId
+                                )
+                            )
+                        }
+                    }
+                }
+                is AiAction.TodoDelete -> {
+                    val current = service.get(action.id)
+                    if (current == null) {
+                        if (toolCallId.isNotEmpty()) {
+                            state.chatMessages.add(
+                                ChatMessage(
+                                    role = "tool",
+                                    content = "[工具执行异常] 类型:todo_delete 状态:失败 信息:未找到 id=${action.id} 的代办。",
+                                    toolCallId = toolCallId
+                                )
+                            )
+                        }
+                    } else {
+                        service.delete(action.id)
+                        ui?.todosController?.reloadTodos()
+                        if (toolCallId.isNotEmpty()) {
+                            state.chatMessages.add(
+                                ChatMessage(
+                                    role = "tool",
+                                    content = "[工具执行结果] 类型:todo_delete 状态:成功\n" +
+                                        "已删除 id=${action.id}, title=\"${escapeJson(current.title)}\"",
+                                    toolCallId = toolCallId
+                                )
+                            )
+                        }
+                    }
+                }
+                else -> {
+                    // 不应到达这里(只在 4 个 todo 动作上调用)
+                }
+            }
+        }
+        // 走下一轮 tool loop
+        continueToolLoopInBackground(context, iteration + 1)
+    }
+
+    /**
+     * 把 [String] 转义为 JSON 字符串字面量(转义双引号与反斜杠),用于构造 tool_result 里的
+     * 简易 JSON 行(AI 自己反序列化用)。
+     * 不做完整 JSON 转义(换行 / 制表符等),对代办 title / content 这种短文本足够。
+     */
+    private fun escapeJson(s: String): String =
+        s.replace("\\", "\\\\").replace("\"", "\\\"")
 
     /**
      * 把 SheetsOperation 列表 + 平行的 toolCallId 列表打包成 [ActionWithToolCall] 列表,

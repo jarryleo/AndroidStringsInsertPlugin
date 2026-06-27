@@ -134,6 +134,63 @@ sealed class AiAction {
     ) : AiAction()
 
     /**
+     * 读取代办列表(主动发现 AI 上下文里没有的待办 / 提醒用户 / 在决策前查状态用)。
+     *
+     * 与 chat context 里注入的 `todos.active` 摘要的区别:
+     * - 摘要只列 active 的前 N 条(避免 token 爆炸),适合让 AI 知道「有活儿要干」;
+     * - 本工具可显式拉**全量 / completed / 指定 limit** 的列表,适合「逐条核对」或
+     *   「我刚才提的 X 找到没」等需要精确信息的场景。
+     *
+     * @param filter 过滤模式:`active` / `completed` / `all`;默认 `active`。
+     * @param limit  最大返回条数(默认 50);不传或为 null 时取 50,适合绝大多数场景。
+     */
+    data class TodoList(
+        val filter: String,
+        val limit: Int?
+    ) : AiAction()
+
+    /**
+     * 新增一条代办。
+     *
+     * @param title    必填,代办的标题(trim 后非空);空时 driver 拒绝并返回错误 tool_result。
+     * @param content  可选,详细描述(允许为空)。
+     * @param priority 可选,优先级;为空时回退 NORMAL。容错大小写、空格、未知值。
+     */
+    data class TodoAdd(
+        val title: String,
+        val content: String,
+        val priority: String
+    ) : AiAction()
+
+    /**
+     * 更新一条已有代办(按 [id] 定位)。
+     *
+     * 任何字段为 null 表示「不改」,只更新非 null 字段;这样 AI 可以做"只勾选完成"
+     * / "只改优先级" 等最小动作。
+     *
+     * @param id          必填,代办的稳定 id(由 [cn.jarryleo.insert_strings.ai.TodoService] 分配)。
+     *                    AI 拿到 id 的途径:调用 [TodoList] 看返回字段。
+     * @param title       新标题(null = 不改;trim 后空 = 校验失败)。
+     * @param content     新描述(null = 不改;空串 = 清空描述)。
+     * @param priority    新优先级(null = 不改;大小写不敏感 / 未知回退 NORMAL)。
+     * @param isCompleted 新完成状态(null = 不改;true / false 直接赋值)。
+     */
+    data class TodoUpdate(
+        val id: String,
+        val title: String?,
+        val content: String?,
+        val priority: String?,
+        val isCompleted: Boolean?
+    ) : AiAction()
+
+    /**
+     * 按 id 删除一条代办。id 不存在时 driver 返回错误 tool_result,不会静默成功。
+     */
+    data class TodoDelete(
+        val id: String
+    ) : AiAction()
+
+    /**
      * 列出/搜索模块内的字符串 key(AI 主动发现能力)。
      *
      * @param module             目标模块名,省略时按 recommendedDefaultModule → currentModule → fallback 优先级
