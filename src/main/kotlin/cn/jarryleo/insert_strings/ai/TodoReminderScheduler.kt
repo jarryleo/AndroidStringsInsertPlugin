@@ -172,8 +172,8 @@ class TodoReminderScheduler : Disposable {
     /**
      * 把用户在弹框里做的选择翻译成 [TodoItem.reminder] 的新值,并写回 service。
      *
-     * - [TodoReminderPopup.Choice.DONE] 一次性 → reminder = null;
-     *   循环 → nextTriggerAt = computeNextTriggerAfter(now),其它字段保留。
+     * - [TodoReminderPopup.Choice.DONE] 一次性 → reminder = null,**代办标为完成**;
+     *   循环 → nextTriggerAt = computeNextTriggerAfter(now),其它字段保留(代办保持 active)。
      * - [SNOOZE_1M / SNOOZE_5M / SNOOZE_10M] → nextTriggerAt = now + N 分钟,recurrence 保留
      *   (用「N 分钟后再次提醒」语义,保持与用户预期一致 —— 不会因为是循环就跳过这次)。
      */
@@ -197,8 +197,26 @@ class TodoReminderScheduler : Disposable {
             TodoReminderPopup.Choice.SNOOZE_10M ->
                 oldReminder.copy(nextTriggerAt = now + 10 * 60 * 1000L, enabled = true)
         }
-        TodoService.getInstance().setReminder(itemId, newReminder)
-        refreshUiList()
+        // 「完成」按钮:一次性提醒触发后,把代办标为完成(2026.x 修复 ——
+        // 之前只清掉 reminder,代办保持 active,用户感受"完成按钮没生效")。
+        val shouldCompleteTodo = choice == TodoReminderPopup.Choice.DONE &&
+            oldReminder.recurrence == TodoRecurrence.NONE
+        // 一次性"完成"分支(reminder = null + isCompleted = true)在同一次 service 写里完成,
+        // 避免出现"reminder 已清但 todo 还 active"的中间态。
+        val service = TodoService.getInstance()
+        service.setReminder(itemId, newReminder)
+        if (shouldCompleteTodo) {
+            // 同步 Compose 状态 + service:Compose 端 completeState 不会自动从
+            // service 字段读出,需要手动更新,否则 UI 上的删除线 / checkbox 勾选会延迟一帧。
+            val current = service.get(itemId)
+            if (current != null && !current.isCompleted) {
+                current.completeState.value = true
+                service.setCompleted(itemId, true)
+            }
+        }
+        // 立即刷新 UI(我们在 EDT 上,直接同步调;后台线程触发时 TodoUiRefresher
+        // 会自动改用 invokeLater)。再 notify 调度器重排 Timer。
+        refreshUiListDirect()
         if (newReminder != null) {
             // 重新排 Timer(可能下一次就是几秒后,也可能是一周后)
             notifyReminderChanged(itemId)
@@ -228,15 +246,39 @@ class TodoReminderScheduler : Disposable {
 
     /**
      * 通知 UI 刷新代办列表(让闹钟图标 / 下次时间立即反映新状态)。
-     * 通过 InsertStringsTodosController.refreshUi() 静态入口转发 —— 该入口是
+     * 通过 [TodoUiRefresher.refresh] 静态入口转发 —— 该入口是
      * [cn.jarryleo.insert_strings.ui.InsertStringsTodosController] 暴露的 service-level 钩子,
-     * 在 UI 装配时由 InsertStringsUI.registerTodosController() 注册。
+     * 在 UI 装配时由 [cn.jarryleo.insert_strings.ui.InsertStringsUI.createToolWindowContent] 注册。
+     *
+     * 后台线程安全:rescheduleAll / sweepExpired 可能从 Timer 线程或 StartupActivity
+     * 线程调用,这里统一走 invokeLater,避免 EDT 违例。
      */
     private fun refreshUiList() {
         try {
             TodoUiRefresher.refresh()
         } catch (e: Throwable) {
             log.warn("TodoReminderScheduler: UI refresh failed", e)
+        }
+    }
+
+    /**
+     * EDT 上同步触发 UI 刷新(2026.x 新增)。
+     *
+     * 与 [refreshUiList] 的区别:在 EDT 上**直接调用**注册的 refresher,
+     * 跳过 invokeLater 的排队,让弹框点击后的 UI 变化**立即**可见
+     * (弹框 dispose → UI 列表立刻显示新 nextTriggerAt,不会"先空白一帧再更新")。
+     *
+     * 由 [handleChoice] 在弹框点击回调(EDT)里调用。
+     */
+    private fun refreshUiListDirect() {
+        if (SwingUtilities.isEventDispatchThread()) {
+            try {
+                TodoUiRefresher.refreshImmediate()
+            } catch (e: Throwable) {
+                log.warn("TodoReminderScheduler: UI direct refresh failed", e)
+            }
+        } else {
+            refreshUiList()
         }
     }
 
@@ -255,7 +297,12 @@ class TodoReminderScheduler : Disposable {
  * 但 scheduler 触发后需要让 Todo tab 立刻反映新的 reminder 状态(更新 list / 闹钟图标)。
  *
  * 解决:[InsertStringsUI] 在装配时通过 [setRefresher] 注册一个回调;Scheduler 触发时调
- * [refresh],回调在 EDT 上执行,内部通过 service 拿到 controller 引用并 reload。
+ * [refresh] / [refreshImmediate],回调在 EDT 上执行,内部通过 service 拿到 controller 引用并 reload。
+ *
+ * 两个入口:
+ * - [refresh] 通用入口(后台线程安全):内部用 `invokeLater` 派发,适合 Timer 线程 / StartupActivity。
+ * - [refreshImmediate] 立即执行入口:假设调用方已在 EDT(弹框按钮回调);跳过 invokeLater
+ *   排队,让 UI 变化**当下帧**就可见(否则弹框关闭后用户先看到"旧状态"一帧)。
  */
 object TodoUiRefresher {
     @Volatile
@@ -265,7 +312,16 @@ object TodoUiRefresher {
         refresher = r
     }
 
+    /** 后台线程安全的刷新入口:内部 invokeLater。 */
     fun refresh() {
+        refresher?.invoke()
+    }
+
+    /**
+     * 立即执行入口。**调用方必须保证在 EDT 上**,
+     * 否则可能违反 Swing 单线程约束。
+     */
+    fun refreshImmediate() {
         refresher?.invoke()
     }
 }

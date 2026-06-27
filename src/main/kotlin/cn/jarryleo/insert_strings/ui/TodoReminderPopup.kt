@@ -8,9 +8,12 @@ import java.awt.Color
 import java.awt.Component
 import java.awt.Dimension
 import java.awt.Font
+import java.awt.Graphics
+import java.awt.Graphics2D
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
+import java.awt.RenderingHints
 import java.awt.Toolkit
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
@@ -26,7 +29,10 @@ import javax.swing.JDialog
 import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JTextArea
+import javax.swing.SwingConstants
 import javax.swing.UIManager
+import javax.swing.border.AbstractBorder
+import javax.swing.border.Border
 
 /**
  * 单条提醒的「右下角弹框」(非模态、always-on-top)。
@@ -43,12 +49,13 @@ import javax.swing.UIManager
  * 关闭按钮(标题栏 ×)与「完成」按钮语义不同 —— 关闭按钮表示"我看到了",
  * 行为与「完成」一致(「完成」语义按 [onChoice] 回调解释为 dismiss)。
  *
- * **关键坑(2026.x 修复)**:之前 dispose() 会触发 windowClosed 监听,
- * 而 windowClosed 又调 onChoice(Choice.DONE),结果用户点「5 分钟后」按钮时,
- * 1) disposeWith 先调 onChoice(SNOOZE_5M) → reminder = now+5min
- * 2) dispose() → windowClosed → onChoice(DONE) → reminder = null
- * 最后 reminder 被清空,代办列表的闹钟图标消失,详情里的 nextTriggerAt 也不更新。
- * 修复:用 [choiceLock] AtomicBoolean 保证 onChoice 只触发一次。
+ * **关键坑(2026.x 修复)**:
+ * 1. `dispose()` 会触发 `windowClosed` 监听,若 `windowClosed` 又调 `onChoice`,
+ *    会把按钮的选择覆盖成 "DONE"(导致 reminder 被清空)。用 [choiceLock] 互斥。
+ * 2. 默认 JButton + `isContentAreaFilled=true` 的背景是矩形,会超出圆角边框。
+ *    用 [RoundedButton] 自定义 paintComponent 让背景填在圆角内。
+ * 3. JLabel + HTML body width 在 BorderLayout.CENTER 不一定换行。
+ *    标题 / 内容 / 副文本全部改用 JTextArea + lineWrap=true,显式设置 width 触发换行。
  *
  * @param item    被提醒的 todo(展示 title + content)
  * @param reminder 触发时的 reminder 副本(用于显示「下一次提醒时间」)
@@ -82,6 +89,9 @@ class TodoReminderPopup(
     // 保证 onChoice 永远只触发一次:既被「点按钮」也走,也被「X 关闭」也走,
     // 但不能让两条路径都跑(否则后者会覆盖前者的选择)。
     private val choiceLock = AtomicBoolean(false)
+
+    // 弹框内文本统一可用宽度 = 总宽 380 - 左右内边距 14*2 = 352,再减 2 边距给到 348
+    private val textWidth = 348
 
     init {
         title = "⏰ 待办提醒"
@@ -121,27 +131,23 @@ class TodoReminderPopup(
                 BorderFactory.createLineBorder(borderColor, 1),
                 BorderFactory.createEmptyBorder(10, 14, 10, 14),
             )
-            // 不预设固定高度,改用 min/preferred 让内容自适应(标题 / 内容太长时撑高)
             preferredSize = Dimension(380, 200)
             minimumSize = Dimension(380, 160)
         }
 
-        // ===== 顶部:图标 + 标题 =====
+        // ===== 顶部:图标 + 标题(用 JTextArea 保证换行)=====
         val header = JPanel(BorderLayout(8, 0)).apply {
             isOpaque = false
         }
         val iconLabel = JLabel("⏰").apply {
             font = font.deriveFont(20f)
             foreground = fg
+            verticalAlignment = javax.swing.SwingConstants.TOP
         }
-        // 标题用 <html> 包裹,自动按可用宽度换行;不再依赖 wrapText 的字符级硬切。
         val titleText = item.title.ifBlank { "(untitled)" }
-        val titleLabel = JLabel("<html><body style='width:280px'>" + escapeHtml(titleText) + "</body></html>").apply {
-            font = font.deriveFont(Font.BOLD, 14f)
-            foreground = fg
-        }
+        val titleArea = makeTextArea(titleText, 14f, Font.BOLD, fg, textWidth - 28)
         header.add(iconLabel, BorderLayout.WEST)
-        header.add(titleLabel, BorderLayout.CENTER)
+        header.add(titleArea, BorderLayout.CENTER)
         root.add(header, BorderLayout.NORTH)
 
         // ===== 中部:内容 + 下次提醒时间 =====
@@ -151,34 +157,17 @@ class TodoReminderPopup(
             border = BorderFactory.createEmptyBorder(8, 0, 8, 0)
         }
         if (item.content.isNotBlank()) {
-            // 内容用 JTextArea 自动换行(wrapStyleWord=true 按词换行,不像 JLabel 那样用 <html>)。
-            val contentArea = JTextArea(item.content).apply {
-                isOpaque = false
-                isEditable = false
-                isFocusable = false
-                lineWrap = true
-                wrapStyleWord = true
-                foreground = fg
-                font = font.deriveFont(12f)
-                border = null
-                // 限制宽度以触发换行;高度由内容决定
-                size = Dimension(340, Short.MAX_VALUE.toInt())
-            }
-            contentArea.preferredSize = Dimension(340, contentArea.preferredSize.height.coerceAtLeast(20))
-            contentArea.alignmentX = Component.LEFT_ALIGNMENT
+            val contentArea = makeTextArea(item.content, 12f, Font.PLAIN, fg, textWidth)
             center.add(contentArea)
             center.add(Box.createVerticalStrut(6))
         }
-        val nextLabel = JLabel("<html><body style='width:340px'>" + escapeHtml(buildNextLabel(reminder)) + "</body></html>").apply {
-            foreground = fg
-            font = font.deriveFont(Font.PLAIN, 11f)
-            alignmentX = Component.LEFT_ALIGNMENT
-        }
-        center.add(nextLabel)
+        val nextArea = makeTextArea(buildNextLabel(reminder), 11f, Font.PLAIN, fg, textWidth)
+        center.add(nextArea)
         center.add(Box.createVerticalGlue())
         root.add(center, BorderLayout.CENTER)
 
-        // ===== 底部:按钮(完成 / 1m / 5m / 10m) =====
+        // ===== 底部:按钮(完成 / 1m / 5m / 10m) ——
+        // 用 RoundedButton 自定义绘制,让背景色填在圆角边框内部,不会溢出。
         val buttons = JPanel(GridBagLayout()).apply {
             isOpaque = false
         }
@@ -188,36 +177,51 @@ class TodoReminderPopup(
             insets = Insets(0, 0, 0, 0)
         }
         c.gridx = 0
-        buttons.add(buildButton("完成", dangerBg, dangerFg, primary = true) { disposeWith(Choice.DONE) }, c)
+        buttons.add(RoundedButton("完成", dangerBg, dangerFg, primary = true) { disposeWith(Choice.DONE) }, c)
         c.gridx = 1
         c.insets = Insets(0, 6, 0, 0)
-        buttons.add(buildButton("1 分钟后", accentBg, accentFg) { disposeWith(Choice.SNOOZE_1M) }, c)
+        buttons.add(RoundedButton("1 分钟后", accentBg, accentFg) { disposeWith(Choice.SNOOZE_1M) }, c)
         c.gridx = 2
-        buttons.add(buildButton("5 分钟后", secondaryBg, secondaryFg) { disposeWith(Choice.SNOOZE_5M) }, c)
+        buttons.add(RoundedButton("5 分钟后", secondaryBg, secondaryFg) { disposeWith(Choice.SNOOZE_5M) }, c)
         c.gridx = 3
-        buttons.add(buildButton("10 分钟后", secondaryBg, secondaryFg) { disposeWith(Choice.SNOOZE_10M) }, c)
+        buttons.add(RoundedButton("10 分钟后", secondaryBg, secondaryFg) { disposeWith(Choice.SNOOZE_10M) }, c)
         root.add(buttons, BorderLayout.SOUTH)
 
+        // 设置根 panel 的子组件前景(给非显式着色的子组件兜底)
         return root.also { applyForegroundRecursively(it, fg) }
     }
 
-    private fun buildButton(
+    /**
+     * 构造一个会自动按词换行 + 固定宽度的 JTextArea。
+     * 关键点:
+     * - `lineWrap=true` + `wrapStyleWord=true` 让长内容按词换行;
+     * - `setSize` + `setMaximumSize` + `setPreferredSize` 三处都设成 [width],
+     *   强制 BoxLayout / BorderLayout 拿到我们期望的宽度来计算换行;
+     * - `alignmentX = LEFT_ALIGNMENT` 避免 BoxLayout 把组件拉到全宽导致不换行。
+     */
+    private fun makeTextArea(
         text: String,
-        bg: Color,
-        fg: Color,
-        primary: Boolean = false,
-        onClick: () -> Unit,
-    ): JButton {
-        val btn = JButton(text)
-        btn.background = bg
-        btn.foreground = fg
-        btn.isFocusPainted = false
-        btn.isContentAreaFilled = true
-        btn.isOpaque = true
-        btn.font = if (primary) btn.font.deriveFont(Font.BOLD, 12f) else btn.font.deriveFont(12f)
-        btn.margin = Insets(4, 10, 4, 10)
-        btn.addActionListener { onClick() }
-        return btn
+        fontSize: Float,
+        fontStyle: Int,
+        foreground: Color,
+        width: Int,
+    ): JTextArea {
+        val area = JTextArea(text)
+        area.isOpaque = false
+        area.isEditable = false
+        area.isFocusable = false
+        area.lineWrap = true
+        area.wrapStyleWord = true
+        area.foreground = foreground
+        area.font = area.font.deriveFont(fontStyle, fontSize)
+        area.border = null
+        area.margin = Insets(0, 0, 0, 0)
+        area.size = Dimension(width, area.preferredSize.height)
+        area.preferredSize = Dimension(width, area.preferredSize.height)
+        area.maximumSize = Dimension(width, Int.MAX_VALUE)
+        area.minimumSize = Dimension(width, area.preferredSize.height)
+        area.alignmentX = Component.LEFT_ALIGNMENT
+        return area
     }
 
     private fun buildNextLabel(reminder: TodoReminder): String {
@@ -247,8 +251,6 @@ class TodoReminderPopup(
     }
 
     private fun disposeWith(choice: Choice) {
-        // 先用 CAS 抢锁:抢到就跑 onChoice;抢不到说明 windowClosed 已经处理过(用户 X 关闭的并发场景),
-        // 直接 dispose 即可,避免覆盖真实选择。
         if (choiceLock.compareAndSet(false, true)) {
             onChoice(choice)
         }
@@ -266,11 +268,84 @@ class TodoReminderPopup(
         val c = keys.firstNotNullOfOrNull(UIManager::getColor)
         return c ?: fallback
     }
+}
+
+/**
+ * 圆角按钮(2026.x 新增)。
+ *
+ * 解决默认 JButton 的两个问题:
+ * 1. `isContentAreaFilled = true` 时 Swing 画矩形背景,**超出圆角边框**;
+ * 2. 默认 Look & Feel 边框是矩形,看起来不协调。
+ *
+ * 做法:
+ * - `isContentAreaFilled = false` 关闭 Swing 默认背景绘制;
+ * - 自定义 `paintComponent` 用 `fillRoundRect` 在圆角内部填色;
+ * - 自定义 `paintBorder` 用 `drawRoundRect` 描一个圆角边框;
+ * - 二者共用同一个圆角半径,视觉上背景"刚好填在边框内"。
+ */
+private class RoundedButton(
+    text: String,
+    private val bgColor: Color,
+    private val fgColor: Color,
+    private val borderColor: Color = bgColor,
+    private val radius: Int = 6,
+    private val primary: Boolean = false,
+    onClick: () -> Unit,
+) : JButton(text) {
+
+    init {
+        foreground = fgColor
+        isFocusPainted = false
+        isContentAreaFilled = false
+        isOpaque = false
+        isBorderPainted = true
+        border = RoundedBorder(radius, borderColor)
+        font = if (primary) font.deriveFont(Font.BOLD, 12f) else font.deriveFont(12f)
+        margin = Insets(4, 10, 4, 10)
+        horizontalAlignment = javax.swing.SwingConstants.CENTER
+        // 用我们的 paintComponent + border 自行绘制,屏蔽 L&F 的默认按钮 UI。
+        isFocusable = true
+        addActionListener { onClick() }
+    }
 
     /**
-     * HTML 文本最小转义(只处理 & < >),用于把含特殊字符的 title / next label 嵌入 <html>...</html>。
-     * 不做完整转义,够 JLabel 渲染用。
+     * 在圆角范围内填背景色。注意:这里直接用 width/height 是因为 fillRoundRect
+     * 会自己把形状画在矩形范围内,不会超出圆角路径。
      */
-    private fun escapeHtml(s: String): String =
-        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    override fun paintComponent(g: Graphics) {
+        val g2 = g.create() as Graphics2D
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+        g2.color = bgColor
+        g2.fillRoundRect(0, 0, width - 1, height - 1, radius, radius)
+        g2.dispose()
+        super.paintComponent(g)
+    }
+}
+
+/**
+ * 圆角边框(2026.x 新增)。
+ * 配合 [RoundedButton] 使用,让边框也是圆角,与背景的圆角对齐。
+ */
+private class RoundedBorder(
+    private val radius: Int,
+    private val color: Color,
+) : AbstractBorder() {
+
+    override fun paintBorder(
+        c: Component?,
+        g: Graphics?,
+        x: Int,
+        y: Int,
+        width: Int,
+        height: Int,
+    ) {
+        if (g == null) return
+        val g2 = g.create() as Graphics2D
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+        g2.color = color
+        g2.drawRoundRect(x, y, width - 1, height - 1, radius, radius)
+        g2.dispose()
+    }
+
+    override fun getBorderInsets(c: Component?): Insets = Insets(2, 2, 2, 2)
 }

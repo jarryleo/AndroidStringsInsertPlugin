@@ -1825,16 +1825,30 @@ internal class InsertStringsChatDriver(
 
     /**
      * 把 [cn.jarryleo.insert_strings.ai.TodoReminder] 序列化为简短 JSON,供 AI 工具结果回传。
-     * 字段精简到 AI 看下一次要用的程度(nextTriggerAt + recurrence + timeOfDay + days),
-     * 不暴露 enabled(默认 true,没歧义)。
+     *
+     * 字段(2026.x 增强):
+     * - `nextTriggerAt` Unix 毫秒时间戳 — 机器友好,用于相对时间运算;
+     * - `nextTriggerAtFormatted` 人类可读时间 `yyyy-MM-dd HH:mm` — 不用让 AI 自己转时区;
+     * - `triggerInMinutes` 距离触发的剩余分钟数 — 让 AI 一眼看出"还有多久";
+     * - `recurrence` / `timeOfDay` / `days` 循环配置(同 context 里的 todos.active[].reminder 字段)。
      */
     private fun reminderToJsonString(r: cn.jarryleo.insert_strings.ai.TodoReminder): String {
         val tod = r.timeOfDay?.format() ?: "-"
         val days = if (r.recurrence == cn.jarryleo.insert_strings.ai.TodoRecurrence.CUSTOM) {
             r.recurrenceDays.sorted().joinToString(",")
         } else "-"
-        val next = r.nextTriggerAt ?: -1L
-        return "{\"nextTriggerAt\":$next,\"recurrence\":\"${r.recurrence.name}\"," +
+        val at = r.nextTriggerAt
+        val nextTs = at ?: -1L
+        val nextFormatted = if (at != null) {
+            val timeFmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+            timeFmt.format(java.util.Date(at))
+        } else "-"
+        // 距离触发的剩余分钟数;已过期显示负数(让 AI 知道提醒被拖延了)
+        val triggerInMinutes = if (at != null) {
+            (at - System.currentTimeMillis()) / 60_000L
+        } else -1L
+        return "{\"nextTriggerAt\":$nextTs,\"nextTriggerAtFormatted\":\"$nextFormatted\"," +
+            "\"triggerInMinutes\":$triggerInMinutes,\"recurrence\":\"${r.recurrence.name}\"," +
             "\"timeOfDay\":\"$tod\",\"days\":\"$days\"}"
     }
 

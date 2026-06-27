@@ -31,6 +31,8 @@ internal class InsertStringsChatContextBuilder(
         private const val TODO_CONTEXT_LIMIT = 20
         // 时间格式:本地时区的 yyyy-MM-dd HH:mm:ss,让 AI 能直接读懂"现在是几点"。
         private val HUMAN_TIME_FORMAT = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+        // reminder 摘要里的时间格式(2026.x 新增):yyyy-MM-dd HH:mm,精度足够让人/AI 理解。
+        private val REMINDER_FMT = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
     }
 
     fun build(): String {
@@ -183,6 +185,11 @@ internal class InsertStringsChatContextBuilder(
                             addProperty("id", item.id)
                             addProperty("title", item.title)
                             addProperty("nextTriggerAt", r.nextTriggerAt)
+                            val at = r.nextTriggerAt
+                            if (at != null) {
+                                addProperty("nextTriggerAtFormatted", REMINDER_FMT.format(java.util.Date(at)))
+                                addProperty("triggerInMinutes", (at - nowMillis) / 60_000L)
+                            }
                             addProperty("recurrence", r.recurrence.name)
                             val tod = r.timeOfDay
                             if (tod != null) addProperty("timeOfDay", tod.format())
@@ -209,6 +216,19 @@ internal class InsertStringsChatContextBuilder(
                                     val tod = r.timeOfDay
                                     add("reminder", JsonObject().apply {
                                         addProperty("nextTriggerAt", r.nextTriggerAt)
+                                        // 人类可读时间 + 距离触发的剩余分钟数,
+                                        // 让 AI 不用自己转时区也能理解「还有多久触发」。
+                                        val at = r.nextTriggerAt
+                                        if (at != null) {
+                                            addProperty(
+                                                "nextTriggerAtFormatted",
+                                                REMINDER_FMT.format(java.util.Date(at))
+                                            )
+                                            addProperty(
+                                                "triggerInMinutes",
+                                                (at - nowMillis) / 60_000L
+                                            )
+                                        }
                                         addProperty("recurrence", r.recurrence.name)
                                         if (tod != null) {
                                             addProperty("timeOfDay", tod.format())

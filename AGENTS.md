@@ -4,7 +4,7 @@
 
 IntelliJ IDEA / Android Studio plugin (id `cn.jarryleo.insert_strings`, product name "Android Strings Insert") for i18n string resource management. Scans `strings.xml` files, opens a Compose Desktop UI in a tool window to edit/translate strings across locales, and writes them back. Also includes an AI chat feature (multi-protocol) and Google Sheets sync.
 
-Version is set in `build.gradle.kts:13` (currently `3.10.1`).
+Version is set in `build.gradle.kts:13` (currently `3.10.4`).
 
 ## Build Commands
 
