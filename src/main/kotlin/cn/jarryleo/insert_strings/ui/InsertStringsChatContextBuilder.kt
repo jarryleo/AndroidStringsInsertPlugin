@@ -1,5 +1,6 @@
 package cn.jarryleo.insert_strings.ui
 
+import cn.jarryleo.insert_strings.ai.AITranslator
 import cn.jarryleo.insert_strings.ai.TodoService
 import cn.jarryleo.insert_strings.sheets.SheetsManager
 import cn.jarryleo.insert_strings.sheets.SheetsSettingsService
@@ -24,11 +25,17 @@ internal class InsertStringsChatContextBuilder(
     companion object {
         private const val DEFAULT_LANGUAGE = "values"
         /**
-         * 聊天上下文里注入 active 代办的最大条数。
-         * 选 20 兼顾「足够多让 AI 看到全貌」和「不爆 token」(每条约 30~60 字符,20 条 ≈ 1KB JSON)。
-         * 超过时 AI 想看更多细节用 todo_list 工具按需取。
+         * 聊天上下文里注入 active 代办的最大条数(2026.x 优化:20 → 5)。
+         * 选 5 兼顾「足够多让 AI 看到全貌」和「不爆 token」(每条约 30~60 字符,5 条 ≈ 300B JSON)。
+         * 超过时 AI 想看更多细节用 todo_list 工具按需取(完整字段 content / createdAt / completedAt)。
          */
-        private const val TODO_CONTEXT_LIMIT = 20
+        private const val TODO_CONTEXT_LIMIT = 5
+        /**
+         * availableSheets 列表展示的最大条数(2026.x 优化:不再全列,只前 N 个 + 计数)。
+         * 选 5 与 SheetsManager 实际用户经常用的 sheet 数对齐;真实表格可能有几十个 sheet,
+         * 全列会塞进几百字符。AI 真要遍历时调 sheets_operation(operation=list_sheets) 或 query_keys。
+         */
+        private const val AVAILABLE_SHEETS_LIMIT = 5
         // 时间格式:本地时区的 yyyy-MM-dd HH:mm:ss,让 AI 能直接读懂"现在是几点"。
         private val HUMAN_TIME_FORMAT = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
         // reminder 摘要里的时间格式(2026.x 新增):yyyy-MM-dd HH:mm,精度足够让人/AI 理解。
@@ -100,6 +107,9 @@ internal class InsertStringsChatContextBuilder(
             // 同时也是引用面板「翻译 / 解释 / 总结」按钮的**唯一文本来源**:这些按钮
             // 不再把原文塞进 user 消息(避免与顶部引用气泡重复),AI 必须从这里的
             // `text` 字段读取原文,详见 system prompt 中「关于「引用内容」入口」一节。
+            //
+            // 2026.x 优化 B6:主面板场景(chatEntry=mainPanel)永远无编辑器选区,
+            // 整个字段不写入 JSON,避免每轮多出 "editorSelection: null" 一行。AI 知道 chatEntry=mainPanel 即知道无选区。
             if (editorSel != null) {
                 add("editorSelection", JsonObject().apply {
                     addProperty("text", editorSel.selectedText)
@@ -117,53 +127,58 @@ internal class InsertStringsChatContextBuilder(
                                 "按钮只发短指令(不重复带原文),AI 必须从本字段的 `text` 拿到原文,直接返回结果,不要调任何工具。"
                     )
                 })
-            } else {
+            } else if (state.chatEntry != AITranslator.CHAT_ENTRY_MAIN_PANEL) {
+                // 非主面板入口且无选区时,显式写 null(让弹框场景下 AI 明确知道「该入口没捕获到选区」)。
                 add("editorSelection", null)
             }
             add("currentModule", contextInfo.currentModule?.let { moduleToJson(it) })
+            // 2026.x 优化 B2:modules[] 里仅 currentModule + recommendedDefaultModule 给完整 xmlFiles,
+            // 其它 module 只发 moduleName + totalLines。AI 切到其它模块时用 query_keys(module=X) 按需取详情。
+            // 原始全量展开一个 5 模块 × 8 语种项目会塞 40 个 xmlFiles 节点;
+            // 优化后只 1-2 个全量 + 3-4 个精简,context 段 -60-70%。
             add("modules", JsonArray().apply {
-                contextInfo.modules.forEach { add(moduleToJson(it)) }
-            })
-            add("moduleWithMostLines", contextInfo.moduleWithMostLines?.let { moduleToJson(it) })
-            add("recommendedDefaultModule", contextInfo.recommendedDefaultModule?.let { moduleToJson(it) })
-            add(
-                "moduleRanking",
-                JsonArray().apply {
-                    contextInfo.modules
-                        .sortedByDescending { it.xmlFiles.size * 1_000_000 + it.totalLines }
-                        .forEach { add(moduleToJson(it)) }
+                contextInfo.modules.forEach { module ->
+                    val isPrimary = module.moduleName == contextInfo.currentModule?.moduleName ||
+                        module.moduleName == contextInfo.recommendedDefaultModule?.moduleName
+                    add(moduleToJson(module, fullXmlFiles = isPrimary))
                 }
-            )
+            })
+            add("recommendedDefaultModule", contextInfo.recommendedDefaultModule?.let { moduleToJson(it) })
             add("availableLanguages", JsonArray().apply {
                 availableLanguages.forEach { add(it) }
             })
+            // 2026.x 优化 B3:currentSelectedKeys 只发 key 名(数组元素只剩 {key: "..."}),
+            // 不再带各语种翻译 —— 那些信息会随 N(选中 key 数)线性增长,极易爆 token。
+            // AI 想看某 key 的翻译时,改用 read_string("<key>") 精确拉取(返回全语种文本)。
             add("currentSelectedKeys", JsonObject().apply {
                 addProperty(
                     "note",
-                    "用户在主面板入口 mainPanel 打开时选择的strings.xml文件内的翻译文本,包含所有选中的key和翻译内容," +
-                            "用于翻译检查,修复,插入表格等需求。"
+                    "用户在主面板入口 mainPanel 打开时选择的 key 列表(只发 key 名,不附带翻译文本)。" +
+                        "想看具体 key 在各语种的当前翻译,用 read_string(\"<key>\")。" +
+                        "上下文 recommendedDefaultModule 的 xmlFiles 列出目标模块的全语种。"
                 )
                 add("currentKeys", JsonArray().apply {
                     state.keyEntries.forEach { entry ->
                         add(JsonObject().apply {
                             addProperty("key", entry.key)
-                            add("translations", JsonObject().apply {
-                                entry.stringsInfoList.filter { it.text.isNotEmpty() }.forEach {
-                                    addProperty(it.language, it.text)
-                                }
-                            })
                         })
                     }
                 })
             })
+            // 2026.x 优化 B5:availableSheets 限前 N 个 + "等 X 个" 后缀,避免几十个 sheet 名撑爆 JSON。
+            // 真实表格配置项中会保留完整列表,这里只裁剪 AI 上下文。
             add("googleSheets", JsonObject().apply {
                 addProperty("configured", sheetsConfigured)
                 addProperty("defaultSpreadsheetId", sheetsSettings.defaultSpreadsheetId)
                 addProperty("defaultSheetName", sheetsSettings.defaultSheetName)
                 if (availableSheetNames != null) {
                     add("availableSheets", JsonArray().apply {
-                        availableSheetNames.forEach { add(it) }
+                        availableSheetNames.take(AVAILABLE_SHEETS_LIMIT).forEach { add(it) }
                     })
+                    val more = (availableSheetNames.size - AVAILABLE_SHEETS_LIMIT).coerceAtLeast(0)
+                    if (more > 0) {
+                        addProperty("availableSheetsMore", more)
+                    }
                 }
             })
             // ===== 代办列表(2026.x 新增) =====
@@ -280,21 +295,29 @@ internal class InsertStringsChatContextBuilder(
         return root.toString()
     }
 
-    private fun moduleToJson(module: ModuleInfo): JsonObject {
+    private fun moduleToJson(module: ModuleInfo, fullXmlFiles: Boolean = true): JsonObject {
         return JsonObject().apply {
             addProperty("moduleName", module.moduleName)
             addProperty("originalModuleName", module.originalModuleName)
             addProperty("modulePath", module.modulePath)
             addProperty("totalLines", module.totalLines)
-            add("xmlFiles", JsonArray().apply {
-                module.xmlFiles.forEach { file ->
-                    add(JsonObject().apply {
-                        addProperty("filePath", file.filePath)
-                        addProperty("language", file.language)
-                        addProperty("fileLines", file.fileLines)
-                    })
-                }
-            })
+            if (fullXmlFiles) {
+                add("xmlFiles", JsonArray().apply {
+                    module.xmlFiles.forEach { file ->
+                        add(JsonObject().apply {
+                            addProperty("filePath", file.filePath)
+                            addProperty("language", file.language)
+                            addProperty("fileLines", file.fileLines)
+                        })
+                    }
+                })
+            } else {
+                // 2026.x 优化 B2:非主模块精简模式 —— 只发语言目录名(无 filePath / fileLines)。
+                // AI 切到该模块时用 query_keys(module=X) 按需拉详情。
+                add("languages", JsonArray().apply {
+                    module.xmlFiles.forEach { add(it.language) }
+                })
+            }
         }
     }
 }

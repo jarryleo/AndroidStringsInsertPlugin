@@ -2,6 +2,7 @@ package cn.jarryleo.insert_strings.ai
 
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
+import com.google.gson.JsonNull
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import java.net.URI
@@ -76,6 +77,22 @@ data class ChatMessage(
      */
     val askQuestion: String? = null,
     /**
+     * 协议层"执行操作:xxx"占位文本(2026.x 新增,token 优化 D1)。
+     *
+     * 历史:之前 assistant 消息带真实 tool_calls 时,driver 把"执行操作: insert_strings / update_string"
+     * 这种占位文案写进 [content]。但它对 AI 协议毫无价值(AI 自己的 tool_calls 已描述动作),
+     * 只是给 UI 端渲染用的"提示行"。
+     *
+     * 优化:占位文案只放进本字段(每条 ChatMessage 一份),协议层把 content 设为 null/空,
+     * AI 收到的 assistant 消息只携带 tool_calls(没有冗余 content)。
+     * UI 端读 [protocolSummary] 渲染占位行 —— 比如有"执行操作: sheets_operation / batch_modify" 时
+     * 在气泡下显示一行小字。
+     *
+     * 同样适用于 task_complete summary 之后追加的"本任务完成"提示行。
+     * 不参与 AI 协议序列化(同 [streaming] / [thinking] 的处理),仅 UI 渲染使用。
+     */
+    val protocolSummary: String? = null,
+    /**
      * 是否在聊天 UI 上隐藏本条消息(2026.x 新增)。
      *
      * 与 [protocolVisible] 的区别:
@@ -143,13 +160,20 @@ object AITranslator {
     private const val MAIN_PANEL_SYSTEM_PROMPT =
         """你是 Android 应用国际化字符串管理助手。通过 function calling 与系统协作:调用工具执行操作,调用 `task_complete` 结束任务。
 
-## 工具集(按需加载详细用法)
+ ## 工具集(按需加载详细用法)
 - **strings.xml**:query_keys / read_string / find_keys_by_text / insert_strings / update_string / delete_string
 - **Google Sheets**:sheets_operation(基础/行列/冻结/审查/颜色/批量) / find_rows_by_text
 - **文件 / 编辑器**:get_editor_file / read_file / edit_file / create_file / search_in_files / find_references / list_files
 - **代办**:todo_list / todo_add / todo_update / todo_delete(用户主页 Todo tab 维护的清单,可读写)
 - **通用**:ask_user / load_tool_doc / task_complete
 - 详细字段 / 枚举值 / 示例 → 先调 `load_tool_doc("<tool>")` 获取,再发起实际调用。
+- **多字段工具建议先 load_tool_doc 再调**(2026.x 优化):
+  - `sheets_operation`(7 大类操作枚举 + batchEdits 嵌套结构),`read_file` / `edit_file` / `create_file`(路径/正则/范围约束),
+  - `search_in_files` / `find_references` / `list_files`(默认行为差异),
+  - `todo_add` / `todo_update`(reminder 系列字段语义复杂)。
+  这些工具的精简 description 只列了字段名+类型,不读文档直接调易因参数错误反复重试。
+  简单工具(`query_keys` / `read_string` / `find_keys_by_text` / `ask_user` / `task_complete` / `current_time` / `replace_selection`)
+  可直接调用,无需先 load_tool_doc。
 
 ## strings.xml 核心约定
 - 实际语种以**目标模块的 `xmlFiles[].language`** 为准,不是 `availableLanguages`(后者可能只反映用户当前选中的行)。
@@ -1909,18 +1933,47 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         val root = JsonObject().apply {
             addProperty("model", model)
             addProperty("max_tokens", 16000)
-            val systemParts = buildString {
-                append(systemPrompt)
-                if (context.isNotBlank()) {
-                    append("\n## 当前项目上下文（JSON）\n").append(context)
-                }
-                if (activeRole != null) {
-                    // Anthropic 协议 system 是单个字符串,把角色段追加到末尾,
-                    // 与主 system prompt 一起作为系统级指令。
-                    append("\n## 当前 AI 角色设定\n").append(activeRole)
+            // 2026.x:E1 — Anthropic prompt caching
+            // 把 system 段从单字符串改为 content block 数组,在最末一个 block 打
+            // cache_control:ephemeral。这样从第 2 轮起,system+tools 这部分(每轮固定不变)
+            // 按 0.1x 计费。tools 同样在最后一个 tool 上加 cache_control。
+            // 详细:https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+            val systemBlocks = mutableListOf<JsonObject>()
+            systemBlocks += JsonObject().apply {
+                addProperty("type", "text")
+                addProperty("text", systemPrompt)
+            }
+            if (context.isNotBlank()) {
+                systemBlocks += JsonObject().apply {
+                    addProperty("type", "text")
+                    addProperty("text", "## 当前项目上下文（JSON）\n$context")
                 }
             }
-            addProperty("system", systemParts)
+            if (activeRole != null) {
+                // 角色段放最后,作为"会变化的部分"——避免它变化时让整个 system 缓存失效。
+                // 也就是说 systemPrompt+context 这两段命中缓存,角色段每轮重算。
+                systemBlocks += JsonObject().apply {
+                    addProperty("type", "text")
+                    addProperty("text", "## 当前 AI 角色设定\n$activeRole")
+                    add("cache_control", JsonObject().apply { addProperty("type", "ephemeral") })
+                }
+            } else {
+                // 没有角色段时,直接在 context block 上打 cache_control,覆盖整个 system。
+                systemBlocks.last().add(
+                    "cache_control",
+                    JsonObject().apply { addProperty("type", "ephemeral") }
+                )
+            }
+            add("system", JsonArray().apply { systemBlocks.forEach { add(it) } })
+            // tools 缓存:在最后一个 tool 上打 cache_control,让 tools[] 也享受缓存。
+            // (Anthropic 支持 tool-level cache_control,与 system 段独立计费)
+            if (tools.size() > 0) {
+                val lastTool = tools.get(tools.size() - 1).asJsonObject
+                lastTool.add(
+                    "cache_control",
+                    JsonObject().apply { addProperty("type", "ephemeral") }
+                )
+            }
             add("tools", tools)
             if (stream) addProperty("stream", true)
             add(
@@ -1952,6 +2005,10 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
      * - assistant 消息携带 tool_calls(原生 function calling)
      * - tool 消息携带 tool_call_id(回传给模型以关联结果)
      * - 普通 user/assistant 消息保持原样
+     *
+     * 2026.x 优化 D1 协议层:当 assistant 消息的 [protocolSummary] 非空(即 driver 写了"执行操作:xxx"
+     * 占位到独立字段)且 content 为空时,OpenAI 协议把 content 设为 null,只发 tool_calls,
+     * 避免占位文本进入 AI 上下文。
      */
     private fun ChatMessage.toOpenAiMessage(): JsonObject {
         // tool result message
@@ -1964,14 +2021,24 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         }
         // assistant 消息的协议文本 = 模型的真实发言。
         // UI 层把模型的流式文本放在 [thinking],把衍生的「执行操作:xxx」/task_complete summary
-        // 放在 [content]。发回 AI 时必须用 [thinking](没有才退回 [content]),
+        // 放在 [content] / [protocolSummary]。发回 AI 时必须用 [thinking](没有才退回 [content]),
         // 否则 AI 会看到自己没写过的「执行操作:」前缀,污染下一轮上下文。
-        val protocolText = if (role == "assistant") thinking.ifEmpty { content } else content
+        //
+        // D1 关键逻辑:
+        //  - protocolSummary 非空 且 content 为空 → content 设为 null(只发 tool_calls)
+        //  - protocolSummary 非空 且 content 有正文(ask_user 情况)→ content 用正文,protocolSummary 不发
+        //  - protocolSummary 为空 → 走原路径,content = thinking.ifEmpty { content }
+        val rawContent = if (role == "assistant") thinking.ifEmpty { content } else content
+        val protocolSummaryApplied = (role == "assistant" && protocolSummary != null && content.isEmpty())
         // assistant message with tool calls (function calling)
         if (role == "assistant" && toolCalls.isNotEmpty()) {
-            return JsonObject().apply {
+            val obj = JsonObject().apply {
                 addProperty("role", "assistant")
-                addProperty("content", protocolText)
+                if (protocolSummaryApplied) {
+                    add("content", JsonNull.INSTANCE)
+                } else {
+                    addProperty("content", rawContent)
+                }
                 add("tool_calls", JsonArray().apply {
                     toolCalls.forEach { tc ->
                         add(JsonObject().apply {
@@ -1985,11 +2052,12 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                     }
                 })
             }
+            return obj
         }
         // plain text message
         return JsonObject().apply {
             addProperty("role", role)
-            addProperty("content", protocolText)
+            addProperty("content", rawContent)
         }
     }
 
@@ -2148,13 +2216,18 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         }
         // assistant 消息的协议文本 = 模型的真实发言:优先用 [thinking](流式累积的模型原文),
         // 没有(纯文本回合)时退回 [content]。详见 [toOpenAiMessage] 的注释。
+        //
+        // 2026.x 优化 D1 协议层:当 protocolSummary 非空且 content 为空(纯工具调用回合)时,
+        // Anthropic 协议下 content 数组里跳过 text 块,只发 tool_use 块,
+        // 避免"执行操作:xxx"占位文本进入 AI 上下文。
         val protocolText = if (role == "assistant") thinking.ifEmpty { content } else content
+        val protocolSummaryApplied = (role == "assistant" && protocolSummary != null && content.isEmpty())
         if (role == "assistant") {
             if (toolCalls.isNotEmpty()) {
                 return JsonObject().apply {
                     addProperty("role", "assistant")
                     add("content", JsonArray().apply {
-                        if (protocolText.isNotEmpty()) {
+                        if (protocolText.isNotEmpty() && !protocolSummaryApplied) {
                             add(JsonObject().apply {
                                 addProperty("type", "text")
                                 addProperty("text", protocolText)

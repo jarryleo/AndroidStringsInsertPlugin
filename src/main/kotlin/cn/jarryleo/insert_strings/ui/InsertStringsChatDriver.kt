@@ -45,8 +45,15 @@ internal class InsertStringsChatDriver(
         // 单轮对话中 ask_user 的最大连续调用次数,防止 AI 反复追问形成死循环。
         // 每次用户实际回复(发送消息 / 点击选项)后重置为 0。
         private const val MAX_ASK_USER_CALLS = 3
-        // 默认语言目录名(对应 values/ 目录,Android 默认英语资源)。
-        // 作为兜底确保插入翻译时一定包含 values 键,避免英语写空。
+        // 2026.x 优化 D2:tool result 压缩阈值。
+        // 超过 N 个 assistant 回合前的 tool 消息(其内容对当前轮次决策无影响)会被压缩为占位符。
+        // 选 5 保留最近 5 轮的工具结果(约 1-2 个完整流程),超出部分用占位符替代。
+        // 阈值太小会丢失近期上下文,太大则省不下来 token。
+        private const val TOOL_RESULT_COMPACTION_THRESHOLD = 5
+        // 压缩后的占位文本 — 协议层发回 AI(OpenAI/Anthropic 对 tool_result 长度不敏感),
+        // UI 端在 chat tab 也展示这个占位(用户不会频繁翻 5 轮前的工具结果,
+        // 真要时再调一次工具即可,接受这个折衷)。
+        private const val TOOL_RESULT_COMPACTED_PLACEHOLDER = "[结果已压缩(节省 token);需要时重新调用工具]"
         const val DEFAULT_LANGUAGE = "values"
     }
 
@@ -400,6 +407,19 @@ internal class InsertStringsChatDriver(
             // invokeAndWait 异常不应阻塞 AI 调用,继续走原流程
         }
 
+        // 2026.x 优化 D2:压缩过期 tool result。
+        // 超过 [TOOL_RESULT_COMPACTION_THRESHOLD] 个 assistant 回合之前的 tool 消息,
+        // 其原始内容(可能几百~几千字符)对当前 AI 决策帮助有限,但会每轮都参与序列化。
+        // 压缩为占位符,长对话每轮可省 0.5-2KB。
+        // 在 EDT 上做(chatMessages 是 SnapshotStateList,后台线程访问不安全)。
+        try {
+            SwingUtilities.invokeAndWait {
+                compactOldToolResults()
+            }
+        } catch (e: Exception) {
+            // 异常不应阻塞 AI 调用,继续走原流程
+        }
+
         // === 流式 AI 调用 ===
         // 关键时序:
         //  1) 在 EDT 上同步快照 chatMessages(此刻是「干净」的历史,不含本轮 assistant 占位),
@@ -575,18 +595,22 @@ internal class InsertStringsChatDriver(
             // UI 层只对 realToolCalls 做"summarizeToolCalls"展示用,真正驱动 processAiReply 的是
             // reply.actions(只含解析成功的),所以混入 failed 不会重复执行。
             val finalToolCalls = realToolCalls + reply.failedToolCalls
-            val (finalContent, finalThinking) = when {
+            // 2026.x 优化 D1:把"执行操作:xxx"占位文案从 content 拆到独立的 protocolSummary 字段。
+            // 协议层(toOpenAiMessage/toAnthropicMessage)看到这个字段非空时,会把 content 设为 null,
+            // 避免冗余的占位文本进入 AI 上下文(每轮节省几十~几百字符);UI 端读 protocolSummary 渲染占位行。
+            data class AssistantDisplay(val content: String, val summary: String?, val thinking: String)
+            val display: AssistantDisplay = when {
                 // 情况 A:模型纯文本回复(无工具调用)——
                 // content 放最终回答(用户实际要看的),thinking 放思考过程(非推理模型时为空)。
                 finalToolCalls.isEmpty() -> {
-                    Pair(reply.reply, reply.reasoning)
+                    AssistantDisplay(reply.reply, null, reply.reasoning)
                 }
                 // 情况 B:只有 task_complete 终止信号
                 // content 放模型的真实文本回答(例如引用面板「翻译」动作的翻译结果),
                 //   handleTaskComplete 会在末尾追加 summary + notes 作为脚注,而不再覆盖整个 content;
                 // thinking 放思考过程。
                 realToolCalls.isEmpty() && hasTaskComplete -> {
-                    Pair(reply.reply, reply.reasoning)
+                    AssistantDisplay(reply.reply, null, reply.reasoning)
                 }
                 // 情况 C:有真实工具调用(可叠加 task_complete,但 task_complete 之后会被前面分支截走,
                 //    所以这里只可能是纯真实工具调用)
@@ -602,31 +626,43 @@ internal class InsertStringsChatDriver(
                             "执行操作: ${summarizeToolCalls(realToolCalls)}"
                         }
                         reply.failedToolCalls.isNotEmpty() -> {
-                            // 全部解析失败:在 content 上提示一下,用户能直接看到失败信息(否则 UI 上只看到一行「执行操作:」)
+                            // 全部解析失败:在 protocolSummary 上提示一下,用户能直接看到失败信息
+                            // (否则 UI 上只看到一行「执行操作:」)
                             "执行操作失败: ${summarizeToolCalls(reply.failedToolCalls)} 参数无法解析"
                         }
                         else -> {
-                            // 含 ask_user(或纯 ask_user)时,正文由 reply.reply 承载;
-                            // reply.reply 为空则 content 也留空,避免「执行操作:」这种干扰阅读的占位。
-                            reply.reply
+                            // 含 ask_user(或纯 ask_user)时,正文由 reply.reply 承载,无 protocolSummary。
+                            null
                         }
                     }
-                    // 工具调用回合:thinking 写思考过程;content 见上方分支注释。
-                    Pair(summary, reply.reasoning)
+                    // 工具调用回合:thinking 写思考过程;
+                    // content 在 protocolSummary 非空时(有真实非 ask_user 工具)留空,避免冗余文本进入 AI 上下文。
+                    // 含 ask_user 时 content = reply.reply(有前言正文);只有 failed 时 content 空 + summary 提示。
+                    val displayContent = when {
+                        summary != null && !hasAskUser && reply.failedToolCalls.isEmpty() -> ""
+                        summary != null && reply.failedToolCalls.isNotEmpty() -> ""
+                        else -> reply.reply
+                    }
+                    AssistantDisplay(displayContent, summary, reply.reasoning)
                 }
             }
+            val finalContent = display.content
+            val finalThinking = display.thinking
+            val finalProtocolSummary = display.summary
 
             if (placeholderIdx in 0 until state.chatMessages.size) {
                 val current = state.chatMessages[placeholderIdx]
                 if (current.content != finalContent ||
                     current.toolCalls != finalToolCalls ||
                     current.thinking != finalThinking ||
+                    current.protocolSummary != finalProtocolSummary ||
                     current.streaming
                 ) {
                     state.chatMessages[placeholderIdx] = current.copy(
                         content = finalContent,
                         toolCalls = finalToolCalls,
                         thinking = finalThinking,
+                        protocolSummary = finalProtocolSummary,
                         streaming = false
                     )
                 }
@@ -637,6 +673,7 @@ internal class InsertStringsChatDriver(
                         content = finalContent,
                         toolCalls = finalToolCalls,
                         thinking = finalThinking,
+                        protocolSummary = finalProtocolSummary,
                     )
                 )
             }
@@ -1199,6 +1236,62 @@ internal class InsertStringsChatDriver(
         // 4) 按 insertAt 降序插入,避免下标位移影响后续插入位置
         toInsert.sortedByDescending { it.first }.forEach { (insertAt, message) ->
             state.chatMessages.add(insertAt, message)
+        }
+    }
+
+    /**
+     * 2026.x 优化 D2:压缩过期 tool result(必须在 EDT 上调用)。
+     *
+     * 策略:从 chatMessages 末尾向前扫描,数出 [TOOL_RESULT_COMPACTION_THRESHOLD]
+     * 个最近的 assistant 消息(带 toolCalls 的也算)。在它们之前的 tool 消息视为"过期",
+     * 把 content 替换为 [TOOL_RESULT_COMPACTED_PLACEHOLDER]。
+     *
+     * 安全性:
+     * 1. tool_use → tool_result 的配对 ID 不变,只换 content,Anthropic/OpenAI 协议都允许。
+     * 2. 压缩后 AI 看到的是占位符(几十字符)而非原内容(可能几千字符),
+     *    真要细节时再调一次对应工具。
+     * 3. "最近 N 轮"内最近调用的结果完整保留,AI 仍能基于最近动作做决策。
+     * 4. UI 端 chat tab 也会展示占位符(用户通常不会翻 5 轮前的工具气泡做核对,
+     *    真要时回看完整 result 的诉求不强,接受这个折衷)。
+     *
+     * 副作用:压缩过的 tool 消息如果用户后续"翻历史查看"也是占位符;
+     * 故本方法的覆盖范围是"超过 N 个 assistant 回合之前的所有 tool 消息",
+     * 不动 ask_user / load_tool_doc / task_complete 等非 tool 消息,
+     * 也不动 retry 提示气泡(protocolVisible = false,本来就不发协议层)。
+     */
+    private fun compactOldToolResults() {
+        val messages = state.chatMessages
+        if (messages.size < 4) return // 太少,不值得压缩
+
+        // 1) 从末尾向前数 N 个 assistant 消息的下标,作为"保留边界"。
+        //    边界之后(包括)的 tool 消息保留原文;边界之前的才压缩。
+        val boundary = mutableListOf<Int>()
+        for (i in messages.indices.reversed()) {
+            val m = messages[i]
+            if (m.protocolVisible && m.role == "assistant") {
+                boundary.add(i)
+                if (boundary.size >= TOOL_RESULT_COMPACTION_THRESHOLD) break
+            }
+        }
+        if (boundary.isEmpty()) return
+        val keepFromIdx = boundary.last() // 最早的"保留区"起点
+
+        // 2) 收集边界之前的所有 tool 消息(及 user 带 toolCallId 的)
+        //    —— 但**仅压缩其 content 比占位符长**的(避免无意义重复设置)。
+        val toUpdate = mutableListOf<Pair<Int, ChatMessage>>()
+        for (i in 0 until keepFromIdx) {
+            val m = messages[i]
+            if (!m.protocolVisible) continue
+            val isToolResult = m.role == "tool" || (m.role == "user" && m.toolCallId != null)
+            if (!isToolResult) continue
+            if (m.content == TOOL_RESULT_COMPACTED_PLACEHOLDER) continue
+            if (m.content.length <= TOOL_RESULT_COMPACTED_PLACEHOLDER.length) continue
+            toUpdate.add(i to m.copy(content = TOOL_RESULT_COMPACTED_PLACEHOLDER))
+        }
+
+        // 3) 倒序更新,避免下标位移
+        toUpdate.sortedByDescending { it.first }.forEach { (idx, newMsg) ->
+            state.chatMessages[idx] = newMsg
         }
     }
 

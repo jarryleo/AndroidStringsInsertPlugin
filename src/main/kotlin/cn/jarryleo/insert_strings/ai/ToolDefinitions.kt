@@ -110,182 +110,121 @@ object ToolDefinitions {
     const val TOOL_TASK_COMPLETE = "task_complete"
 
     // region 工具描述文案(主 prompt 引用,这里集中维护)
+    // 设计原则:每个 description 压到 ≤ 80 字符,只留「这一句话必须知道的 + 指针」。
+    // 详细枚举/约束/示例 → load_tool_doc("<name>") 加载。
+    // 这套精简是 2026.x 优化,显著降低每轮 request body 的 tokens。
 
     private const val DESC_INSERT_STRINGS =
-        "向 Android strings.xml 插入或全量覆盖翻译字符串。" +
-            "可同时调用多次以插入多个字符串。**translations 必须始终包含 \"values\"(默认英语)," +
-            "并覆盖目标模块的全部语言** —— 一字不差对照 `recommendedDefaultModule.xmlFiles[].language`" +
-            "(或显式 module 的 `xmlFiles[].language`)。" +
-            "module 优先级:用户在消息中**明确指定** > `recommendedDefaultModule` > UI 中选中行所在模块" +
-            "若只想修改个别语言,请改用 update_string(部分语言更新,不覆写其他语言)。" +
-            "插入前的两道查重(原文查重 + key 名查重)与「使用现有 key:」后的处理流程,见 system prompt 与 load_tool_doc(\"insert_strings\")。"
+        "向 strings.xml 插入/全量覆盖翻译。" +
+            "translations 必须含 values 并覆盖目标模块全部 xmlFiles 语种。" +
+            " → load_tool_doc(\"insert_strings\")。"
 
     private const val DESC_UPDATE_STRING =
-        "精准修改指定 key 的部分语言翻译,只动 translations 中列出的语言,其他语言保持原样。" +
-            "适用场景:用户说「把 X 的繁体改成 Y」「修正 Z 的某个语言翻译」,无需提供全部语言。" +
-            "若 key 不存在则自动创建。"
+        "精准修改指定 key 的部分语言翻译,只动 translations 列出的语言,其余保持原样。" +
+            " → load_tool_doc(\"update_string\")。"
 
     private const val DESC_DELETE_STRING =
-        "删除指定 key 的翻译(破坏性操作)。" +
-            "languages 为空/null/省略时,删除该 key 在所有语言的翻译(整 key 被移除);" +
-            "languages 非空时,仅删除列表中指定语言的翻译,其他语言保持原样。" +
-            "适用场景:用户说「删除 X 的法语翻译」「移除这个 key」「删掉 X 的繁体和日语」。" +
-            "安全约束:删除是破坏性操作,操作前建议先 read_string 确认目标 key 与翻译;" +
-            "如不能确定范围,可先 ask_user 与用户确认。"
+        "删除指定 key 的翻译(破坏性)。languages 空=删全部语言;非空=只删指定语言。" +
+            "操作前先 read_string 确认。→ load_tool_doc(\"delete_string\")。"
 
     private const val DESC_QUERY_KEYS =
-        "列出或搜索模块内的字符串 key。" +
-            "pattern 正则(可空,空时列出全部);searchIn=key(默认,匹配 key 名)/ text(跨多语种翻译文本)/ both(并集);" +
-            "includeTranslations=true 时返回各语言当前翻译(消耗较多 token,谨慎使用)。" +
-            "module 省略时按 recommendedDefaultModule → currentModule → 行数最多模块 自动选。" +
-            "想反查某段翻译属于哪个 key 时,优先用 searchIn=text 而不是 find_keys_by_text —— 一次返回 key 列表 + 全部语种。" +
-            "详细字段 → load_tool_doc(\"query_keys\")。"
+        "列出/搜索模块内字符串 key。searchIn:key(默认)/text(跨多语种)/both(并集)。" +
+            "module 省略时按 recommendedDefaultModule → currentModule 自动选。" +
+            " → load_tool_doc(\"query_keys\")。"
 
     private const val DESC_READ_STRING =
-        "读取指定 key 在模块所有语言的当前翻译,返回 key+各语言文本+文件路径。" +
-            "修改/删除前必先 read_string 确认原文,避免覆盖已有正确翻译。详细字段 → load_tool_doc(\"read_string\")。"
+        "读取指定 key 在模块所有语言的当前翻译(key+各语种文本+文件路径)。" +
+            "修改/删除前必先 read_string 确认。→ load_tool_doc(\"read_string\")。"
 
     private const val DESC_FIND_KEYS_BY_TEXT =
-        "strings.xml 反查:通过翻译文本查找对应的 key。" +
-            "支持 exact(完全相等)/ contains(子串,默认)/ regex 三种匹配模式;可选 module / language 限定。" +
-            "插入翻译前查重:不传 language 参数,matchType=exact 跑一次、再 contains 兜底。" +
-            "详细字段 → load_tool_doc(\"find_keys_by_text\")。"
+        "strings.xml 反查:通过翻译文本找 key。exact/contains(默认)/regex。" +
+            "插入查重不传 language。→ load_tool_doc(\"find_keys_by_text\")。"
 
     private const val DESC_FIND_ROWS_BY_TEXT =
-        "Google Sheets 反查:在表格中按文本搜索行,返回行号+列名+整行内容。" +
-            "支持 exact/ contains(默认)/ regex,可限定 column。sheetName 必须**原样**使用(系统按 A1 规则自动转义)。" +
-            "详细字段 → load_tool_doc(\"find_rows_by_text\")。"
+        "Google Sheets 反查:按文本搜行,返回行号+列名+整行。" +
+            "sheetName 必须原样(系统按 A1 规则自动转义)。" +
+            " → load_tool_doc(\"find_rows_by_text\")。"
 
-    // region 代办(2026.x 新增) — 用户在主页 Todo tab 维护的清单,AI 可读写并主动提醒
+    // region 代办(2026.x 新增)
 
     private const val DESC_TODO_LIST =
-        "读取代办列表(可限定 active / completed / all 过滤模式)。" +
-            "返回的每条代办都带 id 字段,后续 todo_update / todo_delete 必须用这个 id 定位;" +
-            "已设置提醒的代办还会带 reminder 子对象(nextTriggerAt / recurrence / timeOfDay / recurrenceDays)," +
-            "用于核对闹钟与下一次触发时间。" +
-            "系统已经在聊天上下文中注入了 active 代办的简要摘要(便于你主动提醒用户)," +
-            "但用本工具可以拿到完整字段(content / createdAt / completedAt / reminder 等),用于核对细节。" +
-            "详细字段 → load_tool_doc(\"todo_list\")。"
+        "读取代办列表(active/completed/all)。返回 id 供 todo_update/delete 定位。" +
+            "上下文已注入前 5 条摘要,完整字段用本工具。→ load_tool_doc(\"todo_list\")。"
 
     private const val DESC_TODO_ADD =
-        "新增一条代办;title 必填,content / priority(LOW/NORMAL/HIGH/URGENT,默认 NORMAL)可选。" +
-            "新条目默认未完成,优先级高的会浮在 Todo tab 列表顶部。" +
-            "**支持设置提醒**:可选 reminderTime(Unix 毫秒时间戳) + recurrence(NONE/DAILY/CUSTOM,无 WEEKDAYS/WEEKLY)" +
-                " + recurrenceDays(1-7 数组,仅 CUSTOM 生效);" +
-                "**「工作日」= CUSTOM + [1,2,3,4,5],「周末」= CUSTOM + [6,7]**,不要传 WEEKDAYS / WEEKLY。" +
-                "**指定日期提醒**(用户说「3 月 15 日上午 10 点」):优先用 reminderDate(YYYY-MM-DD)" +
-                " + reminderTimeOfDay(HH:MM,缺省 09:00)两个结构化字段,系统按本地时区组装 timestamp," +
-                "AI 不用算时区、跨日、跨年;recurrence 强制 NONE。" +
-                "到点会在 IDE 右下角弹非模态提醒框,用户可选「完成 / 1m / 5m / 10m」。" +
-            "**典型场景**:用户说「提醒我周五前修 X」「5 分钟后提醒我喝水」「明天下午 3 点开周会」时," +
-            "先调 current_time 拿时间戳,再 todo_add(title=..., reminderTime=..., recurrence=...);" +
-            "循环提醒(每周一三五开会)用 recurrence=CUSTOM + recurrenceDays=[1,3,5]。" +
-            "新增后系统会返回新条目的 id,你可以在下一轮用 todo_update / todo_delete 引用它。" +
-            "详细字段 → load_tool_doc(\"todo_add\")。"
+        "新增一条代办。title 必填,priority(LOW/NORMAL/HIGH/URGENT)可选。" +
+            "支持 reminderTime/timestamp 或 reminderDate+reminderTimeOfDay/recurrence/recurrenceDays。" +
+            "「工作日」=CUSTOM+[1..5],「周末」=CUSTOM+[6,7](无 WEEKDAYS/WEEKLY)。" +
+            " → load_tool_doc(\"todo_add\")。"
 
     private const val DESC_TODO_UPDATE =
-        "按 id 更新一条已有代办;只需传要改的字段,其它字段保持原值。" +
-            "**isCompleted = true** 即可「勾选完成」(系统自动写 completedAt 时间戳);" +
-            "**isCompleted = false** 取消完成(系统清空 completedAt)。" +
-            "**支持改提醒**:reminderTime 改触发时间戳、recurrence 改循环类型(NONE=改一次性)、" +
-            "recurrenceDays 改 CUSTOM 周几列表;clearReminder=true 显式清掉整条提醒(用户说「这个不用再提醒了」时用)。" +
-            "id 不存在时返回错误,先 todo_list 拿到正确 id 再更新。" +
-            "详细字段 → load_tool_doc(\"todo_update\")。"
+        "按 id 更新代办,只改非 null 字段。isCompleted=true 勾选完成;clearReminder=true 清提醒。" +
+            " → load_tool_doc(\"todo_update\")。"
 
     private const val DESC_TODO_DELETE =
-        "按 id 删除一条代办(破坏性操作,删除前建议先 todo_list 确认目标)。" +
-            "**连带删除其上的提醒配置**(scheduler 会从 Timer 队列里摘掉),无需额外调 clearReminder。" +
-            "id 不存在时返回错误,不会静默成功。" +
-            "详细字段 → load_tool_doc(\"todo_delete\")。"
+        "按 id 删除代办(破坏性),连带删除其上提醒。id 不存在时返回错误。" +
+            " → load_tool_doc(\"todo_delete\")。"
 
     private const val DESC_CURRENT_TIME =
-        "获取当前时间(2026.x 新增)。不需要任何参数,返回:" +
-            "**timestamp**(Unix 毫秒时间戳,直接拿去做相对时间运算如 now+5*60*1000);" +
-            "**formatted**(本地时区 yyyy-MM-dd HH:mm:ss,人类可读);" +
-            "**timezone**(如 Asia/Shanghai);" +
-            "**offsetMinutes**(UTC 偏移分钟数)。" +
-            "系统已经在聊天上下文里注入了 `now` 字段(发送消息那一刻的时间)," +
-            "但**当 tool loop 跑了几十秒**(慢 AI / 流式响应)时该时间会过时," +
-            "此时必须先调本工具拿最新的 timestamp 再算相对时间。" +
-            "**典型用法**:用户说「5 分钟后提醒我喝水」时,先调 current_time 拿 timestamp," +
-            "再调 todo_add(title='喝水', reminderTime=timestamp+5*60*1000, recurrence='NONE');" +
-            "用户说「明天下午 3 点」时,先调 current_time 拿 timestamp + timezone," +
-            "再算次日的 15:00 本地时间戳,调 todo_add。"
+        "获取当前时间(timestamp + formatted + timezone + offsetMinutes)。" +
+            "「5 分钟后」「明天下午 3 点」类相对时间必须先调本工具拿最新 timestamp。"
 
     // endregion
 
     // region 文件操作域描述(2026 新增)
 
     private const val DESC_GET_EDITOR_FILE =
-        "获取当前 IDE 编辑器中打开的文件信息:路径、文件名后缀、选中文字、选区起止行、文件总行数。不接收参数。" +
-            "AI 拿到 filePath 后可继续 read_file / search_in_files / find_references。" +
-            "详细字段 → load_tool_doc(\"get_editor_file\")。"
+        "获取当前 IDE 编辑器中打开的文件:路径/后缀/选中文字/选区起止/总行数。无参。" +
+            " → load_tool_doc(\"get_editor_file\")。"
 
     private const val DESC_READ_FILE =
-        "读取项目内任意文件的内容(相对项目根或项目内绝对路径)。" +
-            "默认从第 0 行读到末尾,大文件按 maxLines(默认 600)截断,可用 startLine / endLine 翻页。" +
-            "限制:单文件 > 1.5MB 拒绝读取,改用 search_in_files。" +
-            "详细字段 → load_tool_doc(\"read_file\")。"
+        "读项目内任意文件。> 1.5MB 拒绝(改用 search_in_files)。maxLines 默认 600,startLine/endLine 翻页。" +
+            " → load_tool_doc(\"read_file\")。"
 
     private const val DESC_EDIT_FILE =
-        "精准修改项目内任意文件的内容。两种模式:" +
-            "  - **文本模式**(默认,useRegex=false):oldText 全文精确匹配,默认要求唯一匹配(0 处或 >1 处报错)。" +
-            "  - **正则模式**(useRegex=true):oldText 作 Kotlin 正则;replaceAll=true 全文替换。" +
-            "原子写:写失败不会污染原文件。限制:单文件 > 3MB 拒绝编辑。" +
-            "详细字段 → load_tool_doc(\"edit_file\")。"
+        "精准修改项目内文件。useRegex=false 时 oldText 全文精确唯一匹配;true 时按 Kotlin 正则。" +
+            "> 3MB 拒绝。原子写。→ load_tool_doc(\"edit_file\")。"
 
     private val DESC_CREATE_FILE =
-        "在项目内创建新文件(支持嵌套目录,自动 mkdirs)。" +
-            "overwrite 默认 false(防误覆盖);修改已存在文件请改用 edit_file。" +
-            "详细字段 → load_tool_doc(\"create_file\")。"
+        "创建新文件(支持嵌套目录)。overwrite 默认 false(防误覆盖)。" +
+            " → load_tool_doc(\"create_file\")。"
 
     private const val DESC_SEARCH_IN_FILES =
-        "在项目内文件中按文本 / 正则搜索,返回文件路径+行号+列号+匹配内容。" +
-            "默认搜索 java / kt / xml / gradle / kts / json / properties / txt / md,不搜图片/二进制。" +
-            "可用 filePattern(glob)与 relativeDir 限定范围;单次最多返回 200 条。" +
-            "详细字段 → load_tool_doc(\"search_in_files\")。"
+        "在项目内按文本/正则搜索,返回 filePath+line+col+matchedText。" +
+            "默认搜 java/kt/xml/gradle/json/properties/txt/md。单次最多 200 条。" +
+            " → load_tool_doc(\"search_in_files\")。"
 
     private const val DESC_FIND_REFERENCES =
-        "按符号语义查找项目中的引用点(Java/Kotlin/XML)。" +
-            "kind: id / string / layout / drawable / color / class / general(默认)。" +
-            "与 search_in_files 的区别:本工具是「符号语义」搜索,自动适配资源引用的多种写法。" +
-            "详细字段 → load_tool_doc(\"find_references\")。"
+        "按符号语义找引用点(资源 id/string/layout/drawable/color/class/任意符号)。" +
+            " → load_tool_doc(\"find_references\")。"
 
     private const val DESC_LIST_FILES =
-        "列举项目内某目录下的文件 / 子目录,支持 glob 与递归(最多 10 层)。" +
-            "relativeDir 默认 \".\"(项目根),pattern 默认 \"*\",maxEntries 默认 500。" +
-            "详细字段 → load_tool_doc(\"list_files\")。"
+        "列举项目内某目录的文件/子目录,支持 glob 与递归(最多 10 层)。" +
+            " → load_tool_doc(\"list_files\")。"
 
     // endregion
 
     private const val DESC_SHEETS_OPERATION =
-        "执行 Google 表格操作(operation 决定具体动作类型)。" +
-            "大量单元格混合修改(改值+填色+改文字色+删行等)用 batch_modify 一次完成,避免循环调用触发工具调用次数上限。" +
-            "安全约束:修改/删除行前先用 search 定位行号;列操作需用户确认;全表审查/修正用 check_translations / fix_translations。" +
-            "sheetName 必须**原样**使用工作表名(系统按 A1 规则自动转义)。" +
-            "详细字段 → load_tool_doc(\"sheets_basic\")。"
+        "Google Sheets 操作(operation 决定动作)。混合修改用 batch_modify 一次完成。" +
+            "修改/删除行前先 search 定位。sheetName 原样传(系统自动转义)。" +
+            " → load_tool_doc(\"sheets_basic\")。"
 
     private const val DESC_ASK_USER =
-        "向用户提问并等待回复。options 非空时显示按钮(优先用);为空时用户在输入框回复。" +
-            "每次调用都暂停 tool loop,不要反复调用;收到回复后用 task_complete 或操作推进。"
+        "向用户提问并等待回复。options 非空=按钮(优先);空=输入框。" +
+            "每次调用都暂停 tool loop,不要反复调用。"
 
     private const val DESC_REPLACE_SELECTION =
-        "把当前 IDE 编辑器选中的硬编码文本替换为对指定 key 的引用。" +
-            "XML 布局 → `@string/<key>`,其它文件 → `R.string/<key>`;执行后聊天视图保持打开。" +
-            "⚠️ 强约束:在 chatEntry=askAi/extractStrings 场景下,用户选「使用现有 key:」后**必须**先调本工具,再 read_string。" +
-            "限制:仅在 chat 弹框入口有效(主面板无编辑器上下文,会失败)。" +
-            "详细字段 → load_tool_doc(\"replace_selection\")。"
+        "把编辑器选中的硬编码文本替换为对 key 的引用(XML→@string/key,其它→R.string.key)。" +
+            "chatEntry=askAi/extractStrings 时「使用现有 key:」后**必须**先调本工具。" +
+            " → load_tool_doc(\"replace_selection\")。"
 
     private const val DESC_LOAD_TOOL_DOC =
-        "按需加载工具的详细使用文档(枚举值、参数约束、示例)。" +
-            "返回的文档作为 tool 消息回传;不要重复请求同一工具的文档。" +
-            "系统对连续 load_tool_doc 有次数上限,一次最多加载 1-2 个,拿到后立即返回实际工具调用。"
+        "按需加载工具详细文档(枚举值/参数约束/示例)。" +
+            "连续 load_tool_doc 有次数上限,一次最多 1-2 个,拿到后立即调实际工具。"
 
     private const val DESC_TASK_COMPLETE =
-        "声明任务已完成,结束当前对话循环。" +
-            "唯一的合法终止信号;未调用 = 你仍在执行,系统会持续驱动。" +
-            "status: success(完全达成) / partial(部分达成,如用户拒绝) / failed(执行失败)。" +
-            "调用后不要在同一次回复中再调用其他工具。"
+        "声明任务完成,结束对话。唯一合法终止信号。status:success/partial/failed。" +
+            "调用后不要再调其他工具。"
 
     // endregion
 
@@ -458,24 +397,15 @@ object ToolDefinitions {
             add("properties", obj {
                 add("module", obj {
                     addProperty("type", "string")
-                    addProperty(
-                        "description",
-                        "目标 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。" +
-                            "省略时按以下顺序自动选择:用户在消息中明确指定 > 用户在 UI 选中行所在模块 > `recommendedDefaultModule`(系统计算:优先 currentModule,currentModule 语种/行数偏弱时退回项目最强模块)。"
-                    )
+                    addProperty("description", "取 modules[].moduleName(非 androidProject.name);省略时按 用户指定 > recommendedDefaultModule > UI选中行")
                 })
                 add("name", obj {
                     addProperty("type", "string")
-                    addProperty("description", "字符串 key,使用 snake_case。")
+                    addProperty("description", "snake_case key。")
                 })
                 add("translations", obj {
                     addProperty("type", "object")
-                    addProperty(
-                        "description",
-                        "键为语言目录名(values / values-zh-rCN / values-fr 等)," +
-                            "值为对应翻译文本。必须始终包含 \"values\"(默认英语)," +
-                            "并覆盖目标模块 xmlFiles 中的所有其他语言(以 `recommendedDefaultModule.xmlFiles[].language` 为准 — 不要用 availableLanguages 推断)。"
-                    )
+                    addProperty("description", "键=语言目录,值=翻译文本。必须含 values 并覆盖目标模块全部 xmlFiles 语种(以 recommendedDefaultModule.xmlFiles[].language 为准)。")
                 })
             })
             add("required", JsonArray().apply {
@@ -496,31 +426,28 @@ object ToolDefinitions {
             add("properties", obj {
                 add("module", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,目标 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时按 recommendedDefaultModule → currentModule → 行数最多模块的优先级自动选(默认即「推荐模块」)。")
+                    addProperty("description", "可选,取 modules[].moduleName(非 androidProject.name);省略时按 recommendedDefaultModule → currentModule → 行数最多模块 选。")
                 })
                 add("pattern", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选正则表达式。匹配范围由 searchIn 决定:key 名 / 各语种翻译文本 / 两者。为空或省略时列出所有 key(分页)。")
+                    addProperty("description", "可选正则;范围由 searchIn 决定。空/省略=列全部。")
                 })
                 add("limit", obj {
                     addProperty("type", "integer")
-                    addProperty("description", "可选,最大返回条数,默认 50,最大 500。")
+                    addProperty("description", "默认 50,最大 500。")
                 })
                 add("offset", obj {
                     addProperty("type", "integer")
-                    addProperty("description", "可选,分页偏移,默认 0。")
+                    addProperty("description", "分页偏移,默认 0。")
                 })
                 add("includeTranslations", obj {
                     addProperty("type", "boolean")
-                    addProperty("description", "可选,是否在结果中带各语言当前翻译。默认 false。开启后 token 消耗大,谨慎使用。")
+                    addProperty("description", "是否带各语言当前翻译。默认 false(token 消耗大)。")
                 })
                 add("searchIn", obj {
                     addProperty("type", "string")
                     add("enum", searchInEnum)
-                    addProperty(
-                        "description",
-                        "可选,搜索范围:key(默认,只匹配 key 名)/ text(跨多语种翻译文本,等价于 find_keys_by_text 但入口统一)/ both(key 名和翻译文本任一命中即可)。"
-                    )
+                    addProperty("description", "key(默认)/text(跨多语种)/both(并集)。")
                 })
             })
         }
@@ -532,11 +459,11 @@ object ToolDefinitions {
             add("properties", obj {
                 add("module", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,目标 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时用 currentModule.moduleName。")
+                    addProperty("description", "可选,取 modules[].moduleName;省略时用 recommendedDefaultModule.moduleName。")
                 })
                 add("name", obj {
                     addProperty("type", "string")
-                    addProperty("description", "必填,字符串 key 名。")
+                    addProperty("description", "必填,字符串 key。")
                 })
             })
             add("required", JsonArray().apply { add("name") })
@@ -549,19 +476,15 @@ object ToolDefinitions {
             add("properties", obj {
                 add("module", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,目标 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时用 currentModule.moduleName。")
+                    addProperty("description", "可选,取 modules[].moduleName;省略时用 recommendedDefaultModule.moduleName。")
                 })
                 add("name", obj {
                     addProperty("type", "string")
-                    addProperty("description", "必填,字符串 key,使用 snake_case。")
+                    addProperty("description", "必填,snake_case key。")
                 })
                 add("translations", obj {
                     addProperty("type", "object")
-                    addProperty(
-                        "description",
-                        "必填,键为语言目录名(values/values-zh-rCN/values-fr 等),值仅包含需要修改的翻译。" +
-                            "未列出的语言保持原样。"
-                    )
+                    addProperty("description", "必填,键=语言目录,值=要改的翻译;未列出的语言保持原样。")
                 })
             })
             add("required", JsonArray().apply {
@@ -577,21 +500,16 @@ object ToolDefinitions {
             add("properties", obj {
                 add("module", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,目标 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时用 currentModule.moduleName。")
+                    addProperty("description", "可选,取 modules[].moduleName;省略时用 recommendedDefaultModule.moduleName。")
                 })
                 add("name", obj {
                     addProperty("type", "string")
-                    addProperty("description", "必填,字符串 key,使用 snake_case。")
+                    addProperty("description", "必填,snake_case key。")
                 })
                 add("languages", obj {
                     addProperty("type", "array")
                     add("items", obj { addProperty("type", "string") })
-                    addProperty(
-                        "description",
-                        "可选,要删除的语言目录名列表(如 [\"values-fr\", \"values-zh-rCN\"])。" +
-                            "为空/null/省略时,删除该 key 在所有语言的翻译(整 key 被移除);" +
-                            "非空时,仅删除列表中指定语言的翻译,其他语言保持原样。"
-                    )
+                    addProperty("description", "可选,语言目录列表;空/null=删全部语言,非空=只删指定语言。")
                 })
             })
             add("required", JsonArray().apply { add("name") })
@@ -609,23 +527,20 @@ object ToolDefinitions {
             add("properties", obj {
                 add("text", obj {
                     addProperty("type", "string")
-                    addProperty("description", "必填,要查找的翻译文本。")
+                    addProperty("description", "必填,翻译文本。")
                 })
                 add("module", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,限定 Android 模块名,取上下文 modules[].moduleName(**不是** androidProject.name,也**不是** originalModuleName)。省略时搜索项目中所有模块。")
+                    addProperty("description", "可选,取 modules[].moduleName;省略=搜索所有模块。")
                 })
                 add("language", obj {
                     addProperty("type", "string")
-                    addProperty(
-                        "description",
-                        "可选,限定语言目录(如 values-zh-rTW)。省略时搜索所有语言。"
-                    )
+                    addProperty("description", "可选,限定语言目录。插入查重务必省略以跨语言命中。")
                 })
                 add("matchType", obj {
                     addProperty("type", "string")
                     add("enum", matchTypeEnum)
-                    addProperty("description", "匹配模式,默认 contains(子串匹配)。")
+                    addProperty("description", "exact/contains(默认)/regex。")
                 })
                 add("caseSensitive", obj {
                     addProperty("type", "boolean")
@@ -633,7 +548,7 @@ object ToolDefinitions {
                 })
                 add("limit", obj {
                     addProperty("type", "integer")
-                    addProperty("description", "最大返回条数,默认 30,最大 200。")
+                    addProperty("description", "默认 30,最大 200。")
                 })
             })
             add("required", JsonArray().apply { add("text") })
@@ -651,27 +566,24 @@ object ToolDefinitions {
             add("properties", obj {
                 add("text", obj {
                     addProperty("type", "string")
-                    addProperty("description", "必填,要查找的文本。")
+                    addProperty("description", "必填,查找文本。")
                 })
                 add("spreadsheetId", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,默认用上下文 googleSheets 配置。")
+                    addProperty("description", "可选,默认 googleSheets 配置。")
                 })
                 add("sheetName", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,默认用 defaultSheetName。")
+                    addProperty("description", "可选,默认 defaultSheetName,原样传(系统按 A1 自动转义)。")
                 })
                 add("column", obj {
                     addProperty("type", "string")
-                    addProperty(
-                        "description",
-                        "可选,限定列名(与表头精确匹配,忽略大小写)。例:values-zh-rTW。"
-                    )
+                    addProperty("description", "可选,限定列名(表头精确匹配,忽略大小写)。")
                 })
                 add("matchType", obj {
                     addProperty("type", "string")
                     add("enum", matchTypeEnum)
-                    addProperty("description", "匹配模式,默认 contains(子串匹配)。")
+                    addProperty("description", "exact/contains(默认)/regex。")
                 })
                 add("caseSensitive", obj {
                     addProperty("type", "boolean")
@@ -679,7 +591,7 @@ object ToolDefinitions {
                 })
                 add("limit", obj {
                     addProperty("type", "integer")
-                    addProperty("description", "最大返回条数,默认 30,最大 200。")
+                    addProperty("description", "默认 30,最大 200。")
                 })
             })
             add("required", JsonArray().apply { add("text") })
@@ -690,36 +602,37 @@ object ToolDefinitions {
         val operationEnum = JsonArray().apply {
             SheetsOperation.Operation.entries.forEach { add(it.name.lowercase()) }
         }
-        val batchEditTypeEnum = JsonArray().apply {
-            AiAction.BatchEditType.entries.forEach { add(it.name.lowercase()) }
-        }
+        // 2026.x 精简:每个 property 只留 type + 一行提示,详细约束/枚举/示例 → load_tool_doc 加载。
+        // 字段全集:operation / spreadsheetId / sheetName / range / key / rowNumber / rows /
+        //   columnIndex / columnHeader / columnValues / freezeRowCount / freezeColumnCount /
+        //   color / textColor / rowTextColors / columnTextColors / batchEdits
         return obj {
             addProperty("type", "object")
             add("properties", obj {
                 add("operation", obj {
                     addProperty("type", "string")
                     add("enum", operationEnum)
-                    addProperty("description", "操作类型,决定后续字段的取值。")
+                    addProperty("description", "操作类型,决定后续字段。详见 load_tool_doc(\"sheets_basic\")。")
                 })
                 add("spreadsheetId", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,默认使用上下文 googleSheets.defaultSpreadsheetId。")
+                    addProperty("description", "可选,默认 googleSheets.defaultSpreadsheetId。")
                 })
                 add("sheetName", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,默认使用 defaultSheetName 或上下文 availableSheets 中的某个值。")
+                    addProperty("description", "可选,默认 defaultSheetName。")
                 })
                 add("range", obj {
                     addProperty("type", "string")
-                    addProperty("description", "A1 表示法范围,如 \"Sheet1!A1:D10\"。read/write/set_values/fill_color/set_text_color/clear_color/clear_text_color 时使用。")
+                    addProperty("description", "A1 表示法,read/write/set_values/fill_color/clear_color 时使用。")
                 })
                 add("key", obj {
                     addProperty("type", "string")
-                    addProperty("description", "search/read 时按 key 查找第一列匹配行。")
+                    addProperty("description", "search/read 时按 key 查找匹配行。")
                 })
                 add("rowNumber", obj {
                     addProperty("type", "integer")
-                    addProperty("description", "1-based 行号,insert_row / update_row / delete_row / clear_row 必填;batch_modify 内 update_rows/insert_rows 的起始行号。")
+                    addProperty("description", "1-based 行号,insert/update/delete/clear_row 必填;batch_modify 内 update_rows/insert_rows 起点。")
                 })
                 add("rows", obj {
                     addProperty("type", "array")
@@ -727,138 +640,87 @@ object ToolDefinitions {
                         addProperty("type", "array")
                         add("items", obj { addProperty("type", "string") })
                     })
-                    addProperty("description", "二维数组,外层每项是一行数据(单元格字符串数组)。append/insert/update_row 取首元素;batch_modify 内 set_values/update_rows/append_rows/insert_rows 用全部元素。")
+                    addProperty("description", "二维数组(每行一格字符串数组)。write/append/insert/update_row 用。")
                 })
                 add("columnIndex", obj {
                     addProperty("type", "integer")
-                    addProperty("description", "1-based 列号,insert_column / update_column / delete_column / clear_column 必填。")
+                    addProperty("description", "1-based 列号,insert/update/delete/clear_column 必填。")
                 })
                 add("columnHeader", obj {
                     addProperty("type", "string")
-                    addProperty("description", "新列的表头,append_column 建议填写。")
+                    addProperty("description", "新列的表头,append_column 建议填。")
                 })
                 add("columnValues", obj {
                     addProperty("type", "array")
                     add("items", obj { addProperty("type", "string") })
-                    addProperty(
-                        "description",
-                        "一维数组,首元素为表头,其余为各行值。insert_column / append_column / update_column / clear_column 必填。"
-                    )
+                    addProperty("description", "一维数组,首元素表头,其余各行值。insert/append/update_column 必填。")
                 })
                 add("freezeRowCount", obj {
                     addProperty("type", "integer")
-                    addProperty("description", ">= 0,freeze_rows 必填。0 表示取消冻结。")
+                    addProperty("description", ">= 0,freeze_rows 必填;0 取消冻结。")
                 })
                 add("freezeColumnCount", obj {
                     addProperty("type", "integer")
-                    addProperty("description", ">= 0,freeze_columns 必填。0 表示取消冻结。")
+                    addProperty("description", ">= 0,freeze_columns 必填;0 取消冻结。")
                 })
                 add("color", obj {
                     addProperty("type", "string")
-                    addProperty(
-                        "description",
-                        "可选,背景色。fill_color / batch_modify.fill_color 必填。支持 hex(例 #FF0000、#f0a)或命名色(red/green/blue/yellow/orange/purple/pink/gray/grey/white/black/light_gray/dark_gray/brown/cyan/magenta)。"
-                    )
+                    addProperty("description", "背景色,fill_color 必填。hex(#FF0000/#f0a)或命名色(red/green/blue/...)。")
                 })
                 add("textColor", obj {
                     addProperty("type", "string")
-                    addProperty(
-                        "description",
-                        "可选,文字色。set_text_color / batch_modify.set_text_color 必填。颜色格式同 color。"
-                    )
+                    addProperty("description", "文字色,set_text_color 必填。格式同 color。")
                 })
                 add("rowTextColors", obj {
                     addProperty("type", "array")
                     add("items", obj {
                         addProperty("type", "array")
-                        add("items", obj {
-                            addProperty(
-                                "type",
-                                "string"
-                            )
-                            addProperty("description", "颜色字符串,或 null 表示该格不上色。")
-                        })
+                        add("items", obj { addProperty("type", "string") })
                     })
-                    addProperty(
-                        "description",
-                        "可选,与 rows 同形(行操作为 [[c1,c2,...]],write 为 [[..],[..]])的二维数组。null 元素表示该格不上色。仅对当前写入的单元格生效。"
-                    )
+                    addProperty("description", "与 rows 同形二维矩阵,逐格文字色,null=不上色。")
                 })
                 add("columnTextColors", obj {
                     addProperty("type", "array")
-                    add("items", obj {
-                        addProperty("type", "string")
-                        addProperty("description", "颜色字符串,或 null 表示该格不上色。")
-                    })
-                    addProperty(
-                        "description",
-                        "可选,与 columnValues 同形的一维数组,按行顺序逐个对应。null 元素表示该格不上色。"
-                    )
+                    add("items", obj { addProperty("type", "string") })
+                    addProperty("description", "与 columnValues 同形,按行顺序对应;null=不上色。")
                 })
                 add("batchEdits", obj {
                     addProperty("type", "array")
                     add("items", obj {
                         addProperty("type", "object")
                         add("properties", obj {
-                            add("type", obj {
-                                addProperty("type", "string")
-                                add("enum", batchEditTypeEnum)
-                                addProperty("description", "批量子操作类型。")
-                            })
-                            add("range", obj {
-                                addProperty("type", "string")
-                                addProperty("description", "A1 表示法,set_values/fill_color/set_text_color/clear_color/clear_text_color 必填。")
-                            })
+                            add("type", obj { addProperty("type", "string") })
+                            add("range", obj { addProperty("type", "string") })
                             add("rows", obj {
                                 addProperty("type", "array")
                                 add("items", obj {
                                     addProperty("type", "array")
                                     add("items", obj { addProperty("type", "string") })
                                 })
-                                addProperty("description", "二维数组(每行一格字符串数组)。set_values/update_rows/append_rows/insert_rows 必填。")
                             })
-                            add("rowNumber", obj {
-                                addProperty("type", "integer")
-                                addProperty("description", "1-based 起始行号,update_rows/insert_rows 必填。")
-                            })
+                            add("rowNumber", obj { addProperty("type", "integer") })
                             add("rowNumbers", obj {
                                 addProperty("type", "array")
                                 add("items", obj { addProperty("type", "integer") })
-                                addProperty("description", "1-based 行号列表,delete_rows/clear_rows 必填。")
                             })
-                            add("color", obj {
-                                addProperty("type", "string")
-                                addProperty("description", "颜色(hex 或命名色),fill_color/set_text_color 必填。")
-                            })
+                            add("color", obj { addProperty("type", "string") })
                             add("rowTextColors", obj {
                                 addProperty("type", "array")
                                 add("items", obj {
                                     addProperty("type", "array")
-                                    add("items", obj {
-                                        addProperty("type", "string")
-                                        addProperty("description", "颜色字符串,或 null。")
-                                    })
+                                    add("items", obj { addProperty("type", "string") })
                                 })
-                                addProperty("description", "可选,与 rows 同形的二维矩阵,逐格文字色,null 表示该格不上色。")
                             })
                             add("rowBackgroundColors", obj {
                                 addProperty("type", "array")
                                 add("items", obj {
                                     addProperty("type", "array")
-                                    add("items", obj {
-                                        addProperty("type", "string")
-                                        addProperty("description", "颜色字符串,或 null。")
-                                    })
+                                    add("items", obj { addProperty("type", "string") })
                                 })
-                                addProperty("description", "可选,与 rows 同形的二维矩阵,逐格背景色,null 表示该格不上色。")
                             })
                         })
-                        add("required", JsonArray().apply { add("type") })
                     })
-                    addProperty(
-                        "description",
-                        "批量修改列表,仅 batch_modify 使用。用于一次性把多种操作(改值/填色/改文字色/删行/清空行/插入行)合并到一次工具调用,后端会自动分组成最少的 Google API 请求。详细字段见 load_tool_doc(\"sheets_batch_modify\")。"
-                    )
+                    addProperty("description", "批量修改列表,仅 batch_modify 用,把多种操作合并到一次工具调用。→ load_tool_doc(\"sheets_batch_modify\")。")
                 })
             })
             add("required", JsonArray().apply { add("operation") })
@@ -986,96 +848,49 @@ object ToolDefinitions {
             add("DAILY")
             add("CUSTOM")
         }
+        val priorityEnum = JsonArray().apply {
+            add("LOW")
+            add("NORMAL")
+            add("HIGH")
+            add("URGENT")
+        }
         return obj {
             addProperty("type", "object")
             add("properties", obj {
                 add("title", obj {
                     addProperty("type", "string")
-                    addProperty("description", "必填,代办的标题(trim 后非空)。空字符串会被拒绝并返回错误 tool_result。")
+                    addProperty("description", "必填,trim 后非空,空字符串会被拒。")
                 })
                 add("content", obj {
                     addProperty("type", "string")
-                    addProperty("description", "可选,详细描述(多行,允许为空)。")
+                    addProperty("description", "可选,详细描述。")
                 })
                 add("priority", obj {
                     addProperty("type", "string")
-                    add("enum", JsonArray().apply {
-                        add("LOW")
-                        add("NORMAL")
-                        add("HIGH")
-                        add("URGENT")
-                    })
-                    addProperty("description", "可选,优先级;为空/未知时回退 NORMAL。URGENT/HIGH 会浮在 Todo tab 列表顶部。")
+                    add("enum", priorityEnum)
+                    addProperty("description", "可选,空/未知回退 NORMAL。")
                 })
                 add("reminderTime", obj {
                     addProperty("type", "integer")
-                    addProperty(
-                        "description",
-                        "可选,首次提醒时间(Unix 毫秒时间戳)。" +
-                            "用户说「5 分钟后提醒我喝水」时,先把 now + 5*60*1000 算出来再传;" +
-                            "说「明天下午 3 点」时,用本地时区算出对应时间戳再传(系统按本地时区解析)。" +
-                            "**与 reminderDate 互斥**:传了 reminderDate 时,本字段被忽略," +
-                            "系统按\"日期 + 时分\"重新组装 timestamp。省略时 = 不设提醒。" +
-                            "新增后会立即进入调度队列,到点触发右下角弹框。"
-                    )
+                    addProperty("description", "可选,首次提醒 Unix 毫秒时间戳;与 reminderDate 互斥。")
                 })
                 add("reminderDate", obj {
                     addProperty("type", "string")
-                    addProperty(
-                        "description",
-                        "可选,指定日期提醒(YYYY-MM-DD 字符串,本地日期)。" +
-                            "**仅一次性提醒生效**(recurrence=NONE);循环类型下传了也会被忽略。" +
-                            "配合 reminderTimeOfDay 一起用,系统按本地时区组装 timestamp," +
-                            "AI 不用算时区、跨日、跨年。" +
-                            "用户说「3 月 15 日上午 10 点提醒我」→ reminderDate=\"2026-03-15\", " +
-                            "reminderTimeOfDay=\"10:00\";用户说「下周一提醒我交周报」→ 算下周一日期 " +
-                            "(假设是 2026-06-29),reminderDate=\"2026-06-29\", reminderTimeOfDay=\"09:00\"。" +
-                            "**不传本字段 = 走 reminderTime 的旧路径**(保留向后兼容)。"
-                    )
+                    addProperty("description", "可选,YYYY-MM-DD 本地日期,仅一次性生效。")
                 })
                 add("reminderTimeOfDay", obj {
                     addProperty("type", "string")
-                    addProperty(
-                        "description",
-                        "可选,时分(HH:MM 24h 字符串,如 \"09:00\" / \"15:30\" / \"23:45\")。" +
-                            "**两种用法**:" +
-                            "  (1) 与 reminderDate 配套 → 一次性「指定日期 + 时分」提醒(缺省 09:00);" +
-                            "  (2) 与 recurrence + recurrenceDays 配套 → 「循环 + 时分」提醒," +
-                            "如 reminderTimeOfDay=\"13:00\" + recurrence=\"CUSTOM\" + recurrenceDays=[1] 表示" +
-                            "「每周一 13:00 提醒」,系统自动算下一个匹配 day-of-week 的时间戳,AI 不用算。" +
-                            "**NONE 循环单独传本字段无意义**(语义不清:今天 13:00 还是明天?),会被系统拒绝," +
-                            "需要先用 reminderDate 或 reminderTime。"
-                    )
+                    addProperty("description", "可选,HH:MM;与 reminderDate 配套(缺省 09:00)或与 recurrence+recurrenceDays 配套。")
                 })
                 add("recurrence", obj {
                     addProperty("type", "string")
                     add("enum", recurrenceEnum)
-                    addProperty(
-                        "description",
-                        "可选,循环类型:NONE(默认,一次性)/ DAILY(每天固定时间)/ " +
-                            "CUSTOM(自定义星期几,配合 recurrenceDays)。" +
-                            "**没有 WEEKDAYS / WEEKLY 这两个值** —— 用户说「工作日」请传 CUSTOM + recurrenceDays=[1,2,3,4,5]," +
-                            "「周末」传 CUSTOM + recurrenceDays=[6,7]。" +
-                            "省略 = NONE(一次性)。触发后:NONE 自动清除;DAILY/CUSTOM 自动滚动到下一次。"
-                    )
+                    addProperty("description", "NONE/DAILY/CUSTOM(无 WEEKDAYS/WEEKLY)。省略=NONE。")
                 })
                 add("recurrenceDays", obj {
                     addProperty("type", "array")
-                    add("items", obj {
-                        addProperty("type", "integer")
-                        addProperty(
-                            "description",
-                            "1=周一, 2=周二, ..., 7=周日。仅 recurrence=CUSTOM 时使用," +
-                                "DAILY/NONE 忽略本字段。" +
-                                "例:用户说「每周一三五提醒开会」 → [1, 3, 5];" +
-                                "「工作日提醒我」 → [1, 2, 3, 4, 5];" +
-                                "「周末提醒我」 → [6, 7]。"
-                        )
-                    })
-                    addProperty(
-                        "description",
-                        "可选,自定义循环的星期几列表。仅 recurrence=CUSTOM 时生效。"
-                    )
+                    add("items", obj { addProperty("type", "integer") })
+                    addProperty("description", "1-7 表示周一到周日,仅 recurrence=CUSTOM 生效。")
                 })
             })
             add("required", JsonArray().apply { add("title") })
@@ -1111,68 +926,39 @@ object ToolDefinitions {
                         add("HIGH")
                         add("URGENT")
                     })
-                    addProperty("description", "新优先级(null = 不改;大小写不敏感 / 未知回退 NORMAL)。")
+                    addProperty("description", "新优先级(null = 不改;未知回退 NORMAL)。")
                 })
                 add("isCompleted", obj {
                     addProperty("type", "boolean")
-                    addProperty("description", "新完成状态(null = 不改;true / false 直接赋值;true 时系统自动写 completedAt 时间戳)。")
+                    addProperty("description", "新完成状态(null = 不改;true 自动写 completedAt)。")
                 })
                 add("reminderTime", obj {
                     addProperty("type", "integer")
-                    addProperty(
-                        "description",
-                        "可选,新提醒时间(Unix 毫秒时间戳)。" +
-                            "null = 不改;省略 = 不改;不传 recurrence 时,语义 = 一次性提醒。" +
-                            "**与 reminderDate 互斥**:传了 reminderDate 时,本字段被忽略," +
-                            "系统按\"日期 + 时分\"重新组装 timestamp。" +
-                            "配合 clearReminder=true 可显式清除提醒。"
-                    )
+                    addProperty("description", "可选,新提醒 Unix 毫秒时间戳;与 reminderDate 互斥。")
                 })
                 add("reminderDate", obj {
                     addProperty("type", "string")
-                    addProperty(
-                        "description",
-                        "可选,新指定日期(YYYY-MM-DD 字符串),语义同 todo_add.reminderDate。" +
-                            "null = 不改;**仅一次性提醒生效**。" +
-                            "配合 reminderTimeOfDay 一起用,系统按本地时区重新组装 timestamp。"
-                    )
+                    addProperty("description", "可选,新指定日期 YYYY-MM-DD,仅一次性生效。")
                 })
                 add("reminderTimeOfDay", obj {
                     addProperty("type", "string")
-                    addProperty(
-                        "description",
-                        "可选,新时分(HH:MM 字符串),语义同 todo_add.reminderTimeOfDay。" +
-                            "null = 不改;**仅与 reminderDate 配套使用**,且仅一次性提醒生效。" +
-                            "**与 recurrence 配套时**也可单独传(把循环型 reminder 改成新的 HH:MM)," +
-                            "系统自动重算首次触发时间(下一个匹配 day-of-week + 新时分)。"
-                    )
+                    addProperty("description", "可选,新时分 HH:MM;与 reminderDate 配套或与 recurrence 配套。")
                 })
                 add("recurrence", obj {
                     addProperty("type", "string")
                     add("enum", recurrenceEnum)
-                    addProperty(
-                        "description",
-                        "新循环类型(null = 不改;其它语义同 todo_add.recurrence)。" +
-                            "**没有 WEEKDAYS / WEEKLY 这两个值** —— 「工作日」改用 CUSTOM + recurrenceDays=[1,2,3,4,5]," +
-                            "「周末」用 CUSTOM + recurrenceDays=[6,7]。"
-                    )
+                    addProperty("description", "NONE/DAILY/CUSTOM(无 WEEKDAYS/WEEKLY);null=不改。")
                 })
                 add("recurrenceDays", obj {
                     addProperty("type", "array")
                     add("items", obj {
                         addProperty("type", "integer")
-                        addProperty("description", "1-7 表示周一到周日,仅 recurrence=CUSTOM 时使用。")
                     })
-                    addProperty("description", "新自定义循环的星期几(null = 不改)。")
+                    addProperty("description", "1-7 周一到周日,仅 recurrence=CUSTOM;null=不改。")
                 })
                 add("clearReminder", obj {
                     addProperty("type", "boolean")
-                    addProperty(
-                        "description",
-                        "可选,显式清除整条提醒(等价于把 TodoItem.reminder 置 null)。" +
-                            "true 时,即便同时传了 reminderTime/recurrence 也以清除为准。" +
-                            "用户说「把 X 的提醒删了」/「X 不用再提醒了」时设 true。"
-                    )
+                    addProperty("description", "true=清除整条提醒(优先于 reminderTime/recurrence)。")
                 })
             })
             add("required", JsonArray().apply { add("id") })
