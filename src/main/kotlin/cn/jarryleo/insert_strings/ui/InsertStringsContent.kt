@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.ai.AiProvider
 import cn.jarryleo.insert_strings.ai.AiProtocol
+import cn.jarryleo.insert_strings.ai.AiRole
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.phrases.QuickPhrase
 
@@ -83,6 +84,16 @@ internal fun InsertStringsContent(
     onSavePhraseEdit: (title: String, text: String, color: String?) -> Boolean,
     onCancelPhraseEdit: () -> Unit,
     onResetDefaultPhrases: () -> Unit,
+    roles: List<AiRole>,
+    editingRole: AiRole?,
+    onAddRole: () -> Unit,
+    onEditRole: (AiRole) -> Unit,
+    onDeleteRole: (AiRole) -> Unit,
+    onSetRoleEnabled: (AiRole, Boolean) -> Unit,
+    onDraftRoleTitleChange: (String) -> Unit,
+    onDraftRolePromptChange: (String) -> Unit,
+    onSaveRoleEdit: (title: String, prompt: String) -> Boolean,
+    onCancelRoleEdit: () -> Unit,
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
     onStopChat: () -> Unit,
@@ -165,6 +176,16 @@ internal fun InsertStringsContent(
                         onSavePhraseEdit = onSavePhraseEdit,
                         onCancelPhraseEdit = onCancelPhraseEdit,
                         onResetDefaultPhrases = onResetDefaultPhrases,
+                        roles = roles,
+                        editingRole = editingRole,
+                        onAddRole = onAddRole,
+                        onEditRole = onEditRole,
+                        onDeleteRole = onDeleteRole,
+                        onSetRoleEnabled = onSetRoleEnabled,
+                        onDraftRoleTitleChange = onDraftRoleTitleChange,
+                        onDraftRolePromptChange = onDraftRolePromptChange,
+                        onSaveRoleEdit = onSaveRoleEdit,
+                        onCancelRoleEdit = onCancelRoleEdit,
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )

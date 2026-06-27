@@ -10,6 +10,7 @@ import cn.jarryleo.insert_strings.ClipboardManager
 import cn.jarryleo.insert_strings.InsertStringsManager
 import cn.jarryleo.insert_strings.UiCallback
 import cn.jarryleo.insert_strings.ai.AiProvider
+import cn.jarryleo.insert_strings.ai.AiRole
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.phrases.QuickPhrase
 import cn.jarryleo.insert_strings.sheets.SheetsManager
@@ -114,6 +115,21 @@ class InsertStringsUI(
      */
     internal var editingPhrase: QuickPhrase? by mutableStateOf(null)
 
+    // ============== AI 角色预设 state ==============
+    /**
+     * 已保存的 AI 角色预设列表(应用级持久化)。
+     * 在 tool window 打开时由 [InsertStringsRolesController.loadRoles] 加载。
+     * 启用其中一条后,AI 聊天时会把该角色的 prompt 注入到 system 消息(由
+     * [cn.jarryleo.insert_strings.ai.AITranslator] 读取)。
+     */
+    internal val aiRoles = mutableStateListOf<AiRole>()
+    /**
+     * 当前正在行内编辑的角色(null 表示列表模式)。
+     * 编辑态下,对应行就地展开为编辑表单(Title + Prompt + Save / Cancel)。
+     * 新增时 id 分配 UUID 但尚未落库,Save 时由 controller 写入 service 并加入列表。
+     */
+    internal var editingRole: AiRole? by mutableStateOf(null)
+
     // ============== Chat state ==============
     override val chatMessages = mutableStateListOf<ChatMessage>()
     override var chatInput by mutableStateOf("")
@@ -152,6 +168,8 @@ class InsertStringsUI(
     internal lateinit var settingsController: InsertStringsSettingsController
         private set
     internal lateinit var phrasesController: InsertStringsPhrasesController
+        private set
+    internal lateinit var rolesController: InsertStringsRolesController
         private set
     internal lateinit var stringsOpsController: InsertStringsStringsOpsController
         private set
@@ -229,6 +247,16 @@ class InsertStringsUI(
                     onSavePhraseEdit = phrasesController::saveEdit,
                     onCancelPhraseEdit = phrasesController::cancelEdit,
                     onResetDefaultPhrases = phrasesController::resetDefaults,
+                    roles = aiRoles,
+                    editingRole = editingRole,
+                    onAddRole = rolesController::beginAdd,
+                    onEditRole = rolesController::beginEdit,
+                    onDeleteRole = rolesController::delete,
+                    onSetRoleEnabled = rolesController::setEnabled,
+                    onDraftRoleTitleChange = { title -> editingRole = editingRole?.copy(title = title) },
+                    onDraftRolePromptChange = { prompt -> editingRole = editingRole?.copy(prompt = prompt) },
+                    onSaveRoleEdit = rolesController::saveEdit,
+                    onCancelRoleEdit = rolesController::cancelEdit,
                     onChatInputChange = { chatInput = it },
                     onSendChat = chatDriver::sendChat,
                     onStopChat = chatDriver::stopChat,
@@ -270,6 +298,7 @@ class InsertStringsUI(
         settingsController.loadAiSettings()
         settingsController.loadSheetsSettings()
         phrasesController.loadPhrases()
+        rolesController.loadRoles()
 
         // 3) 拉取默认表格的工作表列表
         settingsController.refreshSheetsList()
@@ -282,6 +311,7 @@ class InsertStringsUI(
         actionsController = InsertStringsActionsController(this)
         settingsController = InsertStringsSettingsController(this)
         phrasesController = InsertStringsPhrasesController(this)
+        rolesController = InsertStringsRolesController(this)
         stringsOpsController = InsertStringsStringsOpsController(this)
         sheetsOpsController = InsertStringsSheetsOpsController(this)
         fileOpsController = InsertStringsFileOpsController(this)

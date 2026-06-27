@@ -4,8 +4,10 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
@@ -16,10 +18,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.ai.AiProvider
 import cn.jarryleo.insert_strings.ai.AiProtocol
+import cn.jarryleo.insert_strings.ai.AiRole
 import cn.jarryleo.insert_strings.phrases.QuickPhrase
 
 enum class SettingsTab {
-    AI, SHEETS, QUICK_PHRASES, DEBUG
+    AI, ROLES, SHEETS, QUICK_PHRASES, DEBUG
 }
 
 @Composable
@@ -67,6 +70,17 @@ fun SettingsContent(
     onSavePhraseEdit: (title: String, text: String, color: String?) -> Boolean,
     onCancelPhraseEdit: () -> Unit,
     onResetDefaultPhrases: () -> Unit,
+    // ===== AI Roles =====
+    roles: List<AiRole>,
+    editingRole: AiRole?,
+    onAddRole: () -> Unit,
+    onEditRole: (AiRole) -> Unit,
+    onDeleteRole: (AiRole) -> Unit,
+    onSetRoleEnabled: (AiRole, Boolean) -> Unit,
+    onDraftRoleTitleChange: (String) -> Unit,
+    onDraftRolePromptChange: (String) -> Unit,
+    onSaveRoleEdit: (title: String, prompt: String) -> Boolean,
+    onCancelRoleEdit: () -> Unit,
     modifier: Modifier = Modifier,
     colors: IdeColors,
 ) {
@@ -95,35 +109,37 @@ fun SettingsContent(
         }
 
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().horizontalScroll(state = rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             SettingsTabButton(
-                text = "AI",
+                text = "AI Settings",
                 selected = selectedTab == SettingsTab.AI,
                 onClick = { onTabChange(SettingsTab.AI) },
-                modifier = Modifier.weight(1f),
+                colors = colors,
+            )
+            SettingsTabButton(
+                text = "Role",
+                selected = selectedTab == SettingsTab.ROLES,
+                onClick = { onTabChange(SettingsTab.ROLES) },
                 colors = colors,
             )
             SettingsTabButton(
                 text = "Google Sheets",
                 selected = selectedTab == SettingsTab.SHEETS,
                 onClick = { onTabChange(SettingsTab.SHEETS) },
-                modifier = Modifier.weight(1f),
                 colors = colors,
             )
             SettingsTabButton(
                 text = "Quick Phrases",
                 selected = selectedTab == SettingsTab.QUICK_PHRASES,
                 onClick = { onTabChange(SettingsTab.QUICK_PHRASES) },
-                modifier = Modifier.weight(1f),
                 colors = colors,
             )
             SettingsTabButton(
                 text = "Debug",
                 selected = selectedTab == SettingsTab.DEBUG,
                 onClick = { onTabChange(SettingsTab.DEBUG) },
-                modifier = Modifier.weight(1f),
                 colors = colors,
             )
         }
@@ -148,6 +164,20 @@ fun SettingsContent(
                 onFetchModels = onFetchModels,
                 onSaveEditing = { onSaveAiProvider() },
                 onCancelEditing = onCancelAiProviderEdit,
+                modifier = Modifier.fillMaxSize(),
+                colors = colors,
+            )
+            SettingsTab.ROLES -> AiRolesContent(
+                roles = roles,
+                editingRole = editingRole,
+                onAdd = onAddRole,
+                onEdit = onEditRole,
+                onDelete = onDeleteRole,
+                onSetEnabled = onSetRoleEnabled,
+                onDraftTitleChange = onDraftRoleTitleChange,
+                onDraftPromptChange = onDraftRolePromptChange,
+                onSaveEdit = onSaveRoleEdit,
+                onCancelEdit = onCancelRoleEdit,
                 modifier = Modifier.fillMaxSize(),
                 colors = colors,
             )

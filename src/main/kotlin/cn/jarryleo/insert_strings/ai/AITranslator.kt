@@ -63,9 +63,9 @@ data class ChatMessage(
 
 object AITranslator {
     private const val SYSTEM_PROMPT =
-        "你是一个专业的翻译，为开发安卓APP提供国际化翻译服务，我传给你需要翻译的文本，和目标语言的缩写代码，帮我翻译成目标语言，请返回对应的翻译结果文本，不需要额外的解释，请返回纯文本结果"
+        "不论你做为什么身份,永远不要忘了你的职责:为开发安卓APP提供国际化翻译服务，我传给你需要翻译的文本，和目标语言的缩写代码，帮我翻译成目标语言，请返回对应的翻译结果文本，不需要额外的解释，请返回纯文本结果"
     private const val BATCH_TRANSLATE_SYSTEM_PROMPT =
-        "你是一个专业的翻译，为开发安卓APP提供国际化翻译服务。我会给你多条文本和目标语言代码，请翻译成目标语言，并严格以 JSON 对象返回，key 为我给出的标识（原样保留），value 为对应翻译结果纯文本。不要 markdown 代码块，不要任何解释。"
+        "不论你做为什么身份,永远不要忘了你的职责:为开发安卓APP提供国际化翻译服务。我会给你多条文本和目标语言代码，请翻译成目标语言，并严格以 JSON 对象返回，key 为我给出的标识（原样保留），value 为对应翻译结果纯文本。不要 markdown 代码块，不要任何解释。"
     /**
      * 跨入口共享的「行为公约」:终止语义、ask_user 用法、跨模块写入规则、
      * 翻译查重的标准选项格式。任何 chat 入口的 system prompt 都应拼上这一段,
@@ -1575,6 +1575,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         val projectBase = extractProjectBase(context)
         val chatEntry = extractChatEntry(context)
         val systemPrompt = systemPromptFor(chatEntry)
+        val activeRole = activeRolePrompt()
         val tools = if (chatEntry == CHAT_ENTRY_MAIN_PANEL) {
             ToolDefinitions.openAiTools(sheetCtx, projectBase)
         } else {
@@ -1597,6 +1598,15 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                             addProperty("content", "## 当前项目上下文（JSON）\n$context")
                         })
                     }
+                    // 启用的 AI 角色:把 [cn.jarryleo.insert_strings.ai.AiRole.prompt] 注入到
+                    // 额外的 system 消息,让 AI 在聊天时按该角色身份回复。
+                    // 空 prompt 或没有启用角色时,此段不加入 messages。
+                    if (activeRole != null) {
+                        add(JsonObject().apply {
+                            addProperty("role", "system")
+                            addProperty("content", "## 当前 AI 角色设定\n$activeRole")
+                        })
+                    }
                     messages.filter { it.protocolVisible }.forEach { msg -> add(msg.toOpenAiMessage()) }
                 }
             )
@@ -1614,6 +1624,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         val projectBase = extractProjectBase(context)
         val chatEntry = extractChatEntry(context)
         val systemPrompt = systemPromptFor(chatEntry)
+        val activeRole = activeRolePrompt()
         val tools = if (chatEntry == CHAT_ENTRY_MAIN_PANEL) {
             ToolDefinitions.anthropicTools(sheetCtx, projectBase)
         } else {
@@ -1627,6 +1638,11 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 if (context.isNotBlank()) {
                     append("\n## 当前项目上下文（JSON）\n").append(context)
                 }
+                if (activeRole != null) {
+                    // Anthropic 协议 system 是单个字符串,把角色段追加到末尾,
+                    // 与主 system prompt 一起作为系统级指令。
+                    append("\n## 当前 AI 角色设定\n").append(activeRole)
+                }
             }
             addProperty("system", systemParts)
             add("tools", tools)
@@ -1637,6 +1653,21 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             )
         }
         return root.toString()
+    }
+
+    /**
+     * 读取当前启用的 AI 角色,返回其非空 prompt 文本(用于注入到 system 消息)。
+     * - 没有启用任何角色 → null;
+     * - 启用了角色但 prompt 为空 → null(空 prompt 不影响 AI 行为,等同无角色);
+     * - 否则返回 trim 后的 prompt。
+     *
+     * 实现直接从 [AiRolesService] 读,这样用户在设置面板中切换"启用"角色时,
+     * 下一次 AI 调用立即生效,无需重启或重新加载。
+     */
+    private fun activeRolePrompt(): String? {
+        val role = AiRolesService.getInstance().activeRole() ?: return null
+        val prompt = role.prompt.trim()
+        return prompt.takeIf { it.isNotEmpty() }
     }
 
     /**
