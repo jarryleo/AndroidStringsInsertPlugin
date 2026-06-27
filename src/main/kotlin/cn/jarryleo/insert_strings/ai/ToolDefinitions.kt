@@ -77,6 +77,7 @@ object ToolDefinitions {
         TOOL_TODO_ADD,
         TOOL_TODO_UPDATE,
         TOOL_TODO_DELETE,
+        TOOL_CURRENT_TIME,
         TOOL_ASK_USER,
         TOOL_LOAD_TOOL_DOC,
         TOOL_REPLACE_SELECTION,
@@ -102,6 +103,7 @@ object ToolDefinitions {
     const val TOOL_TODO_ADD = "todo_add"
     const val TOOL_TODO_UPDATE = "todo_update"
     const val TOOL_TODO_DELETE = "todo_delete"
+    const val TOOL_CURRENT_TIME = "current_time"
     const val TOOL_REPLACE_SELECTION = "replace_selection"
     const val TOOL_ASK_USER = "ask_user"
     const val TOOL_LOAD_TOOL_DOC = "load_tool_doc"
@@ -181,6 +183,20 @@ object ToolDefinitions {
         "按 id 删除一条代办(破坏性操作,删除前建议先 todo_list 确认目标)。" +
             "id 不存在时返回错误,不会静默成功。" +
             "详细字段 → load_tool_doc(\"todo_delete\")。"
+
+    private const val DESC_CURRENT_TIME =
+        "获取当前时间(2026.x 新增)。不需要任何参数,返回:" +
+            "**timestamp**(Unix 毫秒时间戳,直接拿去做相对时间运算如 now+5*60*1000);" +
+            "**formatted**(本地时区 yyyy-MM-dd HH:mm:ss,人类可读);" +
+            "**timezone**(如 Asia/Shanghai);" +
+            "**offsetMinutes**(UTC 偏移分钟数)。" +
+            "系统已经在聊天上下文里注入了 `now` 字段(发送消息那一刻的时间)," +
+            "但**当 tool loop 跑了几十秒**(慢 AI / 流式响应)时该时间会过时," +
+            "此时必须先调本工具拿最新的 timestamp 再算相对时间。" +
+            "**典型用法**:用户说「5 分钟后提醒我喝水」时,先调 current_time 拿 timestamp," +
+            "再调 todo_add(title='喝水', reminderTime=timestamp+5*60*1000, recurrence='NONE');" +
+            "用户说「明天下午 3 点」时,先调 current_time 拿 timestamp + timezone," +
+            "再算次日的 15:00 本地时间戳,调 todo_add。"
 
     // endregion
 
@@ -319,6 +335,7 @@ object ToolDefinitions {
             add(openAiTool(TOOL_TODO_ADD, DESC_TODO_ADD, openAiTodoAddParams()))
             add(openAiTool(TOOL_TODO_UPDATE, DESC_TODO_UPDATE, openAiTodoUpdateParams()))
             add(openAiTool(TOOL_TODO_DELETE, DESC_TODO_DELETE, openAiTodoDeleteParams()))
+            add(openAiTool(TOOL_CURRENT_TIME, DESC_CURRENT_TIME, openAiCurrentTimeParams()))
             add(openAiTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(openAiTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(openAiTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
@@ -356,6 +373,7 @@ object ToolDefinitions {
             add(anthropicTool(TOOL_TODO_ADD, DESC_TODO_ADD, openAiTodoAddParams()))
             add(anthropicTool(TOOL_TODO_UPDATE, DESC_TODO_UPDATE, openAiTodoUpdateParams()))
             add(anthropicTool(TOOL_TODO_DELETE, DESC_TODO_DELETE, openAiTodoDeleteParams()))
+            add(anthropicTool(TOOL_CURRENT_TIME, DESC_CURRENT_TIME, openAiCurrentTimeParams()))
             add(anthropicTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(anthropicTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(anthropicTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
@@ -949,6 +967,13 @@ object ToolDefinitions {
     }
 
     private fun openAiTodoAddParams(): JsonObject {
+        val recurrenceEnum = JsonArray().apply {
+            add("NONE")
+            add("DAILY")
+            add("WEEKDAYS")
+            add("WEEKLY")
+            add("CUSTOM")
+        }
         return obj {
             addProperty("type", "object")
             add("properties", obj {
@@ -970,12 +995,55 @@ object ToolDefinitions {
                     })
                     addProperty("description", "可选,优先级;为空/未知时回退 NORMAL。URGENT/HIGH 会浮在 Todo tab 列表顶部。")
                 })
+                add("reminderTime", obj {
+                    addProperty("type", "integer")
+                    addProperty(
+                        "description",
+                        "可选,首次提醒时间(Unix 毫秒时间戳)。" +
+                            "用户说「5 分钟后提醒我喝水」时,先把 now + 5*60*1000 算出来再传;" +
+                            "说「明天下午 3 点」时,用本地时区算出对应时间戳再传(系统按本地时区解析)。" +
+                            "省略时 = 不设提醒。新增后会立即进入调度队列,到点触发右下角弹框。"
+                    )
+                })
+                add("recurrence", obj {
+                    addProperty("type", "string")
+                    add("enum", recurrenceEnum)
+                    addProperty(
+                        "description",
+                        "可选,循环类型:NONE(默认,一次性)/ DAILY(每天固定时间)/ WEEKDAYS(周一至周五)/ " +
+                            "WEEKLY(每周同一天)/ CUSTOM(自定义,配合 recurrenceDays)。" +
+                            "省略 = NONE(一次性)。触发后:NONE 自动清除;DAILY/WEEKDAYS/WEEKLY/CUSTOM 自动滚动到下一次。"
+                    )
+                })
+                add("recurrenceDays", obj {
+                    addProperty("type", "array")
+                    add("items", obj {
+                        addProperty("type", "integer")
+                        addProperty(
+                            "description",
+                            "1=周一, 2=周二, ..., 7=周日。仅 recurrence=CUSTOM 时使用," +
+                                "其它 recurrence 忽略本字段。" +
+                                "例:用户说「每周一三五提醒开会」 → [1, 3, 5]。"
+                        )
+                    })
+                    addProperty(
+                        "description",
+                        "可选,自定义循环的星期几列表。仅 recurrence=CUSTOM 时生效。"
+                    )
+                })
             })
             add("required", JsonArray().apply { add("title") })
         }
     }
 
     private fun openAiTodoUpdateParams(): JsonObject {
+        val recurrenceEnum = JsonArray().apply {
+            add("NONE")
+            add("DAILY")
+            add("WEEKDAYS")
+            add("WEEKLY")
+            add("CUSTOM")
+        }
         return obj {
             addProperty("type", "object")
             add("properties", obj {
@@ -1005,6 +1073,37 @@ object ToolDefinitions {
                     addProperty("type", "boolean")
                     addProperty("description", "新完成状态(null = 不改;true / false 直接赋值;true 时系统自动写 completedAt 时间戳)。")
                 })
+                add("reminderTime", obj {
+                    addProperty("type", "integer")
+                    addProperty(
+                        "description",
+                        "可选,新提醒时间(Unix 毫秒时间戳)。" +
+                            "null = 不改;省略 = 不改;不传 recurrence 时,语义 = 一次性提醒。" +
+                            "配合 clearReminder=true 可显式清除提醒。"
+                    )
+                })
+                add("recurrence", obj {
+                    addProperty("type", "string")
+                    add("enum", recurrenceEnum)
+                    addProperty("description", "新循环类型(null = 不改;其它语义同 todo_add.recurrence)。")
+                })
+                add("recurrenceDays", obj {
+                    addProperty("type", "array")
+                    add("items", obj {
+                        addProperty("type", "integer")
+                        addProperty("description", "1-7 表示周一到周日,仅 recurrence=CUSTOM 时使用。")
+                    })
+                    addProperty("description", "新自定义循环的星期几(null = 不改)。")
+                })
+                add("clearReminder", obj {
+                    addProperty("type", "boolean")
+                    addProperty(
+                        "description",
+                        "可选,显式清除整条提醒(等价于把 TodoItem.reminder 置 null)。" +
+                            "true 时,即便同时传了 reminderTime/recurrence 也以清除为准。" +
+                            "用户说「把 X 的提醒删了」/「X 不用再提醒了」时设 true。"
+                    )
+                })
             })
             add("required", JsonArray().apply { add("id") })
         }
@@ -1020,6 +1119,18 @@ object ToolDefinitions {
                 })
             })
             add("required", JsonArray().apply { add("id") })
+        }
+    }
+
+    private fun openAiCurrentTimeParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("dummy", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "保留字段,本工具不接收任何参数,传空字符串或省略。")
+                })
+            })
         }
     }
 

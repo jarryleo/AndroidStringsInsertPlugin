@@ -7,6 +7,10 @@ import cn.jarryleo.insert_strings.xml.ContextManager
 import cn.jarryleo.insert_strings.xml.ModuleInfo
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
 /**
  * 构造每次 AI 调用时附带的「当前项目上下文」JSON。
@@ -25,6 +29,8 @@ internal class InsertStringsChatContextBuilder(
          * 超过时 AI 想看更多细节用 todo_list 工具按需取。
          */
         private const val TODO_CONTEXT_LIMIT = 20
+        // 时间格式:本地时区的 yyyy-MM-dd HH:mm:ss,让 AI 能直接读懂"现在是几点"。
+        private val HUMAN_TIME_FORMAT = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
     }
 
     fun build(): String {
@@ -45,8 +51,28 @@ internal class InsertStringsChatContextBuilder(
             .takeIf { it.isNotEmpty() }
 
         val editorSel = state.editorSelection
+        // 当前时间:每次 build 重新计算(确保是真实的 now,不是缓存)
+        val nowMillis = System.currentTimeMillis()
+        val tz = TimeZone.getDefault()
+        val humanTime = synchronized(HUMAN_TIME_FORMAT) {
+            HUMAN_TIME_FORMAT.format(Date(nowMillis))
+        }
         val root = JsonObject().apply {
             addProperty("projectBase", state.project.basePath)
+            // ===== 当前时间(2026.x 新增)=====
+            // 让 AI 知道「现在是什么时候」,以便在「5 分钟后提醒我喝水」这种相对时间场景下
+            // 准确计算 reminderTime(否则 AI 经常瞎猜 8am)。同时给 timezone,
+            // 让 AI 在「明天下午 3 点」场景下用本地时区算出正确时间戳。
+            //
+            // 精度:每条 user 消息都会重新 build 一次,所以这里的 now 是发送那一刻的真实时间;
+            // AI 拿到后做 5*60*1000 加法即可。如果中间有慢工具调用,可用 current_time 工具
+            // 重新拉一次最新的 now。
+            add("now", JsonObject().apply {
+                addProperty("timestamp", nowMillis)
+                addProperty("formatted", humanTime)
+                addProperty("timezone", tz.id)
+                addProperty("offsetMinutes", tz.getOffset(nowMillis) / 60_000)
+            })
             add("androidProject", JsonObject().apply {
                 addProperty("name", contextInfo.projectName)
                 addProperty(
@@ -146,6 +172,23 @@ internal class InsertStringsChatContextBuilder(
                 val active = todoService.listActive()
                 addProperty("activeCount", active.size)
                 addProperty("completedCount", todoService.listCompleted().size)
+                // 下一条即将触发的提醒(用于「下一个提醒是什么」「还有多久提醒」类问题)
+                val upcomingReminders = active
+                    .mapNotNull { item -> item.reminder?.let { r -> r to item } }
+                    .filter { (r, _) -> r.enabled && r.nextTriggerAt != null }
+                    .sortedBy { it.first.nextTriggerAt }
+                add("upcomingReminders", JsonArray().apply {
+                    upcomingReminders.take(5).forEach { (r, item) ->
+                        add(JsonObject().apply {
+                            addProperty("id", item.id)
+                            addProperty("title", item.title)
+                            addProperty("nextTriggerAt", r.nextTriggerAt)
+                            addProperty("recurrence", r.recurrence.name)
+                            val tod = r.timeOfDay
+                            if (tod != null) addProperty("timeOfDay", tod.format())
+                        })
+                    }
+                })
                 add("active", JsonArray().apply {
                     active
                         .sortedWith(
@@ -161,6 +204,22 @@ internal class InsertStringsChatContextBuilder(
                                 if (item.content.isNotBlank()) {
                                     addProperty("content", item.content)
                                 }
+                                val r = item.reminder
+                                if (r != null) {
+                                    val tod = r.timeOfDay
+                                    add("reminder", JsonObject().apply {
+                                        addProperty("nextTriggerAt", r.nextTriggerAt)
+                                        addProperty("recurrence", r.recurrence.name)
+                                        if (tod != null) {
+                                            addProperty("timeOfDay", tod.format())
+                                        }
+                                        if (r.recurrence == cn.jarryleo.insert_strings.ai.TodoRecurrence.CUSTOM) {
+                                            add("recurrenceDays", JsonArray().apply {
+                                                r.recurrenceDays.sorted().forEach { add(it) }
+                                            })
+                                        }
+                                    })
+                                }
                             })
                         }
                 })
@@ -168,9 +227,14 @@ internal class InsertStringsChatContextBuilder(
                     "note",
                     "这是用户主页 Todo tab 维护的待办清单(active 部分前 ${TODO_CONTEXT_LIMIT} 条)。" +
                         "AI 可通过 todo_list / todo_add / todo_update / todo_delete 工具读写," +
-                        "完整字段(content / completedAt 等)用 todo_list 拿。" +
-                        "**典型用法**:用户说「提醒我 X」「记下 Y」时,调 todo_add;用户问「我有什么待办」/「都做完了吗」时," +
-                        "调 todo_list 拿完整数据,本字段只够简单提醒场景。"
+                        "完整字段(content / completedAt / reminder 等)用 todo_list 拿。" +
+                        "upcomingReminders 是按 nextTriggerAt 升序的最近 5 条(用于「下一个提醒」类问题)。" +
+                        "**典型用法**:用户说「提醒我 X」「记下 Y」时,调 todo_add;" +
+                        "用户说「5 分钟后提醒我喝水」时,**先调 current_time 拿最新 timestamp**(上下文里的 now 可能已过时)," +
+                        "再算 timestamp + 5*60*1000,再调 todo_add(title='喝水', reminderTime=..., recurrence='NONE');" +
+                        "用户说「明天下午 3 点」时,基于 current_time 的 timestamp + timezone 算次日 15:00 本地时间戳,再调 todo_add;" +
+                        "用户说「每周一三五提醒开会」时,算下一次匹配日的时间戳,再调 todo_add(title='开会', reminderTime=..., recurrence='CUSTOM', recurrenceDays=[1,3,5]);" +
+                        "用户问「我有什么待办」/「都做完了吗」时,调 todo_list 拿完整数据,本字段只够简单提醒场景。"
                 )
             })
         }

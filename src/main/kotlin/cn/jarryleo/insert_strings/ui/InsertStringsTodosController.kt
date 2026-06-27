@@ -2,6 +2,8 @@ package cn.jarryleo.insert_strings.ui
 
 import cn.jarryleo.insert_strings.ai.TodoItem
 import cn.jarryleo.insert_strings.ai.TodoPriority
+import cn.jarryleo.insert_strings.ai.TodoReminder
+import cn.jarryleo.insert_strings.ai.TodoReminderScheduler
 import cn.jarryleo.insert_strings.ai.TodoService
 
 /**
@@ -14,7 +16,8 @@ import cn.jarryleo.insert_strings.ai.TodoService
  * - 从 [TodoService] 加载到 UI state;
  * - 把 UI 上的 add / edit / delete / complete 操作落库,并同步 UI state;
  * - 维护稳定 id(新建时分配,编辑已有时复用);
- * - 接受来自 AI 工具调用(chat driver)的结果,同步刷新 UI 列表(让用户的 Todo tab 立刻反映 AI 的改动)。
+ * - 接受来自 AI 工具调用(chat driver)的结果,同步刷新 UI 列表(让用户的 Todo tab 立刻反映 AI 的改动);
+ * - 把 reminder 写操作通知到 [TodoReminderScheduler],让 Timer 与磁盘状态保持一致。
  *
  * **排序约定**(controller 写入 UI 时统一):
  * - active(未完成)按 `priority 倒序 + createdAt 倒序` —— URGENT/HIGH 浮在上面,同优先级新加的靠前;
@@ -106,7 +109,40 @@ internal class InsertStringsTodosController(
         // 但要小心:如果 updated.isCompleted = true(AI 此前标了完成,现在用户在改文本),
         // 仍要走 completed 排序,不能塞到 active 顶部。已通过 isCompleted 字段判断,无需特判。
         reloadTodos()
+        // reminder 由专门的 saveReminder() 入口处理,saveEdit 只动 title/content/priority。
         ui.editingTodo = null
+        return true
+    }
+
+    /**
+     * 把 [ui.editingTodo] 的 [TodoItem.reminder] 写库。
+     *
+     * 由 UI 编辑表单的「保存提醒」按钮调用;
+     * 与 saveEdit 独立,避免「只改 title」/「只改 reminder」互相干扰。
+     *
+     * 校验:[TodoReminder.validate] 返回错误信息时直接返回 false(UI toast 提示);
+     * 否则写库 + **同步更新 ui.editingTodo**(让 form 的 remember(initial) 重新触发,
+     * 输入框 / 副标题立刻反映新值)+ 通知调度器重新排 Timer。
+     */
+    fun saveReminder(reminder: TodoReminder?): Boolean {
+        val editing = ui.editingTodo ?: return false
+        if (reminder != null) {
+            val err = reminder.validate()
+            if (err != null) return false
+        }
+        val updated = editing.copy(reminder = reminder)
+        TodoService.getInstance().upsert(updated)
+        // 关键:同步更新 editingTodo,form 下一帧的 remember(initial) 会重新触发,
+        // 用户立刻看到新的 hourText/minuteText/recurrence(而不是停留在旧值)。
+        ui.editingTodo = updated
+        // 同步 UI 列表(让 alarm 图标 / 下一条 nextTriggerAt 立刻反映)
+        reloadTodos()
+        // 通知调度器:reminder 字段变了,重新安排 Timer
+        if (reminder != null) {
+            TodoReminderScheduler.getInstance().notifyReminderChanged(updated.id)
+        } else {
+            TodoReminderScheduler.getInstance().notifyReminderRemoved(updated.id)
+        }
         return true
     }
 
@@ -115,12 +151,16 @@ internal class InsertStringsTodosController(
      * 若删的是当前正在编辑的代办,自动退出编辑态。
      */
     fun delete(item: TodoItem) {
+        val hadReminder = item.reminder != null
         TodoService.getInstance().delete(item.id)
         // 用 removeAll 触发单条删除的细粒度重组;Compose 配合 [TodosList] 的
         // key(item.id) 能正确把对应行移出。
         ui.todos.removeAll { it.id == item.id }
         if (ui.editingTodo?.id == item.id) {
             ui.editingTodo = null
+        }
+        if (hadReminder) {
+            TodoReminderScheduler.getInstance().notifyReminderRemoved(item.id)
         }
     }
 

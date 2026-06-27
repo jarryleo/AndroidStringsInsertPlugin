@@ -755,15 +755,18 @@ internal class InsertStringsChatDriver(
             return
         }
 
-        // Priority 6.5: 代办操作域(todo_list / todo_add / todo_update / todo_delete)
+        // Priority 6.5: 代办操作域(todo_list / todo_add / todo_update / todo_delete / current_time)
         // 放在 sheets 之后、文件操作之前 —— 代办操作极轻量(纯本地 service CRUD),
         // 让 AI 在「读完 Sheets → 提醒用户」一类连续动作里能紧接着把代办加好,
         // 不必跨过几个耗时工具(读大文件 / edit_file 等)才能落库。
+        // current_time 也放这里:它与代办联动(「5 分钟后提醒我」需要先拿 now 算时间戳),
+        // 让 AI 在同一次 round-trip 内串行做完。
         val todoEntries = unprocessed.filter {
             it.action is AiAction.TodoList ||
                 it.action is AiAction.TodoAdd ||
                 it.action is AiAction.TodoUpdate ||
-                it.action is AiAction.TodoDelete
+                it.action is AiAction.TodoDelete ||
+                it.action is AiAction.CurrentTime
         }
         if (todoEntries.isNotEmpty()) {
             unprocessed.removeAll(todoEntries)
@@ -842,6 +845,7 @@ internal class InsertStringsChatDriver(
                 is AiAction.TodoAdd -> "todo_add"
                 is AiAction.TodoUpdate -> "todo_update"
                 is AiAction.TodoDelete -> "todo_delete"
+                is AiAction.CurrentTime -> "current_time"
             }
             state.chatMessages.add(
                 ChatMessage(
@@ -1549,7 +1553,7 @@ internal class InsertStringsChatDriver(
                     val limit = action.limit ?: 50
                     val limited = items.take(limit.coerceAtLeast(1))
                     val payload = limited.joinToString("\n") { item ->
-                        // 输出 id + title + priority + isCompleted + content(若有),
+                        // 输出 id + title + priority + isCompleted + content(若有) + reminder(若有),
                         // 格式:JSON-like 一行一条,AI 解析后能直接拿去 todo_update / todo_delete。
                         buildString {
                             append("{\"id\":\"").append(item.id).append("\",")
@@ -1558,6 +1562,10 @@ internal class InsertStringsChatDriver(
                             append("\"isCompleted\":").append(item.isCompleted)
                             if (item.content.isNotBlank()) {
                                 append(",\"content\":\"").append(escapeJson(item.content)).append("\"")
+                            }
+                            val r = item.reminder
+                            if (r != null) {
+                                append(",\"reminder\":").append(reminderToJsonString(r))
                             }
                             append("}")
                         }
@@ -1598,6 +1606,11 @@ internal class InsertStringsChatDriver(
                         }
                     } else {
                         val priority = cn.jarryleo.insert_strings.ai.TodoPriority.fromName(action.priority)
+                        val reminder = buildReminderFromAiArgs(
+                            reminderTime = action.reminderTime,
+                            recurrence = action.recurrence,
+                            recurrenceDays = action.recurrenceDays,
+                        )
                         val newItem = cn.jarryleo.insert_strings.ai.TodoItem(
                             title = title,
                             content = action.content,
@@ -1605,18 +1618,26 @@ internal class InsertStringsChatDriver(
                             isCompleted = false,
                             createdAt = System.currentTimeMillis(),
                             completedAt = null,
+                            reminder = reminder,
                         )
                         service.upsert(newItem)
                         // 同步 UI 列表:走 controller 的 reloadTodos()(内部按 active/completed 排序后
                         // 整体替换 ui.todos),让用户的 Todo tab 立即看到 AI 新增的条目。
                         ui?.todosController?.reloadTodos()
+                        // 通知调度器:AI 设置了 reminder,需要加入 Timer 队列
+                        if (reminder != null) {
+                            cn.jarryleo.insert_strings.ai.TodoReminderScheduler.getInstance()
+                                .notifyReminderChanged(newItem.id)
+                        }
                         if (toolCallId.isNotEmpty()) {
+                            val reminderJson = reminder?.let { reminderToJsonString(it) }
+                            val reminderField = if (reminderJson != null) ",\"reminder\":$reminderJson" else ""
                             state.chatMessages.add(
                                 ChatMessage(
                                     role = "tool",
                                     content = "[工具执行结果] 类型:todo_add 状态:成功\n" +
                                         "{\"id\":\"${newItem.id}\",\"title\":\"${escapeJson(newItem.title)}\"," +
-                                        "\"priority\":\"${newItem.priority.name}\",\"isCompleted\":false}",
+                                        "\"priority\":\"${newItem.priority.name}\",\"isCompleted\":false$reminderField}",
                                     toolCallId = toolCallId
                                 )
                             )
@@ -1655,11 +1676,24 @@ internal class InsertStringsChatDriver(
                             }
                             return@forEach
                         }
+                        // reminder 计算:clearReminder=true → null;否则按 reminderTime/recurrence/recurrenceDays 合成
+                        val newReminder: cn.jarryleo.insert_strings.ai.TodoReminder? = when {
+                            action.clearReminder -> null
+                            action.reminderTime != null || action.recurrence != null || action.recurrenceDays != null -> {
+                                buildReminderFromAiArgs(
+                                    reminderTime = action.reminderTime ?: current.reminder?.nextTriggerAt,
+                                    recurrence = action.recurrence,
+                                    recurrenceDays = action.recurrenceDays,
+                                )
+                            }
+                            else -> current.reminder
+                        }
                         val updated = current.copy(
                             title = newTitle,
                             content = newContent,
                             priority = newPriority,
                             isCompleted = newCompleted,
+                            reminder = newReminder,
                         )
                         service.upsert(updated)
                         // 完成态切换时同时维护 completedAt 时间戳(同 [TodoService.setCompleted] 语义)。
@@ -1667,13 +1701,22 @@ internal class InsertStringsChatDriver(
                             service.setCompleted(action.id, newCompleted)
                         }
                         ui?.todosController?.reloadTodos()
+                        // 通知调度器:reminder 字段可能变了
+                        val scheduler = cn.jarryleo.insert_strings.ai.TodoReminderScheduler.getInstance()
+                        when {
+                            newReminder == null && current.reminder != null -> scheduler.notifyReminderRemoved(updated.id)
+                            newReminder != null -> scheduler.notifyReminderChanged(updated.id)
+                            else -> { /* 都没变,no-op */ }
+                        }
                         if (toolCallId.isNotEmpty()) {
+                            val reminderJson = newReminder?.let { reminderToJsonString(it) }
+                            val reminderField = if (reminderJson != null) ",\"reminder\":$reminderJson" else ""
                             state.chatMessages.add(
                                 ChatMessage(
                                     role = "tool",
                                     content = "[工具执行结果] 类型:todo_update 状态:成功\n" +
                                         "{\"id\":\"${updated.id}\",\"title\":\"${escapeJson(updated.title)}\"," +
-                                        "\"priority\":\"${updated.priority.name}\",\"isCompleted\":${updated.isCompleted}}",
+                                        "\"priority\":\"${updated.priority.name}\",\"isCompleted\":${updated.isCompleted}$reminderField}",
                                     toolCallId = toolCallId
                                 )
                             )
@@ -1693,8 +1736,13 @@ internal class InsertStringsChatDriver(
                             )
                         }
                     } else {
+                        val hadReminder = current.reminder != null
                         service.delete(action.id)
                         ui?.todosController?.reloadTodos()
+                        if (hadReminder) {
+                            cn.jarryleo.insert_strings.ai.TodoReminderScheduler.getInstance()
+                                .notifyReminderRemoved(current.id)
+                        }
                         if (toolCallId.isNotEmpty()) {
                             state.chatMessages.add(
                                 ChatMessage(
@@ -1705,6 +1753,27 @@ internal class InsertStringsChatDriver(
                                 )
                             )
                         }
+                    }
+                }
+                is AiAction.CurrentTime -> {
+                    // 无副作用:直接返回 now 的多种表达(让 AI 选最合适的格式用)
+                    val nowMs = System.currentTimeMillis()
+                    val tz = java.util.TimeZone.getDefault()
+                    val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).apply {
+                        timeZone = tz
+                    }
+                    val human = fmt.format(java.util.Date(nowMs))
+                    val payload = "{\"timestamp\":$nowMs,\"formatted\":\"$human\"," +
+                        "\"timezone\":\"${tz.id}\",\"offsetMinutes\":${tz.getOffset(nowMs) / 60_000}}"
+                    if (toolCallId.isNotEmpty()) {
+                        state.chatMessages.add(
+                            ChatMessage(
+                                role = "tool",
+                                content = "[工具执行结果] 类型:current_time 状态:成功\n" +
+                                    "{\"now\":$payload}",
+                                toolCallId = toolCallId
+                            )
+                        )
                     }
                 }
                 else -> {
@@ -1723,6 +1792,51 @@ internal class InsertStringsChatDriver(
      */
     private fun escapeJson(s: String): String =
         s.replace("\\", "\\\\").replace("\"", "\\\"")
+
+    /**
+     * 把 AI 传入的 reminder 参数合成为 [cn.jarryleo.insert_strings.ai.TodoReminder]。
+     *
+     * 规则:
+     * - [reminderTime] 为 null 时返回 null(没有提醒) — 任何其它字段(reminderTime=null)
+     *   即便 AI 填了 recurrence/recurrenceDays 也视为「没传 reminder」,不构造。
+     * - [recurrence] 非法时回退 NONE;空时 = NONE(一次性)。
+     * - [recurrenceDays] 仅在 recurrence=CUSTOM 时用,其它类型忽略。
+     * - timeOfDay 从 reminderTime 抽 hour:minute,供循环滚动。
+     */
+    private fun buildReminderFromAiArgs(
+        reminderTime: Long?,
+        recurrence: String?,
+        recurrenceDays: List<Int>?,
+    ): cn.jarryleo.insert_strings.ai.TodoReminder? {
+        if (reminderTime == null) return null
+        val rec = cn.jarryleo.insert_strings.ai.TodoRecurrence.fromName(recurrence)
+        val tod = cn.jarryleo.insert_strings.ai.TodoReminder.deriveDefaultsFrom(reminderTime).first
+        val days = if (rec == cn.jarryleo.insert_strings.ai.TodoRecurrence.CUSTOM) {
+            (recurrenceDays ?: emptyList()).filter { it in 1..7 }.toMutableSet()
+        } else mutableSetOf()
+        return cn.jarryleo.insert_strings.ai.TodoReminder(
+            enabled = true,
+            nextTriggerAt = reminderTime,
+            recurrence = rec,
+            timeOfDay = tod,
+            recurrenceDays = days,
+        )
+    }
+
+    /**
+     * 把 [cn.jarryleo.insert_strings.ai.TodoReminder] 序列化为简短 JSON,供 AI 工具结果回传。
+     * 字段精简到 AI 看下一次要用的程度(nextTriggerAt + recurrence + timeOfDay + days),
+     * 不暴露 enabled(默认 true,没歧义)。
+     */
+    private fun reminderToJsonString(r: cn.jarryleo.insert_strings.ai.TodoReminder): String {
+        val tod = r.timeOfDay?.format() ?: "-"
+        val days = if (r.recurrence == cn.jarryleo.insert_strings.ai.TodoRecurrence.CUSTOM) {
+            r.recurrenceDays.sorted().joinToString(",")
+        } else "-"
+        val next = r.nextTriggerAt ?: -1L
+        return "{\"nextTriggerAt\":$next,\"recurrence\":\"${r.recurrence.name}\"," +
+            "\"timeOfDay\":\"$tod\",\"days\":\"$days\"}"
+    }
 
     /**
      * 把 SheetsOperation 列表 + 平行的 toolCallId 列表打包成 [ActionWithToolCall] 列表,

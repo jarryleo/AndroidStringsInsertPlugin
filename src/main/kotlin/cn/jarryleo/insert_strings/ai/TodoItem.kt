@@ -46,6 +46,9 @@ enum class TodoPriority {
  *   取消完成时清空 [completedAt]。
  * - [createdAt] 创建时间戳,用于排序(默认按创建时间倒序展示,新加的在上)。
  * - [completedAt] 完成时间戳,仅在 [isCompleted] = true 时有值;用于将来扩展"今日完成"统计。
+ * - [reminder] 可选提醒配置(null = 没有提醒);有值时 UI 显示闹钟图标,
+ *             调度器按 [TodoReminder.nextTriggerAt] 触发右下角弹框。
+ *             循环提醒触发后由调度器自动滚动 nextTriggerAt 到下一次;一次性触发后调度器把整个 reminder 置 null。
  *
  * 字段全 `var`:IntelliJ XmlSerializer 需要 setter;data class 的 val 属性会导致反序列化失败。
  * 手写 [equals] / [hashCode] / [toString] / [copy] 替代 data class 能力。
@@ -58,6 +61,7 @@ class TodoItem(
     var isCompleted: Boolean = false,
     var createdAt: Long = System.currentTimeMillis(),
     var completedAt: Long? = null,
+    var reminder: TodoReminder? = null,
 ) {
 
     val completeState = mutableStateOf(isCompleted)
@@ -70,7 +74,17 @@ class TodoItem(
         isCompleted: Boolean = this.isCompleted,
         createdAt: Long = this.createdAt,
         completedAt: Long? = this.completedAt,
-    ): TodoItem = TodoItem(id, title, content, priority, isCompleted, createdAt, completedAt)
+        reminder: TodoReminder? = this.reminder,
+    ): TodoItem = TodoItem(
+        id = id,
+        title = title,
+        content = content,
+        priority = priority,
+        isCompleted = isCompleted,
+        createdAt = createdAt,
+        completedAt = completedAt,
+        reminder = reminder?.copy(),
+    )
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -81,7 +95,8 @@ class TodoItem(
             priority == other.priority &&
             isCompleted == other.isCompleted &&
             createdAt == other.createdAt &&
-            completedAt == other.completedAt
+            completedAt == other.completedAt &&
+            reminder == other.reminder
     }
 
     override fun hashCode(): Int {
@@ -92,11 +107,12 @@ class TodoItem(
         result = 31 * result + isCompleted.hashCode()
         result = 31 * result + createdAt.hashCode()
         result = 31 * result + (completedAt?.hashCode() ?: 0)
+        result = 31 * result + (reminder?.hashCode() ?: 0)
         return result
     }
 
     override fun toString(): String =
-        "TodoItem(id=$id, title=$title, priority=$priority, completed=$isCompleted)"
+        "TodoItem(id=$id, title=$title, priority=$priority, completed=$isCompleted, hasReminder=${reminder != null})"
 
     companion object {
         /**
@@ -110,6 +126,7 @@ class TodoItem(
             isCompleted = false,
             createdAt = System.currentTimeMillis(),
             completedAt = null,
+            reminder = null,
         )
     }
 }

@@ -114,6 +114,40 @@ class TodoService : PersistentStateComponent<TodoState> {
         current.completedAt = if (completed) System.currentTimeMillis() else null
     }
 
+    // ============== 提醒(2026.x 新增) ==============
+
+    /**
+     * 列出所有「尚未完成 + 有提醒 + 已启用 + 触发时间在未来或最近 N 分钟」的活动提醒。
+     *
+     * 用于:
+     * - [cn.jarryleo.insert_strings.ai.TodoReminderScheduler] 启动时把这些提醒加入 Timer;
+     * - UI 「下一条提醒」角标(将来扩展)。
+     *
+     * 不传 [withinMillis] 时只返回 [nextTriggerAt] > now 的提醒;
+     * 传了非 0 值时把 [withinMillis] 毫秒内过期的也算上(让启动时能「立即补触发」错过的小窗口)。
+     */
+    fun listActiveReminders(withinMillis: Long = 0L): List<TodoItem> {
+        val now = System.currentTimeMillis()
+        val threshold = now - withinMillis
+        return state.items.filter { item ->
+            !item.isCompleted &&
+                item.reminder?.enabled == true &&
+                item.reminder?.nextTriggerAt != null &&
+                item.reminder?.nextTriggerAt!! >= threshold
+        }
+    }
+
+    /**
+     * 按 id 更新 [TodoItem.reminder] 字段;新值为 null 时等价于"清除提醒"。
+     * id 不存在时 no-op。
+     */
+    fun setReminder(id: String, reminder: TodoReminder?) {
+        val list = state.items
+        val idx = list.indexOfFirst { it.id == id }
+        if (idx < 0) return
+        list[idx].reminder = reminder
+    }
+
     companion object {
         @JvmStatic
         fun getInstance(): TodoService {

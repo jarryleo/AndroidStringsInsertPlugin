@@ -160,6 +160,16 @@ internal fun InsertStringsContent(
     onDraftTodoPriorityChange: (TodoPriority) -> Unit,
     onSaveTodoEdit: (title: String, content: String, priority: TodoPriority) -> Boolean,
     onCancelTodoEdit: () -> Unit,
+    /**
+     * 「Save Reminder」按钮回调:把当前编辑草稿里的 reminder 字段单独写库(不动 title/content/priority)。
+     * nullable 入口 = 清除提醒。
+     */
+    onSaveTodoReminder: (cn.jarryleo.insert_strings.ai.TodoReminder?) -> Boolean,
+    /**
+     * 提醒相关 toast(由 InsertStringsUI.showToast 透传);用来给用户反馈
+     * 「已保存提醒 / 已清除提醒 / 已关闭提醒」。
+     */
+    onShowTodoToast: (String) -> Unit = {},
     // ===== Chat =====
     onChatInputChange: (String) -> Unit,
     onSendChat: () -> Unit,
@@ -286,6 +296,8 @@ internal fun InsertStringsContent(
                         onDraftPriorityChange = onDraftTodoPriorityChange,
                         onSaveEdit = onSaveTodoEdit,
                         onCancelEdit = onCancelTodoEdit,
+                        onSaveReminder = onSaveTodoReminder,
+                        onShowToast = onShowTodoToast,
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )

@@ -14,6 +14,8 @@ import cn.jarryleo.insert_strings.ai.AiRole
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.ai.TodoItem
 import cn.jarryleo.insert_strings.ai.TodoPriority
+import cn.jarryleo.insert_strings.ai.TodoReminder
+import cn.jarryleo.insert_strings.ai.TodoUiRefresher
 import cn.jarryleo.insert_strings.phrases.QuickPhrase
 import cn.jarryleo.insert_strings.sheets.SheetsManager
 import cn.jarryleo.insert_strings.xml.ContextManager
@@ -301,6 +303,8 @@ class InsertStringsUI(
                     onDraftTodoPriorityChange = { priority -> editingTodo = editingTodo?.copy(priority = priority) },
                     onSaveTodoEdit = todosController::saveEdit,
                     onCancelTodoEdit = todosController::cancelEdit,
+                    onSaveTodoReminder = todosController::saveReminder,
+                    onShowTodoToast = { message -> showToast(message) },
                     onChatInputChange = { chatInput = it },
                     onSendChat = chatDriver::sendChat,
                     onStopChat = chatDriver::stopChat,
@@ -353,7 +357,16 @@ class InsertStringsUI(
         // 3) 拉取默认表格的工作表列表
         settingsController.refreshSheetsList()
 
-        // 4) 注册 UI 回调,让 Manager 在数据更新时回调本类
+        // 4) 注册 UI ↔ TodoReminderScheduler 回调钩子,
+        //    让 scheduler 触发 reminder 后能刷新代办列表(闹钟图标 / 下次时间)。
+        //    用 runLater 保证在 EDT 上执行(UI 状态只允许 EDT 写)。
+        TodoUiRefresher.setRefresher {
+            javax.swing.SwingUtilities.invokeLater {
+                todosController.reloadTodos()
+            }
+        }
+
+        // 5) 注册 UI 回调,让 Manager 在数据更新时回调本类
         insertStringsManager.setUiCallBack(this)
     }
 

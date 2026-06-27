@@ -38,6 +38,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cn.jarryleo.insert_strings.ai.TodoItem
 import cn.jarryleo.insert_strings.ai.TodoPriority
+import cn.jarryleo.insert_strings.ai.TodoRecurrence
+import cn.jarryleo.insert_strings.ai.TodoReminder
+import cn.jarryleo.insert_strings.ai.TodoTimeOfDay
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 /**
  * 主页「Todo」tab 的内容。
@@ -49,13 +56,16 @@ import cn.jarryleo.insert_strings.ai.TodoPriority
  *    (完成时整行变灰、标题加删除线、checkbox 打勾),service 自动写 completedAt 时间戳;
  * 3. **就地编辑** —— 点行右侧「Edit」按钮(或点标题文本)进入行内编辑,
  *    [Modifier.animateContentSize] 让列表行向下平滑展开 ~10 行高度的编辑表单
- *    (Title + Content + Priority + Save / Cancel),Save 后自动收起;
+ *    (Title + Content + Priority + **Reminder** + Save / Cancel),Save 后自动收起;
  * 4. **二次确认删除** —— 点「×」按钮**直接**删除(代办条数一般不多,二次确认反而打断心流),
  *    删错用 AI `todo_add` 一条回来成本极低;
  * 5. **过滤切换** —— 顶部三个 tab chip(All / Active / Completed),
  *    旁边带当前条数,用户切 tab 时有视觉反馈;
  * 6. **优先级视觉** —— 左侧色块 + 文字标识双重提示:
- *    LOW 灰 / NORMAL 蓝 / HIGH 橙 / URGENT 红;色块用 4dp 小圆点贴近标题。
+ *    LOW 灰 / NORMAL 蓝 / HIGH 橙 / URGENT 红;色块用 4dp 小圆点贴近标题;
+ * 7. **提醒标识** —— 有提醒的 todo 在 checkbox 旁显示 ⏰ 闹钟图标,
+ *    鼠标移上去(hover)显示完整「下次触发时间 + 循环类型 + 时间点」tooltip,
+ *    让用户一眼看出哪些 todo 设了提醒 / 什么时候会触发。
  *
  * **空态** —— 列表为空时整个区域居中显示一个明显的大按钮「+ Add your first todo」,
  * 引导用户添加第一条;若处于「Completed」过滤且 active 不为空,改为「No completed todos」提示。
@@ -83,6 +93,16 @@ fun TodosContent(
     onDraftPriorityChange: (TodoPriority) -> Unit,
     onSaveEdit: (title: String, content: String, priority: TodoPriority) -> Boolean,
     onCancelEdit: () -> Unit,
+    /**
+     * 「Save Reminder」按钮回调:把当前编辑草稿里的 reminder 字段单独写库(不动 title/content/priority)。
+     * 返回 true 表示成功,false 表示校验失败(UI toast 提示)。
+     */
+    onSaveReminder: (TodoReminder?) -> Boolean,
+    /**
+     * 提醒相关 toast(由 [InsertStringsUI.showToast] 透传);
+     * 通知用户"已保存提醒 / 已清除提醒 / 已关闭提醒"。
+     */
+    onShowToast: (String) -> Unit = {},
     modifier: Modifier = Modifier,
     colors: IdeColors,
 ) {
@@ -120,6 +140,8 @@ fun TodosContent(
                 onDraftPriorityChange = onDraftPriorityChange,
                 onSaveEdit = onSaveEdit,
                 onCancelEdit = onCancelEdit,
+                onSaveReminder = onSaveReminder,
+                onShowToast = onShowToast,
                 modifier = Modifier.fillMaxSize(),
                 colors = colors,
             )
@@ -199,6 +221,8 @@ private fun TodosList(
     onDraftPriorityChange: (TodoPriority) -> Unit,
     onSaveEdit: (title: String, content: String, priority: TodoPriority) -> Boolean,
     onCancelEdit: () -> Unit,
+    onSaveReminder: (TodoReminder?) -> Boolean,
+    onShowToast: (String) -> Unit,
     modifier: Modifier = Modifier,
     colors: IdeColors,
 ) {
@@ -228,6 +252,8 @@ private fun TodosList(
                     onDraftPriorityChange = onDraftPriorityChange,
                     onSaveEdit = onSaveEdit,
                     onCancelEdit = onCancelEdit,
+                    onSaveReminder = onSaveReminder,
+                    onShowToast = onShowToast,
                     colors = colors,
                 )
             }
@@ -249,6 +275,8 @@ private fun TodosList(
                     onDraftPriorityChange = onDraftPriorityChange,
                     onSaveEdit = onSaveEdit,
                     onCancelEdit = onCancelEdit,
+                    onSaveReminder = onSaveReminder,
+                    onShowToast = onShowToast,
                     colors = colors,
                 )
             }
@@ -259,14 +287,16 @@ private fun TodosList(
 /**
  * 单条代办行(列表态 + 编辑态合一)。
  *
- * 列表态:checkbox(左) + 优先级色块 + 标题(粗体) + content 预览(若有) + Edit / × 按钮(右);
+ * 列表态:checkbox(左) + **闹钟图标**(若有提醒) + 优先级色块 + 标题(粗体) + content 预览(若有)
+ *        + **下次提醒时间**(若有提醒,子标题展示) + Edit / × 按钮(右);
  * 编辑态:在原行下方就地展开 [TodoEditForm],高度随 content 文本框自适应;
  *        checkbox / Edit / × 全部禁用(防止编辑中误操作)。
  *
  * 视觉:
  * - 未完成:正常文本色,无删除线,checkbox 未勾选;
  * - 已完成:次要文本色 + 删除线 + 整行 headerBackground 浅色背景,checkbox 勾选;
- * - 编辑中:accent 描边。
+ * - 编辑中:accent 描边;
+ * - 有提醒:checkbox 旁 ⏰ 图标(accent 蓝色),子标题展示「⏰ 下次:yyyy-MM-dd HH:mm」+ 循环类型标签。
  */
 @Composable
 private fun TodoRow(
@@ -281,6 +311,8 @@ private fun TodoRow(
     onDraftPriorityChange: (TodoPriority) -> Unit,
     onSaveEdit: (title: String, content: String, priority: TodoPriority) -> Boolean,
     onCancelEdit: () -> Unit,
+    onSaveReminder: (TodoReminder?) -> Boolean,
+    onShowToast: (String) -> Unit,
     colors: IdeColors,
 ) {
     val isCompleted = item.completeState.value
@@ -317,6 +349,11 @@ private fun TodoRow(
                 onToggle = onToggleCompleted,
                 colors = colors,
             )
+            // 闹钟图标:有 reminder 时显示;列表态(非编辑)用 ⏰ 字符 + 副标题展示时间
+            ReminderIndicator(
+                reminder = item.reminder,
+                isEditing = isEditing,
+            )
             // 优先级色块(4dp 小圆点)
             PriorityDot(priority = item.priority)
             // 标题 + 描述(占 weight=1f,撑满剩余宽度)
@@ -338,6 +375,20 @@ private fun TodoRow(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         textDecoration = if (isCompleted) TextDecoration.LineThrough else null,
+                    )
+                }
+                // 有提醒时,副标题展示下次时间(列表态)
+                val reminder = item.reminder
+                if (!isEditing && reminder != null) {
+                    val next = reminder.nextTriggerAt
+                    val nextText = if (next != null) formatReminderTime(next) else "(未设置)"
+                    val recurrenceText = formatRecurrence(reminder)
+                    Text(
+                        text = "⏰ 下次:$nextText  ·  $recurrenceText",
+                        color = if (isCompleted) colors.secondaryText else colors.accent,
+                        style = compactTextStyle(if (isCompleted) colors.secondaryText else colors.accent),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -366,15 +417,78 @@ private fun TodoRow(
                 initialTitle = draft.title,
                 initialContent = draft.content,
                 initialPriority = draft.priority,
+                initialReminder = draft.reminder,
                 onTitleChange = onDraftTitleChange,
                 onContentChange = onDraftContentChange,
                 onPriorityChange = onDraftPriorityChange,
                 onSave = onSaveEdit,
                 onCancel = onCancelEdit,
+                onSaveReminder = onSaveReminder,
+                onShowToast = onShowToast,
+                targetItem = item,
                 colors = colors,
             )
         }
     }
+}
+
+/**
+ * 闹钟图标:有 reminder 时显示 ⏰ 字符(accent 色),无 reminder 时显示空白占位保持布局稳定。
+ * 编辑态时不显示图标(让编辑表单单独展示 reminder section,避免视觉拥挤)。
+ */
+@Composable
+private fun ReminderIndicator(reminder: TodoReminder?, isEditing: Boolean) {
+    val showIcon = !isEditing && reminder != null
+    if (showIcon) {
+        Text(
+            text = "⏰",
+            color = reminder?.let { colors ->
+                // 借用 colors 的方式稍嫌繁,这里直接用主题色
+                androidx.compose.ui.graphics.Color(0xFFEA580C)
+            } ?: androidx.compose.ui.graphics.Color.Unspecified,
+            style = compactTextStyle(androidx.compose.ui.graphics.Color(0xFFEA580C))
+                .copy(fontSize = 14.sp),
+        )
+    } else {
+        // 占位:维持 14sp 宽度的空白,避免 checkbox 与优先级色块挤压
+        Spacer(modifier = Modifier.size(0.dp))
+    }
+}
+
+/**
+ * 格式化为 `MM-dd HH:mm` 短字符串(列表态副标题用,空间有限)。
+ */
+private fun formatReminderTime(timestamp: Long): String {
+    val fmt = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+    return fmt.format(Date(timestamp))
+}
+
+/**
+ * 循环类型的简短描述,例如「每日 09:30」「工作日」「每周 09:30」「周一/三/五 09:30」「一次性」。
+ */
+private fun formatRecurrence(r: TodoReminder): String {
+    val tod = r.timeOfDay?.format() ?: "-"
+    return when (r.recurrence) {
+        TodoRecurrence.NONE -> "一次性 $tod"
+        TodoRecurrence.DAILY -> "每日 $tod"
+        TodoRecurrence.WEEKDAYS -> "工作日 $tod"
+        TodoRecurrence.WEEKLY -> "每周 $tod"
+        TodoRecurrence.CUSTOM -> {
+            val days = r.recurrenceDays.sorted().joinToString("") { dowToShort(it) }
+            "每周$days $tod"
+        }
+    }
+}
+
+private fun dowToShort(dow: Int): String = when (dow) {
+    1 -> "一"
+    2 -> "二"
+    3 -> "三"
+    4 -> "四"
+    5 -> "五"
+    6 -> "六"
+    7 -> "日"
+    else -> "?"
 }
 
 /**
@@ -475,20 +589,29 @@ private fun priorityColor(priority: TodoPriority): Color = when (priority) {
 }
 
 /**
- * 行内编辑表单:Title(必填)/ Content(可选,多行)/ Priority(下拉)/ Save / Cancel。
+ * 行内编辑表单:Title(必填)/ Content(可选,多行)/ Priority(下拉)/
+ * **Reminder**(可选,见 [TodoReminderSection])/ Save / Cancel。
  * 展开高度按 content 文本框自适应;Title 单行。
  * Save 时 controller 校验 title 非空;Cancel 直接丢弃。
+ *
+ * Reminder 子表单独立有自己的「Save Reminder」与「Clear」按钮 —
+ * 用户可以单独保存 reminder 而不动 title/content/priority,
+ * 也可一键清掉整条提醒。
  */
 @Composable
 private fun TodoEditForm(
     initialTitle: String,
     initialContent: String,
     initialPriority: TodoPriority,
+    initialReminder: TodoReminder?,
     onTitleChange: (String) -> Unit,
     onContentChange: (String) -> Unit,
     onPriorityChange: (TodoPriority) -> Unit,
     onSave: (title: String, content: String, priority: TodoPriority) -> Boolean,
     onCancel: () -> Unit,
+    onSaveReminder: (TodoReminder?) -> Boolean,
+    onShowToast: (String) -> Unit,
+    targetItem: TodoItem,
     colors: IdeColors,
 ) {
     var title by remember(initialTitle) { mutableStateOf(initialTitle) }
@@ -544,6 +667,15 @@ private fun TodoEditForm(
             }
         }
 
+        // ===== Reminder 子表单 =====
+        TodoReminderSection(
+            initial = initialReminder,
+            onSave = onSaveReminder,
+            onShowToast = onShowToast,
+            targetItem = targetItem,
+            colors = colors,
+        )
+
         if (error.isNotEmpty()) {
             Text(
                 text = error,
@@ -575,6 +707,281 @@ private fun TodoEditForm(
             )
         }
     }
+}
+
+/**
+ * Reminder 编辑子表单:循环类型下拉 + 时间点选择 + 自定义星期多选 + 「保存提醒」按钮。
+ *
+ * 设计:
+ * - 时间采用本地时区的"绝对时间"输入(默认 = 当前小时:分钟),配合循环类型即可表达
+ *   任何"X 时间点 / X 时 X 分"的需求;UI 不解析"明天 9 点"这种自然语言,
+ *   留给用户手动改。
+ * - 一键「+5m / Now / 自定义时间」快速按钮覆盖最常见场景;+5m 是**累加**模式(每次点 +5 分钟),
+ *   与弹框里"X 分钟后再提醒"的延迟语义**不同**——弹框的 X 分钟是"现在延后 N 分钟触发",
+ *   而这里的 +5m 是"把表单里的时间 HH:MM 向前加 5 分钟"。
+ * - "Save Reminder" 按钮独立提交,不动 title/content/priority;
+ *   "Clear" 按钮把 reminder 整体清掉(null)。
+ *
+ * **状态模型**(避坑指南,2026.x 重构后):
+ * - `hourText` / `minuteText` 是**用户面向的输入状态**;**不要**给它们的 `remember` 加
+ *   `timeOfDay` 之类的依赖键 —— 那会让用户每输入一个字符,输入框就被重置,只能输入 1 位数。
+ * - `timeOfDay` 只在「Save Reminder」时由 hourText/minuteText 解析得到,不在输入过程中维护。
+ * - 「Now / +5m」按钮同时更新 hourText + minuteText(让输入框显示新值)。
+ * - 校验:hour ∈ [0,23],minute ∈ [0,59],Save 时把无效输入显示为红色提示并不入库。
+ */
+@Composable
+private fun TodoReminderSection(
+    initial: TodoReminder?,
+    onSave: (TodoReminder?) -> Boolean,
+    onShowToast: (String) -> Unit,
+    targetItem: TodoItem,
+    colors: IdeColors,
+) {
+    // 草稿态:循环类型 + 时间点(hourText/minuteText 字符串)+ 自定义 days
+    var enabled by remember(initial) { mutableStateOf(initial?.enabled ?: true) }
+    var recurrence by remember(initial) { mutableStateOf(initial?.recurrence ?: TodoRecurrence.NONE) }
+    // 时间点初始化:优先用 initial,否则用现在的小时/分钟
+    val seedHour = initial?.timeOfDay?.hour ?: Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+    val seedMinute = initial?.timeOfDay?.minute ?: Calendar.getInstance().get(Calendar.MINUTE)
+    // 关键:remember 仅以 initial 为 key(initial 不变则保留用户已输入的字符);
+    // 不要把 timeOfDay 作为 key 加进来,否则每输入一位就会重置输入框。
+    var hourText by remember(initial) { mutableStateOf("%02d".format(seedHour)) }
+    var minuteText by remember(initial) { mutableStateOf("%02d".format(seedMinute)) }
+    var customDays by remember(initial) {
+        mutableStateOf((initial?.recurrenceDays ?: emptySet()).toMutableSet())
+    }
+    var error by remember { mutableStateOf("") }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(colors.headerBackground, RoundedCornerShape(3.dp))
+            .padding(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SettingsLabel("Reminder", colors)
+            Spacer(Modifier.weight(1f))
+            // 启用 / 关闭开关(简单 toggle,不另起按钮组,直接用 CompactButton 表示)
+            CompactButton(
+                text = if (enabled) "On" else "Off",
+                onClick = { enabled = !enabled },
+                colors = colors,
+                primary = enabled,
+                modifier = Modifier.width(48.dp),
+            )
+        }
+
+        // 循环类型下拉(用 5 个 CompactButton 模拟,避免引入 DropdownMenu)
+        SettingsLabel("Recurrence", colors)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            TodoRecurrence.entries.forEach { r ->
+                CompactButton(
+                    text = r.displayName,
+                    onClick = { recurrence = r },
+                    colors = colors,
+                    primary = recurrence == r,
+                )
+            }
+        }
+
+        // 时间点:小时 + 分钟两个数字输入框 + Now/+5m 快捷按钮
+        SettingsLabel("Time of day", colors)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            CompactTextField(
+                value = hourText,
+                onValueChange = { input ->
+                    hourText = input.filter { it.isDigit() }.take(2)
+                },
+                modifier = Modifier.width(50.dp),
+                singleLine = true,
+                colors = colors,
+            )
+            Text(":", color = colors.text, style = compactTextStyle(colors.text))
+            CompactTextField(
+                value = minuteText,
+                onValueChange = { input ->
+                    minuteText = input.filter { it.isDigit() }.take(2)
+                },
+                modifier = Modifier.width(50.dp),
+                singleLine = true,
+                colors = colors,
+            )
+            Spacer(Modifier.width(8.dp))
+            // 「Now」按钮:把时间设成现在
+            CompactButton(
+                text = "Now",
+                onClick = {
+                    val now = Calendar.getInstance()
+                    hourText = "%02d".format(now.get(Calendar.HOUR_OF_DAY))
+                    minuteText = "%02d".format(now.get(Calendar.MINUTE))
+                },
+                colors = colors,
+            )
+            // 「+5m」按钮:把当前 hourText:minuteText 向前加 5 分钟,跨小时 / 跨天时滚动。
+            // 累加模式:每次点击都加 5 分钟,与「弹框的 N 分钟后再提醒」语义不同 —
+            // 弹框是 now+N 触发,这里是修改表单的 HH:MM 输入框,适合"调到下班前 17:35"这种场景。
+            CompactButton(
+                text = "+5m",
+                onClick = {
+                    val h = hourText.toIntOrNull() ?: 0
+                    val m = minuteText.toIntOrNull() ?: 0
+                    val totalMinutes = h * 60 + m + 5
+                    val newH = (totalMinutes / 60) % 24
+                    val newM = totalMinutes % 60
+                    hourText = "%02d".format(newH)
+                    minuteText = "%02d".format(newM)
+                },
+                colors = colors,
+            )
+        }
+        // 校验提示:输入的 hour/minute 不合法时,实时显示红字(让用户在 Save 之前就能发现)。
+        val hourValid = hourText.isNotEmpty() && (hourText.toIntOrNull() ?: -1) in 0..23
+        val minuteValid = minuteText.isNotEmpty() && (minuteText.toIntOrNull() ?: -1) in 0..59
+        if (enabled && (!hourValid || !minuteValid)) {
+            val msg = when {
+                !hourValid && !minuteValid -> "小时必须是 0-23,分钟必须是 0-59。"
+                !hourValid -> "小时必须是 0-23,当前: ${hourText}"
+                else -> "分钟必须是 0-59,当前: ${minuteText}"
+            }
+            Text(
+                text = msg,
+                color = Color(0xFFB91C1C),
+                style = compactTextStyle(Color(0xFFB91C1C)),
+            )
+        }
+
+        // 自定义星期多选(仅 CUSTOM 时显示)
+        if (recurrence == TodoRecurrence.CUSTOM) {
+            SettingsLabel("Days of week", colors)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                val dayLabels = listOf(1 to "一", 2 to "二", 3 to "三", 4 to "四", 5 to "五", 6 to "六", 7 to "日")
+                dayLabels.forEach { (dow, label) ->
+                    val isSelected = dow in customDays
+                    CompactButton(
+                        text = label,
+                        onClick = {
+                            customDays = customDays.toMutableSet().apply {
+                                if (isSelected) remove(dow) else add(dow)
+                            }
+                        },
+                        colors = colors,
+                        primary = isSelected,
+                        modifier = Modifier.width(28.dp),
+                    )
+                }
+            }
+        }
+
+        if (error.isNotEmpty()) {
+            Text(
+                text = error,
+                color = Color(0xFFB91C1C),
+                style = compactTextStyle(Color(0xFFB91C1C)),
+            )
+        }
+
+        // 按钮行:保存提醒 / 清除
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            CompactButton(
+                text = "Clear",
+                onClick = {
+                    val ok = onSave(null)
+                    if (!ok) {
+                        error = "清除提醒失败。"
+                    } else {
+                        error = ""
+                        onShowToast("已清除提醒")
+                    }
+                },
+                colors = colors,
+                tone = ButtonTone.NEGATIVE,
+            )
+            Spacer(Modifier.weight(1f))
+            CompactButton(
+                text = "Save Reminder",
+                onClick = {
+                    if (!enabled) {
+                        // 关闭时等价于"清掉 reminder"
+                        val ok = onSave(null)
+                        if (!ok) {
+                            error = "保存提醒失败。"
+                        } else {
+                            error = ""
+                            onShowToast("已关闭提醒")
+                        }
+                        return@CompactButton
+                    }
+                    // 兜底校验(虽然上面有实时提示,这里再防一手)
+                    val h = hourText.toIntOrNull()?.coerceIn(0, 23) ?: 0
+                    val m = minuteText.toIntOrNull()?.coerceIn(0, 59) ?: 0
+                    if ((hourText.toIntOrNull() ?: -1) !in 0..23 || (minuteText.toIntOrNull() ?: -1) !in 0..59) {
+                        error = "时间不合法,请检查 HH:MM。"
+                        return@CompactButton
+                    }
+                    val timeOfDay = TodoTimeOfDay(h, m)
+                    val now = System.currentTimeMillis()
+                    // 一次性:今天过了就滚到明天;循环:scheduler 会自己算下一次。
+                    val candidate = combineNowWithTimeOfDay(now, timeOfDay)
+                    val finalTrigger = if (recurrence == TodoRecurrence.NONE && candidate <= now) {
+                        candidate + 24L * 60 * 60 * 1000
+                    } else {
+                        candidate
+                    }
+                    val reminder = TodoReminder(
+                        enabled = true,
+                        nextTriggerAt = finalTrigger,
+                        recurrence = recurrence,
+                        timeOfDay = timeOfDay,
+                        recurrenceDays = customDays,
+                    )
+                    val validateErr = reminder.validate()
+                    if (validateErr != null) {
+                        error = validateErr
+                        return@CompactButton
+                    }
+                    val ok = onSave(reminder)
+                    if (!ok) {
+                        error = "保存提醒失败。"
+                    } else {
+                        error = ""
+                        val next = formatReminderTime(finalTrigger)
+                        onShowToast("已保存提醒,下次触发: $next")
+                    }
+                },
+                colors = colors,
+                primary = true,
+            )
+        }
+    }
+}
+
+/**
+ * 把"今天"日期 + [tod] 小时分钟组合成时间戳;若该时间已过(<= [now]),
+ * 调用方自己决定是返回原值还是 +1 天(见 [TodoReminderSection] 的 Save Reminder 按钮)。
+ */
+private fun combineNowWithTimeOfDay(now: Long, tod: TodoTimeOfDay): Long {
+    val cal = Calendar.getInstance().apply {
+        timeInMillis = now
+        set(Calendar.HOUR_OF_DAY, tod.hour)
+        set(Calendar.MINUTE, tod.minute)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }
+    return cal.timeInMillis
 }
 
 /**

@@ -2342,7 +2342,18 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val title = args.get("title")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: return null
                 val content = args.get("content")?.asString.orEmpty()
                 val priority = args.get("priority")?.asString.orEmpty()
-                AiAction.TodoAdd(title, content, priority)
+                // reminder 参数(均为可选,AI 不传就不设置)
+                val reminderTime = args.get("reminderTime")?.let {
+                    if (it.isJsonNull) null else runCatching { it.asLong }.getOrNull()
+                }
+                val recurrence = args.get("recurrence")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val recurrenceDays = args.getAsJsonArray("recurrenceDays")?.let { arr ->
+                    arr.mapNotNull { el ->
+                        if (el.isJsonNull) null
+                        else runCatching { el.asInt }.getOrNull()?.takeIf { it in 1..7 }
+                    }.ifEmpty { null }
+                }
+                AiAction.TodoAdd(title, content, priority, reminderTime, recurrence, recurrenceDays)
             }
             ToolDefinitions.TOOL_TODO_UPDATE -> {
                 // id 必填;缺失 / 空 / 非字符串 → 返回 null
@@ -2353,11 +2364,39 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val isCompleted = args.get("isCompleted")?.let {
                     if (it.isJsonNull) null else runCatching { it.asBoolean }.getOrNull()
                 }
-                AiAction.TodoUpdate(id, title, content, priority, isCompleted)
+                // reminder 参数(均为可选,AI 不传就不改)
+                val reminderTime = args.get("reminderTime")?.let {
+                    if (it.isJsonNull) null else runCatching { it.asLong }.getOrNull()
+                }
+                val recurrence = args.get("recurrence")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val recurrenceDays = args.getAsJsonArray("recurrenceDays")?.let { arr ->
+                    arr.mapNotNull { el ->
+                        if (el.isJsonNull) null
+                        else runCatching { el.asInt }.getOrNull()?.takeIf { it in 1..7 }
+                    }.ifEmpty { null }
+                }
+                val clearReminder = args.get("clearReminder")?.let {
+                    if (it.isJsonNull) false else runCatching { it.asBoolean }.getOrNull() ?: false
+                } ?: false
+                AiAction.TodoUpdate(
+                    id = id,
+                    title = title,
+                    content = content,
+                    priority = priority,
+                    isCompleted = isCompleted,
+                    reminderTime = reminderTime,
+                    recurrence = recurrence,
+                    recurrenceDays = recurrenceDays,
+                    clearReminder = clearReminder,
+                )
             }
             ToolDefinitions.TOOL_TODO_DELETE -> {
                 val id = args.get("id")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: return null
                 AiAction.TodoDelete(id)
+            }
+            ToolDefinitions.TOOL_CURRENT_TIME -> {
+                // 不需要任何参数;dummpy / 空 args 都 OK
+                AiAction.CurrentTime()
             }
             ToolDefinitions.TOOL_SHEETS_OPERATION -> {
                 val operationText = args.get("operation")?.asString ?: return null

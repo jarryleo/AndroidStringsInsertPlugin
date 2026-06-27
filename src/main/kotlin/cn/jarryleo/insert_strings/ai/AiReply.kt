@@ -134,6 +134,23 @@ sealed class AiAction {
     ) : AiAction()
 
     /**
+     * 获取「当前时间」(2026.x 新增)。
+     *
+     * 用途:让 AI 在需要把"5 分钟后" / "明天下午 3 点" / "下周一 9 点" 等相对或自然语言时间
+     * 翻译成 unix 毫秒时间戳时,拿到一个**新鲜的**当前时间。
+     *
+     * 为什么不只用 context 里的 `now`:
+     * - context 里的 `now` 是发送 user 消息那一刻的时间;
+     *   如果 tool loop 跑了几秒甚至几十秒(慢 AI / 重试 / 流式响应),`now` 就过时了。
+     * - 这个工具每次调用都返回最新的 `System.currentTimeMillis()`,无任何副作用。
+     *
+     * 不需要任何参数;返回的内容等价于 context 里的 `now` 字段。
+     */
+    data class CurrentTime(
+        val dummy: String? = null
+    ) : AiAction()
+
+    /**
      * 读取代办列表(主动发现 AI 上下文里没有的待办 / 提醒用户 / 在决策前查状态用)。
      *
      * 与 chat context 里注入的 `todos.active` 摘要的区别:
@@ -155,11 +172,24 @@ sealed class AiAction {
      * @param title    必填,代办的标题(trim 后非空);空时 driver 拒绝并返回错误 tool_result。
      * @param content  可选,详细描述(允许为空)。
      * @param priority 可选,优先级;为空时回退 NORMAL。容错大小写、空格、未知值。
+     * @param reminderTime   可选,首次提醒时间(unix 毫秒时间戳);null = 不设置提醒。
+     *                        AI 转换「5 分钟后」「明天下午 3 点」时,自己算好时间戳再传。
+     *                        一次性提醒时 = 触发时间;循环提醒时 = 首次触发时间,
+     *                        后续按 [recurrence] 滚动。
+     * @param recurrence     可选,循环类型(NONE/DAILY/WEEKDAYS/WEEKLY/CUSTOM);null/未知 = NONE。
+     *                        NONE 时,触发后自动清除提醒;
+     *                        DAILY/WEEKDAYS/WEEKLY/CUSTOM 时,触发后滚动到下一次。
+     * @param recurrenceDays 可选,自定义循环的星期几(1=周一,...,7=周日);
+     *                        仅 [recurrence] = CUSTOM 时使用,其它类型忽略。
+     *                        AI 转换「每周一三五」时传 [1, 3, 5]。
      */
     data class TodoAdd(
         val title: String,
         val content: String,
-        val priority: String
+        val priority: String,
+        val reminderTime: Long? = null,
+        val recurrence: String? = null,
+        val recurrenceDays: List<Int>? = null,
     ) : AiAction()
 
     /**
@@ -174,13 +204,23 @@ sealed class AiAction {
      * @param content     新描述(null = 不改;空串 = 清空描述)。
      * @param priority    新优先级(null = 不改;大小写不敏感 / 未知回退 NORMAL)。
      * @param isCompleted 新完成状态(null = 不改;true / false 直接赋值)。
+     * @param reminderTime   提醒时间(同 [TodoAdd.reminderTime]);null = 不改;
+     *                        配合 [clearReminder]=true 可实现「清除提醒」语义(此时 reminderTime/recurrence 等被忽略)。
+     * @param recurrence     循环类型(同 [TodoAdd.recurrence]);null = 不改。
+     * @param recurrenceDays 自定义循环的星期几(同 [TodoAdd.recurrenceDays]);null = 不改。
+     * @param clearReminder  设为 true 时清除整条提醒(等价于把 TodoItem.reminder 置 null),
+     *                       即便 reminderTime/recurrence 也同时传了也以 clearReminder 优先。
      */
     data class TodoUpdate(
         val id: String,
         val title: String?,
         val content: String?,
         val priority: String?,
-        val isCompleted: Boolean?
+        val isCompleted: Boolean?,
+        val reminderTime: Long? = null,
+        val recurrence: String? = null,
+        val recurrenceDays: List<Int>? = null,
+        val clearReminder: Boolean = false,
     ) : AiAction()
 
     /**
