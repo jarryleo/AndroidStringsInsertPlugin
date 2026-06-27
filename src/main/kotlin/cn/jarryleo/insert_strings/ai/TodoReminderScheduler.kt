@@ -213,32 +213,53 @@ class TodoReminderScheduler : Disposable {
     }
 
     /**
-     * 把 AI 回复的文本用 IDE 通知气泡展示在右下角。
+     * 把 AI 回复的文本用 IDE 通知气泡展示在右下角(2026.x 修复版)。
      *
      * 使用 `NotificationGroupManager` 获取在 [plugin.xml] 注册的 `InsertStrings Todo Reminders` 组,
      * 通知类型 [NotificationType.INFORMATION] → 用户看到的是非侵入的蓝色提示气泡。
+     *
+     * **关键修复**(2026.x):之前在 group 找不到时只是 log 一行就 return,用户看不到任何反馈。
+     * 现在 fallback 三道防线:
+     * 1. 先尝试 [NotificationGroupManager] 拿注册的 group;
+     * 2. 拿不到就退到 [com.intellij.notification.Notifications.Bus] 兜底发送(老 API 但更稳);
+     * 3. 空 AI 回复显示"该处理一下啦~"占位文案,保证气泡一定能看到。
      *
      * project 选择:从 [ProjectManager] 取当前打开的项目(application-level 通知不需要特定 project,
      * 但 `Notification.notify(Project)` 签名要求非 null,传 defaultProject 是最稳的选择)。
      */
     private fun showReminderBalloon(item: TodoItem, aiResponse: String) {
+        val titleText = "⏰ ${item.title.ifBlank { "待办提醒" }}"
+        // AI 没回复时给个兜底文案,避免空气泡;用户仍能看到"提醒到了"这个事实
+        val content = aiResponse.ifBlank { "该处理一下啦~" }
         try {
             val group = NotificationGroupManager.getInstance()
                 .getNotificationGroup("InsertStrings Todo Reminders")
-                ?: run {
-                    log.warn("TodoReminderScheduler: notification group not found")
-                    return
+            if (group != null) {
+                val notification = group.createNotification(
+                    titleText,
+                    content,
+                    NotificationType.INFORMATION
+                )
+                val project = ProjectManager.getInstance().openProjects.firstOrNull()
+                    ?: ProjectManager.getInstance().defaultProject
+                notification.notify(project)
+            } else {
+                // 兜底:group 拿不到时(注册失败/被禁用),用 Notifications.Bus 直发
+                // —— 不会到 Event Log,但至少能在右下角弹一个一次性 balloon
+                log.warn("TodoReminderScheduler: notification group 'InsertStrings Todo Reminders' not found, fallback to Notifications.Bus")
+                val notification = com.intellij.notification.Notification(
+                    "InsertStrings Todo Reminders",
+                    titleText,
+                    content,
+                    NotificationType.INFORMATION
+                )
+                val project = ProjectManager.getInstance().openProjects.firstOrNull()
+                if (project != null) {
+                    notification.notify(project)
+                } else {
+                    com.intellij.notification.Notifications.Bus.notify(notification)
                 }
-            val titleText = "⏰ ${item.title.ifBlank { "待办提醒" }}"
-            val notification = group.createNotification(
-                titleText,
-                aiResponse,
-                NotificationType.INFORMATION
-            )
-            // 取当前打开的项目(应用级通知对 project 不敏感,但 API 要求非 null)
-            val project = ProjectManager.getInstance().openProjects.firstOrNull()
-                ?: ProjectManager.getInstance().defaultProject
-            notification.notify(project)
+            }
         } catch (e: Throwable) {
             log.warn("TodoReminderScheduler: failed to show balloon", e)
         }

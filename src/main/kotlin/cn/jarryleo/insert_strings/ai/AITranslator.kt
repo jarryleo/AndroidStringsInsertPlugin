@@ -75,6 +75,19 @@ data class ChatMessage(
      * 不参与 AI 协议序列化,仅 UI 渲染使用。
      */
     val askQuestion: String? = null,
+    /**
+     * 是否在聊天 UI 上隐藏本条消息(2026.x 新增)。
+     *
+     * 与 [protocolVisible] 的区别:
+     * - [protocolVisible] 控制是否发回 AI(协议历史);
+     * - [hidden]      控制是否在 UI 聊天列表里显示这条气泡。
+     *
+     * 用途:「自动触发 - 代办提醒」流程时,scheduler 把"提醒 X 已触发"作为 user
+     * 消息发进来,AI 生成的回复会用 IDE 通知气泡展示,**不污染用户的 chat tab**。
+     * 这两条消息的 [protocolVisible] 仍是 true(AI 需要看到上下文),
+     * 但 [hidden] = true 让 UI 直接跳过它们。
+     */
+    val hidden: Boolean = false,
 )
 
 object AITranslator {

@@ -400,12 +400,22 @@ private sealed class ChatRenderItem {
  * UI-only grouping: adjacent tool_result messages are stacked into one visual bubble.
  * The underlying [chatMessages] list stays unchanged so function-calling protocol
  * pairing remains intact.
+ *
+ * **隐藏过滤**(2026.x 新增):[ChatMessage.hidden] = true 的消息直接从渲染列表中剔除。
+ * 典型场景是「自动触发 - 代办提醒」流程——scheduler 发起的 system message + AI 的回复
+ * + 中间 tool 消息都标 hidden,UI 完全不显示,但 AI 协议历史里仍然存在(供后续对话参考)。
  */
 private fun buildChatRenderItems(chatMessages: List<ChatMessage>): List<ChatRenderItem> {
     val items = mutableListOf<ChatRenderItem>()
+    // 原始下标 → 渲染下标的映射,用于 ChatRenderItem 内部引用源消息数组的位置
     var i = 0
     while (i < chatMessages.size) {
         val msg = chatMessages[i]
+        // 隐藏消息整体跳过(包括后续紧跟的 tool 消息,直到下一个非隐藏的 assistant)
+        if (msg.hidden) {
+            i++
+            continue
+        }
         if (msg.role != "tool") {
             items += ChatRenderItem.Message(i, msg)
             i++
@@ -414,13 +424,18 @@ private fun buildChatRenderItems(chatMessages: List<ChatMessage>): List<ChatRend
 
         val start = i
         val group = mutableListOf<ChatMessage>()
-        while (i < chatMessages.size && chatMessages[i].role == "tool") {
+        while (i < chatMessages.size && chatMessages[i].role == "tool" && !chatMessages[i].hidden) {
             group += chatMessages[i]
             i++
         }
+        // 如果这个 tool 组前面是一个 hidden 消息,整个 tool 组都不该展示(它属于 hidden 上下文)
+        if (group.isEmpty()) {
+            i++
+            continue
+        }
         val prev = chatMessages.getOrNull(start - 1)
         val toolCallsById = prev
-            ?.takeIf { it.role == "assistant" }
+            ?.takeIf { it.role == "assistant" && !it.hidden }
             ?.toolCalls
             ?.associateBy { it.id }
             .orEmpty()

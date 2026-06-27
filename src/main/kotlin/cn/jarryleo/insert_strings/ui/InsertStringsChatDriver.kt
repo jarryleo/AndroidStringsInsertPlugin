@@ -99,10 +99,16 @@ internal class InsertStringsChatDriver(
      * scheduler 把"提醒 X 已触发"作为 system message 发到这里,让 AI 生成简短友好的回复文本,
      * 回复会通过 [onResponse] 回调出去,scheduler 用 IDE 通知气泡展示。
      *
+     * **不污染 chat tab**(2026.x 修复):系统消息 + AI 回复 + 中间所有 tool 消息都会标记
+     * [ChatMessage.hidden] = true,UI 渲染时直接跳过它们。
+     * 但它们的 [ChatMessage.protocolVisible] 仍是 true,所以这些消息仍然在 AI 的协议
+     * 历史里 —— 后续对话中 AI 能看到「这次提醒触发了什么」,上下文不丢。
+     *
      * **不修改 UI 状态**:不会清空 chat input、不会触发 toast 之类的副作用,
      * 也不打断用户当前的对话(如果用户同时在 chat tab 打字,AI 会串行处理)。
      *
-     * **超时**:30 秒无回复则自动放弃(防止 AI 卡死时永远等)。
+     * **超时**:60 秒无回复则自动放弃(防止 AI 卡死时永远等),空回复时也会回传
+     * "「AI 未回复」"占位文本,scheduler 不会因此静默失败。
      *
      * @param systemMessage 完整的系统消息文本(会作为 user 消息加入 chat,带 [自动触发] 前缀便于用户在 chat tab 识别)
      * @param onResponse AI 回复到后被调用,参数是 assistant 消息拼接后的纯文本;在 EDT 上调用。
@@ -128,7 +134,11 @@ internal class InsertStringsChatDriver(
         val messageCountBefore = state.chatMessages.size
         // 用 [自动触发] 前缀让用户在 chat tab 能一眼看出这是系统消息(非用户输入)
         val tagged = "[自动触发 - 代办提醒] $systemMessage"
-        state.chatMessages.add(ChatMessage(role = "user", content = tagged))
+        // 关键:hidden = true —— 整条消息从 chat tab UI 里隐藏,但 protocolVisible = true
+        // 保留让它进 AI 协议历史,AI 仍能在后续回合中看到这个上下文。
+        state.chatMessages.add(
+            ChatMessage(role = "user", content = tagged, hidden = true)
+        )
         state.toolDocLoadCount = 0
         state.askUserCallCount = 0
         state.stopRequested = false
@@ -136,8 +146,8 @@ internal class InsertStringsChatDriver(
         continueChatWithAi()
 
         // 后台线程等待 AI 完成。AI 可能调 tool,所以"完成"的标志是 chatSending=false
-        // (tool loop 自然结束)或超时(30s)。
-        val timeoutMs = 30_000L
+        // (tool loop 自然结束)或超时(60s)。
+        val timeoutMs = 60_000L
         val pollMs = 100L
         Thread({
             try {
@@ -150,26 +160,37 @@ internal class InsertStringsChatDriver(
                         return@Thread
                     }
                 }
-                // 收集"自系统消息之后"的新 assistant 回复
-                val newMessages = try {
-                    state.chatMessages.subList(messageCountBefore, state.chatMessages.size)
-                } catch (e: Exception) {
-                    emptyList()
+                // 收集"自系统消息之后"的新消息(包括 user 触发、assistant 回复、tool 消息等)
+                val newIndices = (messageCountBefore until state.chatMessages.size).toList()
+                val newMessages = newIndices.mapNotNull { idx ->
+                    state.chatMessages.getOrNull(idx)
                 }
+                // 提取最后一条非空 assistant 消息作为 AI 回复(覆盖中间流式占位空消息)
                 val responseText = newMessages
                     .filter { it.role == "assistant" }
-                    .map { it.content.trim() }
-                    .filter { it.isNotEmpty() }
-                    .joinToString("\n\n")
-                // 切回 EDT 回调
+                    .lastOrNull { it.content.isNotBlank() }
+                    ?.content
+                    ?.trim()
+                    .orEmpty()
+                // 关键:把这次"自动触发"产生的所有消息标记为 hidden,从 chat tab UI 里彻底隐藏
+                // —— 留下 AI 协议历史(protocolVisible 仍 true)但 UI 不显示,符合"气泡展示,chat 不污染"诉求。
                 SwingUtilities.invokeLater {
-                    if (responseText.isNotEmpty()) {
-                        onResponse(responseText)
+                    newIndices.forEach { idx ->
+                        if (idx < state.chatMessages.size) {
+                            val cur = state.chatMessages[idx]
+                            if (!cur.hidden) {
+                                state.chatMessages[idx] = cur.copy(hidden = true)
+                            }
+                        }
                     }
-                    // 空回复(超时 / AI 没说话)时不调,避免气泡里显示空内容
+                    // 总是回调一次(即使是空文本),scheduler 可以显示"AI 未回复"占位气泡
+                    onResponse(responseText)
                 }
             } catch (e: Throwable) {
                 // 兜底:任何异常都不影响主流程,scheduler 仍能继续工作
+                SwingUtilities.invokeLater {
+                    onResponse("")
+                }
             }
         }, "TodoAiResponder-awaits").apply { isDaemon = true }.start()
     }
