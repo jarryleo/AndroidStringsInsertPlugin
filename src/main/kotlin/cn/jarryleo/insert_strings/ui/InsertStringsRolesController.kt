@@ -2,6 +2,7 @@ package cn.jarryleo.insert_strings.ui
 
 import cn.jarryleo.insert_strings.ai.AiRole
 import cn.jarryleo.insert_strings.ai.AiRolesService
+import cn.jarryleo.insert_strings.ai.DefaultRoles
 
 /**
  * AI 角色预设的 CRUD 协调器。
@@ -24,9 +25,18 @@ internal class InsertStringsRolesController(
     /**
      * 从服务加载全部角色到 UI。
      * 在 tool window 打开时调用一次,只读,不做迁移。
+     *
+     * 首次安装(老 state 升级也算)且从未安装过默认角色时,会写入 2 个占位角色
+     * (猫娘 / 小秘,prompt 为空,isEnabled = false),由 [AiRolesService] 内部用
+     * `defaultsInstalled` flag 保证只写一次 ——
+     * 这样用户在设置面板手动「全部删除」后,再次打开 tool window 不会被反复复活。
      */
     fun loadRoles() {
-        val list = AiRolesService.getInstance().list()
+        val service = AiRolesService.getInstance()
+        // 首次(或老 state 升级)安装默认占位角色。
+        // 内部用 defaultsInstalled flag 去重,no-op 安全。
+        service.installDefaultsIfNeeded(DefaultRoles.build())
+        val list = service.list()
         ui.aiRoles.clear()
         ui.aiRoles.addAll(list)
     }

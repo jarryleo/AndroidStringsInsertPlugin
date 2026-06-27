@@ -4,6 +4,7 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
+import java.util.UUID
 
 /**
  * 持久化层 bean。IntelliJ 的 [PersistentStateComponent] 通过反射读写 bean 属性,
@@ -11,6 +12,20 @@ import com.intellij.openapi.components.Storage
  */
 class AiRolesState {
     var roles: MutableList<AiRole> = mutableListOf()
+    /**
+     * 是否已经完成首次默认角色安装(由 [cn.jarryleo.insert_strings.ui.InsertStringsRolesController.loadRoles]
+     * 在第一次发现 [roles] 为空时写入默认占位角色后置为 true)。
+     *
+     * 用途:与 [cn.jarryleo.insert_strings.phrases.QuickPhrasesService] 不同,
+     * 角色列表允许用户主动「全部删除」,此时**不应该**再复活默认角色(尊重用户选择)。
+     * 没有这个 flag 的话,只要 [roles] 为空就重装,会反复把用户删掉的内置角色塞回来。
+     *
+     * 老数据迁移:对没有该字段的历史 state,反序列化后默认为 false,
+     * 首次 loadRoles 仍会安装默认角色,之后置 true;如果用户已经手动清空过列表,
+     * 老 state 的 `roles` 也是空,会触发一次「重装默认」,这是可接受的迁移行为
+     * (相当于给未配置的用户补上入口)。
+     */
+    var defaultsInstalled: Boolean = false
 }
 
 /**
@@ -52,6 +67,12 @@ class AiRolesService : PersistentStateComponent<AiRolesState> {
     fun list(): List<AiRole> = state.roles.toList()
 
     /**
+     * 是否已经完成过首次默认角色安装。
+     * 控制器在 loadRoles 时用此判断是否要写入占位默认角色,避免用户主动清空后被反复复活。
+     */
+    fun isDefaultsInstalled(): Boolean = state.defaultsInstalled
+
+    /**
      * 当前已启用的角色(没有则 null)。AI 聊天时由 [cn.jarryleo.insert_strings.ai.AITranslator] 读取,
      * 把 [AiRole.prompt] 注入到 system 消息。
      */
@@ -82,6 +103,27 @@ class AiRolesService : PersistentStateComponent<AiRolesState> {
      */
     fun delete(id: String) {
         state.roles.removeAll { it.id == id }
+    }
+
+    /**
+     * 首次安装默认角色占位(猫娘 / 小秘)。
+     * - 仅在 [AiRolesState.defaultsInstalled] = false 时写入,并把该 flag 置 true;
+     * - 已安装过时为 no-op,避免用户清空列表后被反复复活;
+     * - 写入的默认 role 全部 isEnabled = false(等用户填写 prompt 后再手动启用);
+     * - 写入后立即落盘,下次 loadRoles 不会再触发安装。
+     *
+     * 由 [cn.jarryleo.insert_strings.ui.InsertStringsRolesController.loadRoles] 在首次
+     * (或老 state 升级)时调用。
+     */
+    fun installDefaultsIfNeeded(defaults: List<AiRole>) {
+        if (state.defaultsInstalled) return
+        defaults.forEach { role ->
+            // 防御性:每个默认 role 重新分配 id,避免多次 installDefaultsIfNeeded 之间
+            // 出现 id 冲突(理论上不会,但 UUID 重生成成本低,稳一点)。
+            if (role.id.isBlank()) role.id = UUID.randomUUID().toString()
+            state.roles.add(role)
+        }
+        state.defaultsInstalled = true
     }
 
     /**
