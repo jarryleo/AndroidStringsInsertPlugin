@@ -180,12 +180,19 @@ object AITranslator {
 ## 代办
 - 系统已经在每轮 chat 上下文中注入了 `todos.active` 字段(active 代办前 20 条,按 priority + createdAt 排序);
   看到这些条目**就足够做出简单提醒**(例如「你有 3 项待办,其中 1 项是 URGENT 优先级」)。
-- 需要精确字段(content / completedAt 等)或查看已完成列表 → 调 `todo_list(filter=...)`。
+- 需要精确字段(content / completedAt / reminder)或查看已完成列表 → 调 `todo_list(filter=...)`。
 - **写操作**:
   - 用户说「提醒我 X」「记下要 Y」→ 调 `todo_add(title=..., priority=...)`,title 必填,priority 不传默认 NORMAL。
+  - 用户说「5 分钟后提醒我喝水」/「明天下午 3 点开周会」→ 涉及**绝对时间**必须先调 `current_time` 拿 timestamp,
+    再用 `todo_add(title=..., reminderTime=<时间戳>, recurrence=...)` 写提醒;`recurrence` 不传默认 NONE(一次性)。
+  - 用户说「每周一三五提醒开会」/「每天早上 9 点提醒 X」→ `recurrence="CUSTOM"` 配合 `recurrenceDays=[1,3,5]`,
+    或 `recurrence="DAILY"` / `"WEEKDAYS"` / `"WEEKLY"`。
   - 用户说「把 X 标为完成」→ 先 `todo_list` 拿 id,再 `todo_update(id=..., isCompleted=true)`(系统自动写 completedAt)。
-  - 用户说「把 X 改成 URGENT」/「X 不用了取消」→ `todo_update(id=..., priority=...)` / `(isCompleted=false)`。
-  - 用户说「删掉 X」→ `todo_list` 拿 id,再 `todo_delete(id=...)`(不可恢复,谨慎)。
+  - 用户说「把 X 改成 URGENT」/「X 不用了取消」/「X 改到 6 点提醒」/「X 改成每天 9 点」/
+    「X 改成每周一三五」/「X 的提醒删了」→ 全部走 `todo_update(id=..., <字段>=...)`,按需传
+    `priority` / `isCompleted` / `reminderTime` / `recurrence` / `recurrenceDays` / `clearReminder`。
+    只删提醒不删代办用 `clearReminder=true`。
+  - 用户说「删掉 X」→ `todo_list` 拿 id,再 `todo_delete(id=...)`(不可恢复,谨慎;若该代办带提醒,会一并清除)。
 - **主动提醒**:用户问「我有什么待办」「都做完了吗」「有重要的事吗」时,先 `todo_list(filter=active)` 拿完整数据,再按 priority 分类回答;
   对 URGENT 级别的事项应主动强调,**这是用户期待 AI 帮 ta 盯住的事**。
 - **不要**在用户没要求时主动 add / update / delete(尤其 delete)—— 代办是用户的私人清单,误改代价高。
@@ -936,18 +943,39 @@ object AITranslator {
         // ============== 代办(2026.x 新增) ==============
         "todo_list" to """
             ## todo_list 详细用法
-            读取代办列表,返回每条的 id / title / content / priority / isCompleted / createdAt / completedAt。
+            读取代办列表,返回每条的 id / title / content / priority / isCompleted / createdAt / completedAt / reminder。
             字段:
             - filter(可选,默认 "active"):过滤模式,枚举 "active" / "completed" / "all"。
             - limit(可选,默认 50):最大返回条数;不传或 null 时取 50。
-            返回:JSON 数组,每条形如 `{"id":"uuid","title":"...","content":"...","priority":"NORMAL","isCompleted":false,"createdAt":1700000000000,"completedAt":null}`。
+            返回:JSON 数组,每条形如:
+            ```
+            {
+              "id":"uuid",
+              "title":"...",
+              "content":"...",
+              "priority":"NORMAL",
+              "isCompleted":false,
+              "createdAt":1700000000000,
+              "completedAt":null,
+              "reminder": null
+              // 或有提醒时:
+              // "reminder": {
+              //   "enabled": true,
+              //   "nextTriggerAt": 1700003600000,    // 下一次触发的绝对时间戳(毫秒)
+              //   "recurrence": "DAILY",              // NONE/DAILY/WEEKDAYS/WEEKLY/CUSTOM
+              //   "timeOfDay": {"hour":15,"minute":0},// 一天中的固定时分(循环提醒用)
+              //   "recurrenceDays": []                 // 1-7 表示周一到周日,仅 CUSTOM 生效
+              // }
+            }
+            ```
             典型场景:
             - 用户说「我有什么代办」/「看看我之前记了什么」→ filter=active 或 all。
             - 用户说「我都完成了什么」→ filter=completed。
+            - 用户问「X 是不是已经有提醒了?几点提醒?」→ filter=active 拿到 reminder 字段。
             - 想「勾选完成」前先 todo_list 拿 id,再用 todo_update(id=..., isCompleted=true)。
             注意:
             - 系统已经在每轮 chat 上下文中注入了 active 代办的简要摘要(便于你主动提醒用户),
-              本工具用于拿到完整字段(content / completedAt 等)。
+              本工具用于拿到完整字段(content / completedAt / reminder 等)。
             - limit 默认 50,绝大多数场景够用;不要为了「看全部」而传很大的 limit,会爆 token。
             示例:
             {"type":"todo_list"}
@@ -956,23 +984,46 @@ object AITranslator {
 
         "todo_add" to """
             ## todo_add 详细用法
-            新增一条代办;写入后用户主页 Todo tab 立即可见。
+            新增一条代办;写入后用户主页 Todo tab 立即可见。如果带了提醒字段,
+            新增后 scheduler 会立即把这条代办放进 Timer 队列,到点触发右下角弹框。
             字段:
             - title(必填):代办的标题(trim 后非空);空字符串会被拒绝并返回错误 tool_result。
             - content(可选):详细描述(多行,允许为空)。
             - priority(可选,默认 NORMAL):优先级,枚举 "LOW" / "NORMAL" / "HIGH" / "URGENT";
               未知值 / 大小写不敏感时回退 NORMAL。
-            返回:新条目的完整对象(包含 id),你可以在下一轮用 todo_update / todo_delete 引用这个 id。
+            - reminderTime(可选,默认 null):首次提醒时间(Unix 毫秒时间戳)。
+              省略 = 不设提醒。
+              用户说「5 分钟后提醒我喝水」→ 先 current_time 拿 timestamp,再传 timestamp + 5*60*1000。
+              用户说「明天下午 3 点」→ 用本地时区算次日 15:00 的时间戳再传(系统按本地时区解析)。
+            - recurrence(可选,默认 "NONE"):循环类型,
+              枚举 "NONE"(一次性,触发后自动清除)/ "DAILY"(每天固定时间)/
+              "WEEKDAYS"(周一至周五)/ "WEEKLY"(每周同一天)/ "CUSTOM"(自定义,配合 recurrenceDays)。
+              触发后:NONE 自动清除整条 reminder;DAILY/WEEKDAYS/WEEKLY/CUSTOM 自动滚动 nextTriggerAt 到下一次。
+            - recurrenceDays(可选,默认 []):自定义循环的星期几列表,1=周一...7=周日;
+              **仅 recurrence=CUSTOM 时生效**,其它循环类型忽略本字段。
+              至少要选一天,否则系统会校验失败。
+              例:用户说「每周一三五提醒开会」→ recurrence="CUSTOM", recurrenceDays=[1,3,5]。
+            返回:新条目的完整对象(包含 id 与 reminder),你可以在下一轮用 todo_update / todo_delete 引用这个 id。
             典型场景:
-            - 用户说「提醒我周五前修 X bug」→ title="修 X bug",priority=HIGH。
-            - 用户说「记一下要联系 Y」→ title="联系 Y",content="..."。
+            - 用户说「提醒我周五前修 X bug」→ title="修 X bug",priority=HIGH, 不设 reminder(只记录)。
+            - 用户说「5 分钟后提醒我喝水」→ 先 current_time 拿 timestamp,
+              再 todo_add(title="喝水", reminderTime=timestamp+5*60*1000, recurrence="NONE")。
+            - 用户说「明天下午 3 点开周会」→ 先 current_time + 本地时区算 15:00 时间戳,
+              再 todo_add(title="开周会", reminderTime=timestamp, recurrence="WEEKLY")。
+            - 用户说「每周一三五提醒开会」→ recurrence="CUSTOM", recurrenceDays=[1,3,5],reminderTime 传下一个匹配日的具体时间。
             - AI 主动建议「我帮你记下来?」并得到用户肯定 → 调本工具。
             注意:
             - 不需要先 todo_list 再 add,直接 add 即可(id 由系统分配)。
             - 新条目默认 isCompleted=false;勾选完成用 todo_update。
+            - 「recurrence != NONE 时必须传 reminderTime」——没有首次时间,scheduler 没法把代办放进队列。
+            - 想要修改 reminder 字段,用 todo_update(支持 reminderTime / recurrence / recurrenceDays / clearReminder),
+              不要 delete + add 重建(会丢 id 和 createdAt)。
             示例:
             {"type":"todo_add","title":"修登录页 bug","priority":"HIGH"}
             {"type":"todo_add","title":"联系客户 Y","content":"谈 v2.0 上线时间","priority":"NORMAL"}
+            {"type":"todo_add","title":"喝水","reminderTime":1730000000000,"recurrence":"NONE"}
+            {"type":"todo_add","title":"开周会","reminderTime":1730011200000,"recurrence":"WEEKLY"}
+            {"type":"todo_add","title":"开周会","reminderTime":1730011200000,"recurrence":"CUSTOM","recurrenceDays":[1,3,5]}
         """.trimIndent(),
 
         "todo_update" to """
@@ -984,32 +1035,55 @@ object AITranslator {
             - content(可选):新描述(null = 不改;空串 = 清空描述)。
             - priority(可选):新优先级(null = 不改;大小写不敏感 / 未知回退 NORMAL)。
             - isCompleted(可选):新完成状态(null = 不改;true / false 直接赋值;true 时系统自动写 completedAt 时间戳)。
-            返回:更新后的完整对象(便于核对是否生效)。
+            - reminderTime(可选,默认 null):新的提醒触发时间戳(Unix 毫秒)。null/省略 = 不改。
+              改时间后 scheduler 会**重新调度** Timer 任务。
+              不传 recurrence 时,语义 = 一次性提醒(原来的 recurrence 也不会被清掉,
+              仅替换 nextTriggerAt;若想整体改成一次性,显式传 recurrence="NONE")。
+            - recurrence(可选,默认 null):新循环类型(null = 不改;其它枚举同 todo_add.recurrence)。
+              "NONE" = 一次性,触发后自动清除整条 reminder;循环类型触发后自动滚动到下一次。
+            - recurrenceDays(可选,默认 null):新 CUSTOM 循环的星期几列表(null = 不改);
+              1=周一...7=周日,仅 recurrence=CUSTOM 时使用,其它类型忽略。
+            - clearReminder(可选,默认 false):显式清除整条提醒(等价于把 TodoItem.reminder 置 null,
+              从 Timer 队列里摘掉)。true 时即便同时传了 reminderTime/recurrence 也以清除为准。
+              用户说「把 X 的提醒删了」/「X 不用再提醒了」/「X 先别打扰我」时设 true。
+            返回:更新后的完整对象(便于核对 reminder 字段是否生效)。
             典型场景:
             - 用户说「把 X 标为完成」→ 先 todo_list 拿 id,再 todo_update(id=..., isCompleted=true)。
             - 用户说「把 X 改成 URGENT 优先级」→ todo_update(id=..., priority="URGENT")。
             - 用户说「X 不用了,取消完成」→ todo_update(id=..., isCompleted=false),系统自动清空 completedAt。
-            - 想同时改多个字段(标题+优先级)→ 一次 todo_update(id=..., title=..., priority=...)。
+            - 用户说「把 X 改到 6 点提醒」→ todo_update(id=..., reminderTime=<新时间戳>)。
+            - 用户说「把 X 改成每天 9 点提醒」→ todo_update(id=..., reminderTime=<新时间戳>, recurrence="DAILY")。
+            - 用户说「把 X 改成每周一三五」→ todo_update(id=..., recurrence="CUSTOM", recurrenceDays=[1,3,5])。
+            - 用户说「X 的提醒删了」/「X 不用再提醒了」→ todo_update(id=..., clearReminder=true)。
+            - 想同时改多个字段(标题+优先级+提醒)→ 一次 todo_update(id=..., title=..., priority=..., reminderTime=...)。
             注意:
             - 不传某个字段 = 不改,与「传 null」效果相同(JSON 里省略或显式 null 都行)。
             - 不要用 todo_delete + todo_add 来「重命名」(会丢 createdAt 时间戳),用 todo_update。
+            - clearReminder=true 与 reminderTime 互斥:同时传时以 clearReminder 为准,
+              因为这是用户「明确不要提醒」+「顺手设个时间」二选一的常见场景,后者优先级低。
             示例:
             {"type":"todo_update","id":"abc-123","isCompleted":true}
             {"type":"todo_update","id":"abc-123","priority":"URGENT","title":"紧急:修登录页"}
+            {"type":"todo_update","id":"abc-123","reminderTime":1730011200000,"recurrence":"DAILY"}
+            {"type":"todo_update","id":"abc-123","recurrence":"CUSTOM","recurrenceDays":[1,3,5]}
+            {"type":"todo_update","id":"abc-123","clearReminder":true}
         """.trimIndent(),
 
         "todo_delete" to """
             ## todo_delete 详细用法
-            按 id 删除一条代办(破坏性操作)。
+            按 id 删除一条代办(破坏性操作)。删除会**连同其上的 reminder 一起清除**,
+            scheduler 也会从 Timer 队列里把对应的调度任务摘掉,无需额外调 clearReminder。
             字段:
             - id(必填):代办的稳定 id。id 不存在时返回错误,不会静默成功。
             典型场景:
             - 用户说「删掉 X」/「这条不用记了」→ 先 todo_list 拿 id,再 todo_delete。
+            - 用户说「X 的提醒和这条一起删了」→ 直接 todo_delete,提醒会一并清除。
             - 批量清理过期 completed 代办 → 先 todo_list(filter=completed,limit=100) 看一遍,
               再逐条 todo_delete(谨慎,一次性删多条的提示先 ask_user)。
             注意:
             - 删除不可恢复(没有回收站);如不确定先 ask_user 让用户确认。
             - 取消完成 ≠ 删除;只是"改主意了"用 todo_update(isCompleted=false),不再需要这条才用本工具。
+            - 「只想删提醒、不删代办」用 todo_update(id=..., clearReminder=true),不要 todo_delete。
             示例:
             {"type":"todo_delete","id":"abc-123"}
         """.trimIndent(),

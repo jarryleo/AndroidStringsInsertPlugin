@@ -160,27 +160,37 @@ object ToolDefinitions {
 
     private const val DESC_TODO_LIST =
         "读取代办列表(可限定 active / completed / all 过滤模式)。" +
-            "返回的每条代办都带 id 字段,后续 todo_update / todo_delete 必须用这个 id 定位。" +
+            "返回的每条代办都带 id 字段,后续 todo_update / todo_delete 必须用这个 id 定位;" +
+            "已设置提醒的代办还会带 reminder 子对象(nextTriggerAt / recurrence / timeOfDay / recurrenceDays)," +
+            "用于核对闹钟与下一次触发时间。" +
             "系统已经在聊天上下文中注入了 active 代办的简要摘要(便于你主动提醒用户)," +
-            "但用本工具可以拿到完整字段(content / createdAt / completedAt 等),用于核对细节。" +
+            "但用本工具可以拿到完整字段(content / createdAt / completedAt / reminder 等),用于核对细节。" +
             "详细字段 → load_tool_doc(\"todo_list\")。"
 
     private const val DESC_TODO_ADD =
-        "新增一条代办;title 必填,content 可选,priority 可选(LOW/NORMAL/HIGH/URGENT,默认 NORMAL)。" +
+        "新增一条代办;title 必填,content / priority(LOW/NORMAL/HIGH/URGENT,默认 NORMAL)可选。" +
             "新条目默认未完成,优先级高的会浮在 Todo tab 列表顶部。" +
+            "**支持设置提醒**:可选 reminderTime(Unix 毫秒时间戳) + recurrence(NONE/DAILY/WEEKDAYS/WEEKLY/CUSTOM)" +
+            " + recurrenceDays(1-7 数组,仅 CUSTOM 生效);" +
+            "到点会在 IDE 右下角弹非模态提醒框,用户可选「完成 / 1m / 5m / 10m」。" +
+            "**典型场景**:用户说「提醒我周五前修 X」「5 分钟后提醒我喝水」「明天下午 3 点开周会」时," +
+            "先调 current_time 拿时间戳,再 todo_add(title=..., reminderTime=..., recurrence=...);" +
+            "循环提醒(每周一三五开会)用 recurrence=CUSTOM + recurrenceDays=[1,3,5]。" +
             "新增后系统会返回新条目的 id,你可以在下一轮用 todo_update / todo_delete 引用它。" +
-            "**典型场景**:用户说「提醒我周五前修 X」「记下来要联系 Y」时,先调本工具写进去,再 task_complete 总结。" +
             "详细字段 → load_tool_doc(\"todo_add\")。"
 
     private const val DESC_TODO_UPDATE =
         "按 id 更新一条已有代办;只需传要改的字段,其它字段保持原值。" +
             "**isCompleted = true** 即可「勾选完成」(系统自动写 completedAt 时间戳);" +
             "**isCompleted = false** 取消完成(系统清空 completedAt)。" +
+            "**支持改提醒**:reminderTime 改触发时间戳、recurrence 改循环类型(NONE=改一次性)、" +
+            "recurrenceDays 改 CUSTOM 周几列表;clearReminder=true 显式清掉整条提醒(用户说「这个不用再提醒了」时用)。" +
             "id 不存在时返回错误,先 todo_list 拿到正确 id 再更新。" +
             "详细字段 → load_tool_doc(\"todo_update\")。"
 
     private const val DESC_TODO_DELETE =
         "按 id 删除一条代办(破坏性操作,删除前建议先 todo_list 确认目标)。" +
+            "**连带删除其上的提醒配置**(scheduler 会从 Timer 队列里摘掉),无需额外调 clearReminder。" +
             "id 不存在时返回错误,不会静默成功。" +
             "详细字段 → load_tool_doc(\"todo_delete\")。"
 
