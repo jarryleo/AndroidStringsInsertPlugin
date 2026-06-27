@@ -57,9 +57,18 @@ class InsertStringsUI(
     internal var toastMessage by mutableStateOf("")
     internal var toastTimer: Timer? = null
 
-    // ============== 弹窗 / 标签页 state ==============
-    internal var showSettings by mutableStateOf(false)
-    internal var showChat by mutableStateOf(false)
+    // ============== 主页 tab state ==============
+    /**
+     * 当前主页所在的顶级 tab(翻译表 / Chat / Settings)。默认进入翻译表,
+     * 用户点顶部 tab 栏切换。重构自原先的 `showSettings` / `showChat` 两个 Boolean,
+     * 改成单枚举后避免非法组合(同时为 true / 都不为 true)与多入口不一致。
+     */
+    internal var mainTab by mutableStateOf(MainTab.TRANSLATIONS)
+    /**
+     * Settings tab 内的子 tab 状态(AI / Role / Google Sheets / Quick Phrases / Debug)。
+     * 仅在 [mainTab] = [MainTab.SETTINGS] 时生效;切换到其它顶级 tab 不重置,
+     * 用户从 Settings 切到 Chat 再切回 Settings 时,保留上次的子 tab。
+     */
     internal var settingsTab by mutableStateOf(SettingsTab.AI)
 
     // ============== AI 设置 state(多 provider 模型) ==============
@@ -199,9 +208,10 @@ class InsertStringsUI(
                     onInsert = actionsController::insert,
                     onSelectKey = actionsController::selectKey,
                     toastMessage = toastMessage,
-                    showSettings = showSettings,
-                    showChat = showChat,
+                    mainTab = mainTab,
+                    onMainTabChange = { mainTab = it },
                     settingsTab = settingsTab,
+                    onSettingsTabChange = { settingsTab = it },
                     aiProviders = aiProviders,
                     currentAiProviderId = currentAiProviderId,
                     editingAiProvider = editingAiProvider,
@@ -211,11 +221,6 @@ class InsertStringsUI(
                     chatMessages = chatMessages,
                     chatInput = chatInput,
                     chatSending = chatSending,
-                    onSettingsTabChange = { settingsTab = it },
-                    onOpenSettings = { showSettings = true },
-                    onCloseSettings = { showSettings = false },
-                    onOpenChat = { showChat = true },
-                    onCloseChat = { showChat = false },
                     onAddAiProvider = settingsController::beginAddProvider,
                     onEditAiProvider = settingsController::beginEditProvider,
                     onDeleteAiProvider = settingsController::deleteProvider,
@@ -352,5 +357,9 @@ class InsertStringsUI(
     override fun showToast(message: String) = actionsController.showToast(message)
     override fun saveCurrentEdits() = actionsController.saveCurrentEdits()
     override fun updateRowsForSelectedKey() = actionsController.updateRowsForSelectedKey()
-    override fun closeChatView() { showChat = false }
+    /**
+     * 写入类动作完成后,把视图切回翻译表 tab(原先是关闭 Chat 弹窗,
+     * 重构后主页 Chat 已是 tab 之一,关闭语义变为"切回默认的翻译表 tab")。
+     */
+    override fun closeChatView() { mainTab = MainTab.TRANSLATIONS }
 }

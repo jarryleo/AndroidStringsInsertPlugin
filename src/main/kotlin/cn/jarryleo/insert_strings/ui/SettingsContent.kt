@@ -1,17 +1,10 @@
 package cn.jarryleo.insert_strings.ui
 
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -112,31 +105,31 @@ fun SettingsContent(
             modifier = Modifier.fillMaxWidth().horizontalScroll(state = rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            SettingsTabButton(
+            TabButton(
                 text = "AI Settings",
                 selected = selectedTab == SettingsTab.AI,
                 onClick = { onTabChange(SettingsTab.AI) },
                 colors = colors,
             )
-            SettingsTabButton(
+            TabButton(
                 text = "Role",
                 selected = selectedTab == SettingsTab.ROLES,
                 onClick = { onTabChange(SettingsTab.ROLES) },
                 colors = colors,
             )
-            SettingsTabButton(
+            TabButton(
                 text = "Google Sheets",
                 selected = selectedTab == SettingsTab.SHEETS,
                 onClick = { onTabChange(SettingsTab.SHEETS) },
                 colors = colors,
             )
-            SettingsTabButton(
+            TabButton(
                 text = "Quick Phrases",
                 selected = selectedTab == SettingsTab.QUICK_PHRASES,
                 onClick = { onTabChange(SettingsTab.QUICK_PHRASES) },
                 colors = colors,
             )
-            SettingsTabButton(
+            TabButton(
                 text = "Debug",
                 selected = selectedTab == SettingsTab.DEBUG,
                 onClick = { onTabChange(SettingsTab.DEBUG) },
@@ -215,40 +208,5 @@ fun SettingsContent(
                 colors = colors,
             )
         }
-    }
-}
-
-@Composable
-private fun SettingsTabButton(
-    text: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    colors: IdeColors,
-) {
-    val background = if (selected) colors.accent else colors.buttonBackground
-    val foreground = if (selected) colors.accentText else colors.text
-    val border = if (selected) colors.accent else colors.buttonBorder
-    val interactionSource = remember { MutableInteractionSource() }
-
-    Box(
-        modifier = modifier
-            .height(26.dp)
-            .background(background, RoundedCornerShape(3.dp))
-            .border(BorderStroke(1.dp, border), RoundedCornerShape(3.dp))
-            .clickable(
-                interactionSource = interactionSource,
-                indication = null,
-                onClick = onClick
-            )
-            .padding(horizontal = 8.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = text,
-            color = foreground,
-            style = compactTextStyle(foreground),
-            maxLines = 1,
-        )
     }
 }
