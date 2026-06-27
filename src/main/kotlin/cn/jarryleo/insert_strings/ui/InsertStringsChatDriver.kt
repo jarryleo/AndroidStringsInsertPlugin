@@ -172,8 +172,10 @@ internal class InsertStringsChatDriver(
                     ?.content
                     ?.trim()
                     .orEmpty()
-                // 关键:把这次"自动触发"产生的所有消息标记为 hidden,从 chat tab UI 里彻底隐藏
-                // —— 留下 AI 协议历史(protocolVisible 仍 true)但 UI 不显示,符合"气泡展示,chat 不污染"诉求。
+                // 关键:把这次"自动触发"产生的中间过程(user 触发、tool 消息、assistant 中间占位)
+                // 标记为 hidden,从 chat tab UI 里隐藏,只留下**最后一条** assistant 消息
+                // (AI 的最终回复)可见 —— 用户在 chat tab 能看到 AI 的人性化提醒文案(同时 IDE 气泡也展示)。
+                // 协议历史(protocolVisible)不受影响,AI 后续回合仍能看到完整上下文。
                 SwingUtilities.invokeLater {
                     newIndices.forEach { idx ->
                         if (idx < state.chatMessages.size) {
@@ -182,6 +184,16 @@ internal class InsertStringsChatDriver(
                                 state.chatMessages[idx] = cur.copy(hidden = true)
                             }
                         }
+                    }
+                    // 找最后一条 assistant 消息(AI 最终回复),把它"显式还原"为可见。
+                    // 上面已经把所有消息都设 hidden=true 了,这里只把最后一条 assistant 改回 false。
+                    val lastAssistantIdx = newIndices.reversed().firstOrNull { idx ->
+                        idx < state.chatMessages.size && state.chatMessages[idx].role == "assistant" &&
+                            state.chatMessages[idx].content.isNotBlank()
+                    }
+                    if (lastAssistantIdx != null) {
+                        val cur = state.chatMessages[lastAssistantIdx]
+                        state.chatMessages[lastAssistantIdx] = cur.copy(hidden = false)
                     }
                     // 总是回调一次(即使是空文本),scheduler 可以显示"AI 未回复"占位气泡
                     onResponse(responseText)

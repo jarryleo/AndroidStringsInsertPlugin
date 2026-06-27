@@ -22,11 +22,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.ai.ToolCall
 import cn.jarryleo.insert_strings.phrases.QuickPhrase
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import java.text.SimpleDateFormat
+import java.util.*
 
 @Composable
 fun AiChatContent(
@@ -736,7 +739,6 @@ private fun ChatBubble(
     val isUser = message.role == "user"
     val isTool = message.role == "tool"
     val bubbleColor = if (isUser) colors.accent else colors.fieldBackground
-    val alignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
     val border = if (isUser) {
         Modifier
     } else {
@@ -746,6 +748,15 @@ private fun ChatBubble(
     // 助手气泡底色是 fieldBackground(白/近白),保持深色文字。
     val bubbleTextColor = if (isUser) colors.accentText else colors.text
     val bubbleColors = colors.copy(text = bubbleTextColor, secondaryText = bubbleTextColor)
+    // 预计算这些布尔,既用于控制气泡是否绘制,也用于控制时间戳是否绘制
+    val showThinkingHeader = !isUser && (message.streaming || message.thinking.isNotBlank())
+    val showThinkingBox = !isUser && message.thinking.isNotBlank()
+    val showReply = !isUser && message.content.isNotBlank()
+    val showAskQuestion = !isUser && !message.askQuestion.isNullOrBlank()
+    val showUserContent = isUser && message.content.isNotBlank()
+    val hasAnyContent = showUserContent || showThinkingHeader || showReply || showAskQuestion
+    val showTimestamp = isTool || hasAnyContent
+    val timestampText = formatMessageTimestamp(message.timestamp)
     Column(
         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
     ) {
@@ -754,6 +765,8 @@ private fun ChatBubble(
             // 但又必须以 tool_result 形式返回给 AI 以满足 Anthropic 协议。
             // 这里把它折叠成助手一侧的简短错误行,不再用 ToolBubble 渲染,
             // 既避免空气泡,又让用户能看到具体是哪个工具调用出了问题。
+            // 工具消息实际上是被 ToolGroupBubble 渲染的(见 buildChatRenderItems),
+            // 这里的 isTool 分支是死代码,保留只为防御性兜底。
             if (isParseFailedToolResult(message.content)) {
                 ParseFailedInline(
                     content = message.content,
@@ -766,7 +779,7 @@ private fun ChatBubble(
                     colors = colors,
                 )
             }
-        } else {
+        } else if (hasAnyContent) {
             // === 助手气泡(assistant / user) ===
             // 助手侧四段式结构:Thinking 区(可选) + content 正文区(可选) +
             //                  askQuestion 询问文字区(可选,仅 ask_user) + options 区(下方)。
@@ -780,37 +793,77 @@ private fun ChatBubble(
             //    UI 上以「❓ Question」标签 + 问题正文渲染,与 content 正文视觉上完全分离,
             //    避免旧实现把 question 覆盖进 content 时造成的"思考与正文被折叠在 Thought"误解。
             //  - options 区:在气泡外部的 FlowRow 里渲染按钮,与 askQuestion 配套。
-            val showThinkingHeader = !isUser &&
-                    (message.streaming || message.thinking.isNotBlank())
-            val showThinkingBox = !isUser && message.thinking.isNotBlank()
-            val showReply = !isUser && message.content.isNotBlank()
-            val showAskQuestion = !isUser && !message.askQuestion.isNullOrBlank()
-            val showUserContent = isUser && message.content.isNotBlank()
-            // 只要有任何内容要展示,气泡外壳就要画出来
-            val hasAnyContent = showUserContent || showThinkingHeader || showReply || showAskQuestion
-            if (hasAnyContent) {
+            //
+            // **时间戳布局(2026.x 修复)**:用 **Row** 把时间戳和气泡**并排**放,
+            // `verticalAlignment = Alignment.Bottom` 让两者**底边对齐**;
+            // `Arrangement.End/Start` 让 Row 把内容推到正确的一侧(用户右 / AI 左);
+            // 32dp 边距从气泡移到 Row 上,这样时间戳能**紧贴气泡**(4dp 间距),
+            // 不会像之前那样被 32dp 边距隔开。
+            // 用户消息 → [timestamp][bubble];AI → [bubble][timestamp]。
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = if (isUser) 32.dp else 0.dp, end = if (isUser) 0.dp else 32.dp),
+                horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                if (isUser && showTimestamp) {
+                    // 用户消息:时间戳在气泡**左边**,贴气泡底边
+                    Text(
+                        text = timestampText,
+                        modifier = Modifier.padding(end = 4.dp),
+                        color = colors.secondaryText,
+                        style = compactTextStyle(colors.secondaryText).copy(fontSize = 10.sp),
+                    )
+                }
+                // 气泡本身(不再有 32dp 边距,边距在 Row 上)
                 Box(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentAlignment = alignment,
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(bubbleColor, RoundedCornerShape(12.dp))
+                        .then(border)
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .padding(start = if (isUser) 32.dp else 0.dp, end = if (isUser) 0.dp else 32.dp)
-                            .background(bubbleColor, RoundedCornerShape(12.dp))
-                            .then(border)
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
-                    ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            if (showThinkingHeader) {
-                                ThinkingSection(
-                                    thinking = message.thinking,
-                                    streaming = message.streaming,
-                                    showTextBox = showThinkingBox,
-                                    colors = colors,
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (showThinkingHeader) {
+                            ThinkingSection(
+                                thinking = message.thinking,
+                                streaming = message.streaming,
+                                showTextBox = showThinkingBox,
+                                colors = colors,
+                            )
+                        }
+                        // 思考区与正文/询问区之间的细分隔线:只要思考区存在 + 下方任一内容存在都画
+                        if (showThinkingHeader && (showReply || showAskQuestion)) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(1.dp)
+                                    .background(colors.grid)
+                            )
+                        }
+                        if (showReply) {
+                            SelectionContainer {
+                                MarkdownContent(
+                                    markdown = message.content,
+                                    colors = bubbleColors,
+                                    bubbleColor = bubbleColor,
                                 )
                             }
-                            // 思考区与正文/询问区之间的细分隔线:只要思考区存在 + 下方任一内容存在都画
-                            if (showThinkingHeader && (showReply || showAskQuestion)) {
+                        } else if (showUserContent) {
+                            SelectionContainer {
+                                MarkdownContent(
+                                    markdown = message.content,
+                                    colors = bubbleColors,
+                                    bubbleColor = bubbleColor,
+                                )
+                            }
+                        }
+                        // 询问文字区:仅 ask_user 消息渲染,顶部带「❓ Question」标签
+                        // 与下方 content 正文清晰分开,避免被吞进 Thought 折叠区。
+                        // 与正文区之间再加一条分隔线,保持三段式视觉一致。
+                        if (showAskQuestion) {
+                            if (showReply) {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -818,63 +871,42 @@ private fun ChatBubble(
                                         .background(colors.grid)
                                 )
                             }
-                            if (showReply) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Text(
+                                        text = "❓",
+                                        color = colors.accent,
+                                        style = compactTextStyle(colors.accent),
+                                    )
+                                    Text(
+                                        text = "Question",
+                                        color = colors.accent,
+                                        style = compactTextStyle(colors.accent)
+                                            .copy(fontWeight = FontWeight.SemiBold),
+                                    )
+                                }
                                 SelectionContainer {
                                     MarkdownContent(
-                                        markdown = message.content,
+                                        markdown = message.askQuestion ?: "",
                                         colors = bubbleColors,
                                         bubbleColor = bubbleColor,
                                     )
-                                }
-                            } else if (showUserContent) {
-                                SelectionContainer {
-                                    MarkdownContent(
-                                        markdown = message.content,
-                                        colors = bubbleColors,
-                                        bubbleColor = bubbleColor,
-                                    )
-                                }
-                            }
-                            // 询问文字区:仅 ask_user 消息渲染,顶部带「❓ Question」标签
-                            // 与下方 content 正文清晰分开,避免被吞进 Thought 折叠区。
-                            // 与正文区之间再加一条分隔线,保持三段式视觉一致。
-                            if (showAskQuestion) {
-                                if (showReply) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(1.dp)
-                                            .background(colors.grid)
-                                    )
-                                }
-                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    ) {
-                                        Text(
-                                            text = "❓",
-                                            color = colors.accent,
-                                            style = compactTextStyle(colors.accent),
-                                        )
-                                        Text(
-                                            text = "Question",
-                                            color = colors.accent,
-                                            style = compactTextStyle(colors.accent)
-                                                .copy(fontWeight = FontWeight.SemiBold),
-                                        )
-                                    }
-                                    SelectionContainer {
-                                        MarkdownContent(
-                                            markdown = message.askQuestion ?: "",
-                                            colors = bubbleColors,
-                                            bubbleColor = bubbleColor,
-                                        )
-                                    }
                                 }
                             }
                         }
                     }
+                }
+                if (!isUser && showTimestamp) {
+                    // AI / 工具消息:时间戳在气泡**右边**,贴气泡底边
+                    Text(
+                        text = timestampText,
+                        modifier = Modifier.padding(start = 4.dp),
+                        color = colors.secondaryText,
+                        style = compactTextStyle(colors.secondaryText).copy(fontSize = 10.sp),
+                    )
                 }
             }
         }
@@ -882,7 +914,7 @@ private fun ChatBubble(
             FlowRow(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 6.dp, start = 4.dp, end = 32.dp),
+                    .padding(top = 6.dp, start = 4.dp, end = 64.dp),
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
                 verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
@@ -1154,92 +1186,109 @@ private fun ToolGroupBubble(
         else -> "完成"
     }
     val displayTaskSummary = taskSummary?.takeIf { it.isNotBlank() }
-
-    Column(
+    // 时间戳(2026.x 新增):取组里最后一条 tool 消息的时间(代表整组工具调用完成的时间);
+    // 与用户/AI 气泡一致:用 Row 把它和工具气泡并排,底边对齐,4dp 间距。
+    val timestamp = messages.lastOrNull()?.timestamp ?: 0L
+    val timestampText = if (timestamp > 0) formatMessageTimestamp(timestamp) else ""
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 2.dp)
-            .padding(end = 32.dp)
-            .background(colors.fieldBackground, RoundedCornerShape(12.dp))
-            .border(width = 1.dp, color = colors.border, RoundedCornerShape(12.dp)),
+            .padding(end = 32.dp),
+        verticalAlignment = Alignment.Bottom,
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                ) { expanded = !expanded }
-                .padding(horizontal = 10.dp, vertical = 5.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = if (expanded) "▼" else "▶",
-                color = colors.secondaryText,
-                style = compactTextStyle(colors.secondaryText),
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = "工具调用 · ${messages.size} 条",
-                color = colors.secondaryText,
-                style = compactTextStyle(colors.secondaryText),
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                text = headerStatus,
-                color = colors.secondaryText,
-                style = compactTextStyle(colors.secondaryText),
-            )
-        }
-
-        if (displayTaskSummary != null) {
-            Text(
-                text = "任务: ${truncateSummary(displayTaskSummary, 80)}",
-                color = colors.secondaryText,
-                style = compactTextStyle(colors.secondaryText),
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(start = 24.dp, end = 10.dp, bottom = 5.dp),
-            )
-        }
-
         Column(
-            modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
+            modifier = Modifier
+                .weight(1f)
+                .background(colors.fieldBackground, RoundedCornerShape(12.dp))
+                .border(width = 1.dp, color = colors.border, RoundedCornerShape(12.dp)),
         ) {
-            summaries.forEachIndexed { idx, summary ->
-                ToolSummaryRow(
-                    index = idx + 1,
-                    summary = summary,
-                    colors = colors,
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { expanded = !expanded }
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = if (expanded) "▼" else "▶",
+                    color = colors.secondaryText,
+                    style = compactTextStyle(colors.secondaryText),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "工具调用 · ${messages.size} 条",
+                    color = colors.secondaryText,
+                    style = compactTextStyle(colors.secondaryText),
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = headerStatus,
+                    color = colors.secondaryText,
+                    style = compactTextStyle(colors.secondaryText),
                 )
             }
-        }
 
-        AnimatedVisibility(
-            visible = expanded,
-            enter = fadeIn() + expandVertically(),
-            exit = fadeOut() + shrinkVertically(),
-        ) {
+            if (displayTaskSummary != null) {
+                Text(
+                    text = "任务: ${truncateSummary(displayTaskSummary, 80)}",
+                    color = colors.secondaryText,
+                    style = compactTextStyle(colors.secondaryText),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 24.dp, end = 10.dp, bottom = 5.dp),
+                )
+            }
+
             Column(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                messages.forEachIndexed { idx, msg ->
-                    val toolCall = msg.toolCallId?.let { toolCallsById[it] }
-                    val summary = summaries.getOrNull(idx)
-                    ToolDetailBlock(
+                summaries.forEachIndexed { idx, summary ->
+                    ToolSummaryRow(
                         index = idx + 1,
                         summary = summary,
-                        content = msg.content,
-                        toolCall = toolCall,
                         colors = colors,
                     )
                 }
             }
+
+            AnimatedVisibility(
+                visible = expanded,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically(),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    messages.forEachIndexed { idx, msg ->
+                        val toolCall = msg.toolCallId?.let { toolCallsById[it] }
+                        val summary = summaries.getOrNull(idx)
+                        ToolDetailBlock(
+                            index = idx + 1,
+                            summary = summary,
+                            content = msg.content,
+                            toolCall = toolCall,
+                            colors = colors,
+                        )
+                    }
+                }
+            }
+        }
+        if (timestampText.isNotEmpty()) {
+            Text(
+                text = timestampText,
+                modifier = Modifier.padding(start = 4.dp),
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText).copy(fontSize = 10.sp),
+            )
         }
     }
 }
@@ -1550,7 +1599,6 @@ private fun ToolBubble(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 2.dp)
-            .padding(end = 32.dp)
             .background(colors.fieldBackground, RoundedCornerShape(12.dp))
             .border(width = 1.dp, color = colors.border, RoundedCornerShape(12.dp)),
     ) {
@@ -1760,4 +1808,23 @@ private fun classifyOptionTone(text: String): ButtonTone {
         infoKeywords.any { lower.contains(it) } -> ButtonTone.INFO
         else -> ButtonTone.NEUTRAL
     }
+}
+
+/**
+ * 把消息时间戳格式化为"人类可读"短字符串(2026.x 新增)。
+ *
+ * 规则:
+ *  - 当天: `HH:mm`(例如 "14:30"),紧凑,适合气泡角落;
+ *  - 跨天(昨天 / 更早): `MM-dd HH:mm`(例如 "06-27 14:30"),让用户能区分
+ *    "今天的对话"和"昨天的对话",避免视觉混淆。
+ *
+ * 不显示年份(2026.x 时几乎不会有跨年场景);若以后需要可加 `sameYear` 判断。
+ */
+private fun formatMessageTimestamp(timestamp: Long): String {
+    val now = Calendar.getInstance()
+    val msgCal = Calendar.getInstance().apply { timeInMillis = timestamp }
+    val sameDay = now.get(Calendar.YEAR) == msgCal.get(Calendar.YEAR) &&
+            now.get(Calendar.DAY_OF_YEAR) == msgCal.get(Calendar.DAY_OF_YEAR)
+    val pattern = if (sameDay) "HH:mm" else "MM-dd HH:mm"
+    return SimpleDateFormat(pattern, Locale.getDefault()).format(Date(timestamp))
 }

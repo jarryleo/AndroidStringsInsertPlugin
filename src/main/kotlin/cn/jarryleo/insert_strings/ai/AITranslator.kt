@@ -88,6 +88,17 @@ data class ChatMessage(
      * 但 [hidden] = true 让 UI 直接跳过它们。
      */
     val hidden: Boolean = false,
+    /**
+     * 消息创建时间戳(毫秒,2026.x 新增)。
+     *
+     * 用于在聊天气泡外面显示「消息时间」:用户消息 / AI 回复 / 工具调用各自有发送 / 接收 / 执行的时刻。
+     * UI 上以 `HH:mm` 格式显示在气泡外的对应角(用户消息左下角、其余右下角)。
+     *
+     * 用 data class 默认值 `System.currentTimeMillis()` 自动捕获构造时刻,
+     * 流式消息通过 `copy()` 更新时该字段被保留(保持"AI 开始生成"的时刻)。
+     * 不参与 AI 协议序列化,纯 UI 用。
+     */
+    val timestamp: Long = System.currentTimeMillis(),
 )
 
 object AITranslator {
