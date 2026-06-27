@@ -93,6 +93,88 @@ internal class InsertStringsChatDriver(
     }
 
     /**
+     * 发送"系统自动触发"消息给 AI 并异步等待回复(2026.x 新增)。
+     *
+     * 用法:由 [cn.jarryleo.insert_strings.ai.TodoAiResponder] 调用 —— 用户代办提醒触发时,
+     * scheduler 把"提醒 X 已触发"作为 system message 发到这里,让 AI 生成简短友好的回复文本,
+     * 回复会通过 [onResponse] 回调出去,scheduler 用 IDE 通知气泡展示。
+     *
+     * **不修改 UI 状态**:不会清空 chat input、不会触发 toast 之类的副作用,
+     * 也不打断用户当前的对话(如果用户同时在 chat tab 打字,AI 会串行处理)。
+     *
+     * **超时**:30 秒无回复则自动放弃(防止 AI 卡死时永远等)。
+     *
+     * @param systemMessage 完整的系统消息文本(会作为 user 消息加入 chat,带 [自动触发] 前缀便于用户在 chat tab 识别)
+     * @param onResponse AI 回复到后被调用,参数是 assistant 消息拼接后的纯文本;在 EDT 上调用。
+     */
+    fun sendSystemMessageAndAwait(systemMessage: String, onResponse: (String) -> Unit) {
+        // 防止重入:如果 chat 正在处理,就排队等待直到当前轮结束(避免把 system 消息和用户消息搅在一起)
+        if (state.chatSending) {
+            // 用 invokeLater 简单重试,直到 chatSending=false
+            SwingUtilities.invokeLater {
+                if (state.chatSending) {
+                    // 还在忙,递归再排队
+                    sendSystemMessageAndAwait(systemMessage, onResponse)
+                } else {
+                    sendSystemMessageAndAwaitInternal(systemMessage, onResponse)
+                }
+            }
+            return
+        }
+        sendSystemMessageAndAwaitInternal(systemMessage, onResponse)
+    }
+
+    private fun sendSystemMessageAndAwaitInternal(systemMessage: String, onResponse: (String) -> Unit) {
+        val messageCountBefore = state.chatMessages.size
+        // 用 [自动触发] 前缀让用户在 chat tab 能一眼看出这是系统消息(非用户输入)
+        val tagged = "[自动触发 - 代办提醒] $systemMessage"
+        state.chatMessages.add(ChatMessage(role = "user", content = tagged))
+        state.toolDocLoadCount = 0
+        state.askUserCallCount = 0
+        state.stopRequested = false
+        bindRetryHooks()
+        continueChatWithAi()
+
+        // 后台线程等待 AI 完成。AI 可能调 tool,所以"完成"的标志是 chatSending=false
+        // (tool loop 自然结束)或超时(30s)。
+        val timeoutMs = 30_000L
+        val pollMs = 100L
+        Thread({
+            try {
+                val start = System.currentTimeMillis()
+                while (state.chatSending && System.currentTimeMillis() - start < timeoutMs) {
+                    try {
+                        Thread.sleep(pollMs)
+                    } catch (e: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        return@Thread
+                    }
+                }
+                // 收集"自系统消息之后"的新 assistant 回复
+                val newMessages = try {
+                    state.chatMessages.subList(messageCountBefore, state.chatMessages.size)
+                } catch (e: Exception) {
+                    emptyList()
+                }
+                val responseText = newMessages
+                    .filter { it.role == "assistant" }
+                    .map { it.content.trim() }
+                    .filter { it.isNotEmpty() }
+                    .joinToString("\n\n")
+                // 切回 EDT 回调
+                SwingUtilities.invokeLater {
+                    if (responseText.isNotEmpty()) {
+                        onResponse(responseText)
+                    }
+                    // 空回复(超时 / AI 没说话)时不调,避免气泡里显示空内容
+                }
+            } catch (e: Throwable) {
+                // 兜底:任何异常都不影响主流程,scheduler 仍能继续工作
+            }
+        }, "TodoAiResponder-awaits").apply { isDaemon = true }.start()
+    }
+
+    /**
      * 把 AITranslator 的重试回调 / 终止信号绑到当前 state。
      * - onRetryListener:每次重试时往 chatMessages 推一条「⏳ 网络异常,第 N 次重试(等待 X 秒)」气泡。
      *   用 [ChatMessage] 形式展示在 UI 上,用户能直观看到「卡在哪一步」「还要等多久」。

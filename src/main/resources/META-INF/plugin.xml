@@ -70,4 +70,12 @@
 
     <!-- 启动时初始化 TodoReminderScheduler(把磁盘上的未来提醒塞进 Timer 队列) -->
     <postStartupActivity implementation="cn.jarryleo.insert_strings.ai.TodoReminderStartupActivity"/>
+
+    <!-- AI 提醒回复通知组(2026.x 新增):
+         用户代办提醒触发时,AI 会生成一段简短友好的中文回复,
+         通过这个组的 BALLOON 通知在 IDE 右下角弹出。 -->
+    <notificationGroup id="InsertStrings Todo Reminders"
+                       displayType="BALLOON"
+                       isLogByDefault="true"
+                       bundle="messages.NotificationBundle"/>
 </idea-plugin>

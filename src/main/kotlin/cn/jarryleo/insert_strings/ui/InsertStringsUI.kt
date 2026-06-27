@@ -12,6 +12,7 @@ import cn.jarryleo.insert_strings.UiCallback
 import cn.jarryleo.insert_strings.ai.AiProvider
 import cn.jarryleo.insert_strings.ai.AiRole
 import cn.jarryleo.insert_strings.ai.ChatMessage
+import cn.jarryleo.insert_strings.ai.TodoAiResponder
 import cn.jarryleo.insert_strings.ai.TodoItem
 import cn.jarryleo.insert_strings.ai.TodoPriority
 import cn.jarryleo.insert_strings.ai.TodoReminder
@@ -24,6 +25,7 @@ import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
 import javax.swing.JComponent
+import javax.swing.SwingUtilities
 import javax.swing.Timer
 
 /**
@@ -363,6 +365,16 @@ class InsertStringsUI(
         TodoUiRefresher.setRefresher {
             javax.swing.SwingUtilities.invokeLater {
                 todosController.reloadTodos()
+            }
+        }
+
+        // 4.5) 注册 UI ↔ TodoAiResponder 回调(2026.x 新增):
+        //    用户代办提醒触发时,scheduler 通过这里把"提醒 X 已触发"作为系统消息发给 AI,
+        //    等待 AI 回复一段简短友好文本(用于 IDE 气泡展示)。
+        //    必须在 chatDriver 装配完成之后调用 —— chatDriver 由 wireCollaborators 初始化。
+        TodoAiResponder.setResponder { systemMessage, onResponse ->
+            SwingUtilities.invokeLater {
+                chatDriver.sendSystemMessageAndAwait(systemMessage, onResponse)
             }
         }
 

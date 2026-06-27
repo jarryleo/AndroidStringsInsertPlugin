@@ -1,10 +1,13 @@
 package cn.jarryleo.insert_strings.ai
 
 import cn.jarryleo.insert_strings.ui.TodoReminderPopup
+import com.intellij.notification.NotificationGroupManager
+import com.intellij.notification.NotificationType
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.thisLogger
+import com.intellij.openapi.project.ProjectManager
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
@@ -139,8 +142,15 @@ class TodoReminderScheduler : Disposable {
     }
 
     /**
-     * Timer 触发了:在 EDT 上找 todo 弹框。
+     * Timer 触发了:在 EDT 上找 todo 弹框 + 触发 AI 回复(2026.x)。
+     *
      * 这里用 itemId 而不是 TodoItem 引用,避免后台线程持有 UI 状态(可能已被 UI 重排)。
+     *
+     * **AI 触发**(2026.x 新增):弹框同时,通过 [TodoAiResponder] 把"提醒 X 已触发"
+     * 作为系统消息发给 AI,等待一段简短友好的中文回复(1-2 句),
+     * AI 回复到后用 IDE 通知气泡在右下角展示,与弹框互补:
+     * - 弹框:用户能点「完成 / 1m / 5m / 10m」管理这条提醒;
+     * - 气泡:把 AI 的人性化提醒文案推到视线里,避免用户在 IDE 深层时错过。
      */
     private fun fireById(itemId: String) {
         SwingUtilities.invokeLater {
@@ -153,7 +163,84 @@ class TodoReminderScheduler : Disposable {
                 refreshUiList()
                 return@invokeLater
             }
+            // 1) 弹原始终端弹框(用户能点 snooze/done)
             showPopup(item, reminder)
+            // 2) 触发 AI 回复(异步)—— AI 生成文本后用 IDE 气泡展示
+            triggerAiResponse(item)
+        }
+    }
+
+    /**
+     * 通过 [TodoAiResponder] 让 AI 生成一段对当前 todo 的简短回复,并用 IDE 通知气泡展示。
+     *
+     * 关键设计:
+     * - 不阻塞 [fireById] —— 弹框立刻显示,AI 回复是后台异步进行(chat driver 内部协程);
+     * - AI 回复可能在 1-10 秒后到达(取决于 AI 速度),用 IDE 标准 BALLOON 通知组弹出;
+     * - 系统消息已经包含 todo 标题 + 内容 + 提醒类型,AI 不用再去查 chat context。
+     */
+    private fun triggerAiResponse(item: TodoItem) {
+        val systemMessage = buildReminderSystemMessage(item)
+        TodoAiResponder.respondToReminder(systemMessage) { responseText ->
+            // onResponse 已在 EDT 上调用,可以直接 showBalloon
+            showReminderBalloon(item, responseText)
+        }
+    }
+
+    /**
+     * 构造发给 AI 的"提醒触发"系统消息。
+     *
+     * 关键约束:
+     * - 明确告诉 AI "不要调用任何工具" —— 提醒回复应当是纯文本(不操作文件 / 表格);
+     * - 限制长度(1-2 句话) —— BALLOON 通知空间小,长文展示体验差;
+     * - 中文回复 —— 与用户的中文代办标题保持一致;
+     * - 风格友好:像朋友提醒一样,而不是冷冰冰的"已到时间"。
+     */
+    private fun buildReminderSystemMessage(item: TodoItem): String {
+        val title = item.title.ifBlank { "(未命名代办)" }
+        val content = if (item.content.isNotBlank()) "详情: ${item.content}" else ""
+        return """
+            用户的待办提醒刚刚触发了:
+            - 标题: $title
+            $content
+
+            请用温柔友好的回复来提醒用户。
+            严格要求:
+            - 不要调用任何工具(不需要读写文件 / 表格 / 其它代办)
+            - 不要在回复里提 "工具" / "function calling" / "AI" 等字眼
+            - 不要加时间戳、列表、markdown 格式
+            - 只输出最终要展示给用户看的提醒文案
+        """.trimIndent()
+    }
+
+    /**
+     * 把 AI 回复的文本用 IDE 通知气泡展示在右下角。
+     *
+     * 使用 `NotificationGroupManager` 获取在 [plugin.xml] 注册的 `InsertStrings Todo Reminders` 组,
+     * 通知类型 [NotificationType.INFORMATION] → 用户看到的是非侵入的蓝色提示气泡。
+     *
+     * project 选择:从 [ProjectManager] 取当前打开的项目(application-level 通知不需要特定 project,
+     * 但 `Notification.notify(Project)` 签名要求非 null,传 defaultProject 是最稳的选择)。
+     */
+    private fun showReminderBalloon(item: TodoItem, aiResponse: String) {
+        try {
+            val group = NotificationGroupManager.getInstance()
+                .getNotificationGroup("InsertStrings Todo Reminders")
+                ?: run {
+                    log.warn("TodoReminderScheduler: notification group not found")
+                    return
+                }
+            val titleText = "⏰ ${item.title.ifBlank { "待办提醒" }}"
+            val notification = group.createNotification(
+                titleText,
+                aiResponse,
+                NotificationType.INFORMATION
+            )
+            // 取当前打开的项目(应用级通知对 project 不敏感,但 API 要求非 null)
+            val project = ProjectManager.getInstance().openProjects.firstOrNull()
+                ?: ProjectManager.getInstance().defaultProject
+            notification.notify(project)
+        } catch (e: Throwable) {
+            log.warn("TodoReminderScheduler: failed to show balloon", e)
         }
     }
 
