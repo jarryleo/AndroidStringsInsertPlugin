@@ -105,6 +105,13 @@ internal fun InsertStringsContent(
     showContextPopup: Boolean,
     chatContextText: String,
     /**
+     * 「Clear」按钮回调:清除主面板 keyEntries + rows,同步清掉聊天顶部「已选择翻译(N)」
+     * 与主面板表格。仅主面板聊天传这个回调;弹框场景不传,按钮不渲染。
+     * [canClearSelected] 控制按钮 enabled 状态(无选中内容时置灰)。
+     */
+    onClearSelected: () -> Unit,
+    canClearSelected: Boolean,
+    /**
      * 当前用户在 strings.xml 中选中的 key 列表,用于聊天面板顶部展示「已选择翻译(N)」。
      * 由父组件从 keyEntries 派生(随用户重新选 key 同步更新)。
      */
@@ -210,6 +217,8 @@ internal fun InsertStringsContent(
                         quoteContent = quoteContent,
                         onQuoteDismiss = onQuoteDismiss,
                         onCopyQuote = onCopyQuote,
+                        onClearSelected = onClearSelected,
+                        canClear = canClearSelected,
                         modifier = Modifier.fillMaxSize(),
                         colors = colors,
                     )

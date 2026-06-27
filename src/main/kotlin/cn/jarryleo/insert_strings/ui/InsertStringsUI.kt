@@ -280,6 +280,11 @@ class InsertStringsUI(
                         ClipboardManager.setSysClipboardText(text)
                         showToast("已复制到剪贴板")
                     },
+                    // 「Clear」按钮:点击后清空主面板选中的 keyEntries 与 rows,
+                    // 同步清掉聊天顶部「已选择翻译(N)」面板与主面板表格。
+                    // canClear:无选中内容时按钮置灰,避免误点。
+                    onClearSelected = actionsController::clearSelected,
+                    canClearSelected = keyEntries.isNotEmpty() || rows.isNotEmpty(),
                 )
             }
         }

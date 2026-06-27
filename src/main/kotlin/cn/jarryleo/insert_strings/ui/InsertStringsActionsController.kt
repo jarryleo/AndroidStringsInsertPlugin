@@ -120,6 +120,29 @@ internal class InsertStringsActionsController(
         ui.rows[rowIndex] = ui.rows[rowIndex].copy(text = text)
     }
 
+    /**
+     * 清除主面板当前选中的所有 key 和对应的翻译表数据。
+     *
+     * 用途:聊天面板右上角「Clear」按钮触发(主面板专属,弹框场景不调用)。
+     * 行为:
+     * - 把 [InsertStringsUI.keyEntries] 清空(同时清掉聊天面板顶部的「已选择翻译(N)」面板);
+     * - 把 [InsertStringsUI.rows] 清空(主面板回到未选 key 的空白表格);
+     * - 重置 [InsertStringsUI.stringName] 与 [InsertStringsUI.selectedKeyIndex];
+     * - 没有可清除内容时直接 no-op + 提示,避免误点产生"无变化"反馈。
+     */
+    fun clearSelected() {
+        if (ui.keyEntries.isEmpty() && ui.rows.isEmpty()) {
+            showToast("没有可清除的选中内容")
+            return
+        }
+        val clearedKeys = ui.keyEntries.size
+        ui.keyEntries.clear()
+        ui.rows.clear()
+        ui.stringName = ""
+        ui.selectedKeyIndex = 0
+        showToast("已清除 $clearedKeys 个 key")
+    }
+
     fun translateRow(rowIndex: Int) {
         if (rowIndex !in ui.rows.indices) return
         saveCurrentEdits()

@@ -88,6 +88,18 @@ fun AiChatContent(
      * 翻译/解释/总结三个按钮走 [onQuickSend],不再额外加回调。
      */
     onCopyQuote: ((String) -> Unit)? = null,
+    /**
+     * 「Clear」按钮回调:清除主面板当前选中的 keyEntries 与 rows,
+     * 同步清掉聊天顶部「已选择翻译(N)」面板与主面板表格。
+     * 仅主面板聊天传这个回调;不传则不渲染按钮(弹框场景不需要)。
+     *
+     * 第二个参数 [canClear] 表示当前是否有可清除的内容(用于控制按钮的 enabled 状态):
+     * - true:有选中 key 或表格有数据,按钮可点;
+     * - false:无可清除内容,按钮置灰。
+     * 不传则按钮始终可点(由回调内部自行 no-op)。
+     */
+    onClearSelected: (() -> Unit)? = null,
+    canClear: Boolean = true,
 ) {
     Box(modifier = modifier) {
         AiChatBody(
@@ -112,6 +124,8 @@ fun AiChatContent(
             quoteContent = quoteContent,
             onQuoteDismiss = onQuoteDismiss,
             onCopyQuote = onCopyQuote,
+            onClearSelected = onClearSelected,
+            canClear = canClear,
         )
         if (showContextPopup) {
             ContextPopupOverlay(
@@ -146,6 +160,8 @@ private fun AiChatBody(
     quoteContent: String? = null,
     onQuoteDismiss: (() -> Unit)? = null,
     onCopyQuote: ((String) -> Unit)? = null,
+    onClearSelected: (() -> Unit)? = null,
+    canClear: Boolean = true,
 ) {
     val quotedContentState = remember { mutableStateOf(quoteContent) }
     val listState = rememberLazyListState()
@@ -193,6 +209,19 @@ private fun AiChatBody(
                     style = compactTextStyle(colors.text),
                     fontWeight = FontWeight.Bold,
                 )
+                // 「Clear」按钮:仅主面板聊天传入 [onClearSelected] 时渲染(弹框场景不显示)。
+                // 位于 Context 按钮左侧,点击后清除主面板 keyEntries + rows,
+                // 同步清掉聊天顶部「已选择翻译(N)」面板与主面板表格。
+                // 没有可清除内容时(canClear = false)置灰,避免误点。
+                if (onClearSelected != null) {
+                    CompactButton(
+                        text = "Clear",
+                        onClick = onClearSelected,
+                        modifier = Modifier.width(60.dp),
+                        colors = colors,
+                        enabled = canClear,
+                    )
+                }
                 CompactButton(
                     text = "Context",
                     onClick = onOpenContext,
