@@ -1084,7 +1084,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         val root = JsonObject().apply {
             addProperty("model", model)
             addProperty("system", BATCH_TRANSLATE_SYSTEM_PROMPT)
-            addProperty("max_tokens", 4096)
+            addProperty("max_tokens", 8192)
             add(
                 "messages",
                 JsonArray().apply {
@@ -1461,7 +1461,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         val root = JsonObject().apply {
             addProperty("model", model)
             addProperty("system", REVIEW_SYSTEM_PROMPT)
-            addProperty("max_tokens", 2048)
+            addProperty("max_tokens", 4096)
             add(
                 "messages",
                 JsonArray().apply {
@@ -1621,7 +1621,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         }
         val root = JsonObject().apply {
             addProperty("model", model)
-            addProperty("max_tokens", 4096)
+            addProperty("max_tokens", 16000)
             val systemParts = buildString {
                 append(systemPrompt)
                 if (context.isNotBlank()) {
@@ -2406,7 +2406,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         val root = JsonObject().apply {
             addProperty("model", model)
             addProperty("system", SYSTEM_PROMPT)
-            addProperty("max_tokens", 1024)
+            addProperty("max_tokens", 2048)
             add(
                 "messages",
                 JsonArray().apply {
