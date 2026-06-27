@@ -227,7 +227,6 @@ class TodoReminderPopup(
     @Suppress("DEPRECATION")
     private fun buildNextLabel(reminder: TodoReminder): String {
         val now = timeFormatter.format(Date())
-        val next = reminder.nextTriggerAt?.let { timeFormatter.format(Date(it)) } ?: "-"
         val recurrenceDesc = when (reminder.recurrence) {
             TodoRecurrence.NONE -> "一次性"
             TodoRecurrence.DAILY -> "每日"
@@ -239,7 +238,15 @@ class TodoReminderPopup(
             TodoRecurrence.WEEKDAYS, TodoRecurrence.WEEKLY -> "自定义(${reminder.recurrenceDays.sorted().joinToString(",")})"
         }
         val timeOfDay = reminder.timeOfDay?.format() ?: "-"
-        return "触发:$now  ·  循环:$recurrenceDesc  ·  下次:$next  ·  时分:$timeOfDay"
+        // 一次性提醒:触发即结束,「下次」语义不准(弹框时 nextTriggerAt 通常 ≈ now,展示无意义)→
+        // 去掉「下次」字段,只保留触发时间 + 循环 + 时分。
+        // 循环提醒:展示「下次:…」(滚动后的下一次触发时间)让用户能预判。
+        return if (reminder.recurrence == TodoRecurrence.NONE) {
+            "触发:$now  ·  循环:$recurrenceDesc  ·  时分:$timeOfDay"
+        } else {
+            val next = reminder.nextTriggerAt?.let { timeFormatter.format(Date(it)) } ?: "-"
+            "触发:$now  ·  循环:$recurrenceDesc  ·  下次:$next  ·  时分:$timeOfDay"
+        }
     }
 
     private fun positionBottomRight() {
