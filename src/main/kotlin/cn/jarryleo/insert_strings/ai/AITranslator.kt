@@ -2309,6 +2309,17 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             }
             if (sb.isNotEmpty()) return sb.toString()
         }
+        // 2026.x 修复:OpenAI 协议下很多模型(Qwen、DeepSeek 蒸馏版、部分 OpenRouter 模型)
+        // 把思考直接嵌在 content 里的 `<think>...</think>` 标签中。流式路径由 SseStreamParser
+        // 实时切走;非流式路径在这里补一刀 — 提取标签内文本作为 reasoning,让 UI 的 Thought
+        // 折叠区有内容;否则这些模型走非流式通道时思考会直接撑高主气泡。
+        root.getAsJsonArray("choices")?.firstObject()?.getAsJsonObject("message")
+            ?.get("content")?.let { contentEl ->
+                if (contentEl.isJsonPrimitive) {
+                    val thinkContent = extractThinkContent(contentEl.asString)
+                    if (thinkContent.isNotEmpty()) return thinkContent
+                }
+            }
         return ""
     }
 
@@ -2319,7 +2330,13 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
     private fun extractAssistantText(root: JsonObject): String {
         // OpenAI 格式
         root.getAsJsonArray("choices")?.firstObject()?.getAsJsonObject("message")
-            ?.get("content")?.let { return it.extractText() }
+            ?.get("content")?.let {
+                val raw = it.extractText()
+                // 2026.x 修复:剔除 content 里的 `<think>...</think>` 块(部分 OpenAI 模型用这种
+                // 标签承载思考),否则思考会撑高主气泡。已通过 [extractReasoningText] 把思考
+                // 切到 reasoning 通道,这里只留正文。
+                return SseStreamParser.stripThinkTagsStatic(raw)
+            }
         // Anthropic 格式
         root.getAsJsonArray("content")?.let { contentArray ->
             if (contentArray.any { it.isJsonObject && it.asJsonObject.get("type")?.asString == "text" }) {
@@ -2331,6 +2348,48 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             }
         }
         return ""
+    }
+
+    /**
+     * 2026.x 修复(非流式路径):从 content 字符串中抽取 `<think>...</think>` 标签内的所有
+     * 文本(可能多对),用换行拼接。找不到标签或只有关闭标签时返回空串。
+     * 与 [SseStreamParser.stripThinkTagsStatic] 互补 —— 后者去掉标签只留正文,本函数只取标签内。
+     */
+    private fun extractThinkContent(text: String): String {
+        if (text.isEmpty()) return ""
+        val sb = StringBuilder()
+        var i = 0
+        while (i < text.length) {
+            val openThink = text.indexOf("<think>", i)
+            val openThinking = text.indexOf("<thinking>", i)
+            val openIdx = when {
+                openThink < 0 -> openThinking
+                openThinking < 0 -> openThink
+                else -> minOf(openThink, openThinking)
+            }
+            if (openIdx < 0) break
+            val (openTag, closeTag) = if (openThink == openIdx) {
+                "<think>" to "</think>"
+            } else {
+                "<thinking>" to "</thinking>"
+            }
+            val contentStart = openIdx + openTag.length
+            val closeIdx = text.indexOf(closeTag, contentStart)
+            if (closeIdx < 0) {
+                // 没有关闭标签 — 视作剩余全是思考
+                if (contentStart < text.length) {
+                    if (sb.isNotEmpty()) sb.append('\n')
+                    sb.append(text, contentStart, text.length)
+                }
+                break
+            }
+            if (closeIdx > contentStart) {
+                if (sb.isNotEmpty()) sb.append('\n')
+                sb.append(text, contentStart, closeIdx)
+            }
+            i = closeIdx + closeTag.length
+        }
+        return sb.toString()
     }
 
     /**

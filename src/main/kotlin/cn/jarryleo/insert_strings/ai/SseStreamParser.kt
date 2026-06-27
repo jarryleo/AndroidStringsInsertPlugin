@@ -22,6 +22,13 @@ import java.nio.charset.StandardCharsets
  *   折叠区。拆开后,reply 字段(content)放最终回答,reasoning 字段(thinking)放
  *   思考过程,各司其职,UI 上 Thinking 区仅在 reasoning 非空时出现。
  *
+ * 2026.x 修复:OpenAI 协议下很多模型(Qwen、DeepSeek 蒸馏版、OpenRouter 上大量
+ * 推理模型)不在 `reasoning_content` 字段里吐思考,而是直接把 `<think>...</think>`
+ * 标签嵌在 `content` 字符串里。本解析器扫描 content delta,自动把标签内文本
+ * 切到 reasoningBuf(对应 UI 的折叠 Thought 区),标签外文本继续进 contentBuf
+ * (主回复区)。这样这些模型在 OpenAI 协议下也能像原生 reasoning 模型一样
+ * 走「思考瀑布流 + 主回复」两段式展示,而不是把整段思考塞进主气泡撑高。
+ *
  * 为什么不把累加后的全文再 push 一次(全量回调):
  * - 全量回调在大回复时会重复构造整段字符串,Compose state diff 也会增大;
  * - 增量回调让调用方自己实现累加 + 节流策略,更灵活。
@@ -55,11 +62,73 @@ internal class SseStreamParser(
     private val contentBuf = StringBuilder()
     private val reasoningBuf = StringBuilder()
 
+    /**
+     * 2026.x 修复:OpenAI 协议下 `<think>` 标签的状态机。
+     * false = 处于「正文」段(进 contentBuf);true = 处于「思考」段(进 reasoningBuf)。
+     * 跨 delta 累积,标签可能拆成多段到达(如 `<think>` 拆成 "<th" + "ink>")。
+     */
+    private var insideThink = false
+
+    companion object {
+        // 2026.x 修复:`<think>...</think>` 与 `<thinking>...</thinking>` 两种标签都支持,
+        // 不同 OpenAI 兼容模型用的写法不一样(Qwen 走前者,部分 OpenRouter 模型走后者)。
+        const val THINK_OPEN_TAG = "<think>"
+        const val THINK_CLOSE_TAG = "</think>"
+        const val THINKING_OPEN_TAG = "<thinking>"
+        const val THINKING_CLOSE_TAG = "</thinking>"
+
+        /**
+         * 2026.x 静态工具:把文本中的 `<think>...</think>`(或 `<thinking>...</thinking>`)
+         * 切走,只保留标签外的「正文」文本。给非流式路径使用 —— 流式路径由
+         * [routeContentWithThinkTags] 实时处理(它还需要把标签内文本塞到 reasoningBuf)。
+         *
+         * 行为:
+         * - 完整标签对 → 标签 + 内部文本都删掉。
+         * - 只有开标签 `<think>` 没有关标签 → 视作从该位置起全为思考,整段都删掉。
+         * - 没有标签 → 原样返回。
+         *
+         * 暴露为 public,让 [cn.jarryleo.insert_strings.ai.AITranslator.extractAssistantText]
+         * (非流式响应解析)也能复用同一套切标签逻辑。
+         */
+        fun stripThinkTagsStatic(text: String): String {
+            if (text.isEmpty()) return text
+            if (!text.contains(THINK_OPEN_TAG) && !text.contains(THINKING_OPEN_TAG)) return text
+            val sb = StringBuilder(text.length)
+            var i = 0
+            while (i < text.length) {
+                val openThink = text.indexOf(THINK_OPEN_TAG, i)
+                val openThinking = text.indexOf(THINKING_OPEN_TAG, i)
+                val openIdx = when {
+                    openThink < 0 -> openThinking
+                    openThinking < 0 -> openThink
+                    else -> minOf(openThink, openThinking)
+                }
+                if (openIdx < 0) {
+                    sb.append(text, i, text.length)
+                    break
+                }
+                // 标签之前的部分原样保留
+                sb.append(text, i, openIdx)
+                // 跳到标签结尾
+                val openTag = if (openThink == openIdx) THINK_OPEN_TAG else THINKING_OPEN_TAG
+                i = openIdx + openTag.length
+                // 找对应的关闭标签;找不到则视作从开标签起全为思考,跳过剩余文本
+                val closeTag = if (openThink == openIdx) THINK_CLOSE_TAG else THINKING_CLOSE_TAG
+                val closeIdx = text.indexOf(closeTag, i)
+                if (closeIdx < 0) {
+                    break
+                }
+                i = closeIdx + closeTag.length
+            }
+            return sb.toString()
+        }
+    }
+
     /** 流解析结束后供调用方读取的「最终回答」全文(OpenAI content / Anthropic text)。 */
     val contentText: String
         get() = contentBuf.toString()
 
-    /** 流解析结束后供调用方读取的「思考/推理」全文(OpenAI reasoning_content / Anthropic thinking)。 */
+    /** 流解析结束后供调用方读取的「思考/推理」全文(OpenAI reasoning_content / Anthropic thinking / OpenAI content 内 `<think>` 块)。 */
     val reasoningText: String
         get() = reasoningBuf.toString()
 
@@ -115,6 +184,74 @@ internal class SseStreamParser(
 
     // ===== OpenAI =====
 
+    /**
+     * 2026.x 修复:扫描 content 文本中的 `<think>...</think>` 标签,把标签内文本
+     * 切到 [reasoningBuf],标签外文本继续进 [contentBuf]。状态机:
+     * - [insideThink] = false:在「正文」段;遇 <think> 切到「思考」段。
+     * - [insideThink] = true:在「思考」段;遇 </think> 切回「正文」段。
+     * 跨 delta 累积,标签可能拆成多段到达(模型分 chunk 流式输出),所以用
+     * indexOf + 字符串切片逐段处理,而不是正则。
+     *
+     * 同时支持 `<thinking>...</thinking>` 标签(部分模型用这种写法)。
+     *
+     * 异常情况(模型发了 <think> 但没发 </think>):后续 content 全部进 reasoningBuf,
+     * 不会污染 contentBuf。
+     */
+    private fun routeContentWithThinkTags(text: String) {
+        if (text.isEmpty()) return
+        var remaining = text
+        // 多次循环处理一对标签;一次 delta 里可能同时出现 <think>...</think>...<think>...(罕见但可能)
+        while (remaining.isNotEmpty()) {
+            if (!insideThink) {
+                // 当前在正文段;找下一个 <think> / <thinking>
+                val openThink = remaining.indexOf(THINK_OPEN_TAG)
+                val openThinking = remaining.indexOf(THINKING_OPEN_TAG)
+                // 取两者中最早出现的位置
+                val openIdx = when {
+                    openThink < 0 -> openThinking
+                    openThinking < 0 -> openThink
+                    else -> minOf(openThink, openThinking)
+                }
+                if (openIdx < 0) {
+                    // 没有标签,整段都进 content
+                    contentBuf.append(remaining)
+                    remaining = ""
+                } else {
+                    // 标签之前的部分进 content
+                    if (openIdx > 0) {
+                        contentBuf.append(remaining.substring(0, openIdx))
+                    }
+                    // 跳过标签本身(根据是哪个标签决定长度)
+                    val tag = if (openThink >= 0 && openThink == openIdx) THINK_OPEN_TAG else THINKING_OPEN_TAG
+                    remaining = remaining.substring(openIdx + tag.length)
+                    insideThink = true
+                }
+            } else {
+                // 当前在思考段;找下一个 </think> / </thinking>
+                val closeThink = remaining.indexOf(THINK_CLOSE_TAG)
+                val closeThinking = remaining.indexOf(THINKING_CLOSE_TAG)
+                val closeIdx = when {
+                    closeThink < 0 -> closeThinking
+                    closeThinking < 0 -> closeThink
+                    else -> minOf(closeThink, closeThinking)
+                }
+                if (closeIdx < 0) {
+                    // 没有关闭标签(流末尾或模型忘了),整段都进 reasoning
+                    reasoningBuf.append(remaining)
+                    remaining = ""
+                } else {
+                    // 关闭标签之前的部分进 reasoning
+                    if (closeIdx > 0) {
+                        reasoningBuf.append(remaining.substring(0, closeIdx))
+                    }
+                    val tag = if (closeThink >= 0 && closeThink == closeIdx) THINK_CLOSE_TAG else THINKING_CLOSE_TAG
+                    remaining = remaining.substring(closeIdx + tag.length)
+                    insideThink = false
+                }
+            }
+        }
+    }
+
     private fun handleOpenAiDelta(root: com.google.gson.JsonObject) {
         // 顶层 error 字段:直接当作整流错误,既不解析内容也不累积后续
         root.get("error")?.let { err ->
@@ -133,7 +270,14 @@ internal class SseStreamParser(
             ?.asJsonObject ?: return
         val delta = choice.getAsJsonObject("delta") ?: return
 
-        // 文本增量(最终回答)—— 进 content 累加器
+        // 文本增量(最终回答)—— 2026.x 修复:在累加到 contentBuf 之前先经
+        // routeContentWithThinkTags 扫描 `<think>...</think>` 标签,把标签内
+        // 文本切到 reasoningBuf(对应 UI 的折叠 Thought 区)。
+        // 行为:
+        //  - 标签外 → contentBuf(主回复区)
+        //  - 标签内 → reasoningBuf(思考区,UI 折叠)
+        //  - 无标签的模型 → 行为与原版一致(整段进 contentBuf)
+        // 状态机内部用 insideThink 跨 delta 累积,标签拆成多段到达也能正确处理。
         delta.get("content")?.let { contentEl ->
             val text = when {
                 contentEl.isJsonNull -> null
@@ -141,7 +285,7 @@ internal class SseStreamParser(
                 else -> contentEl.toString()
             }
             if (!text.isNullOrEmpty()) {
-                contentBuf.append(text)
+                routeContentWithThinkTags(text)
                 onDelta(contentBuf.toString(), reasoningBuf.toString())
             }
         }
