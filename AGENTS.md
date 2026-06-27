@@ -46,8 +46,12 @@ There is no `runIde` task. To test the plugin, install the ZIP from `build/distr
   - 过期清理: 24h+ 过期的「一次性」提醒在 scheduler 启动时静默清除(用户已确认);
     临近过期的一次性提醒立即触发弹框;循环提醒无论过期多久都滚动到下一次。
   - AI 工具参数: `todo_add` / `todo_update` 暴露 `reminderTime` (Unix 毫秒时间戳) +
+    `reminderDate` (YYYY-MM-DD 本地日期,**仅一次性生效**) +
+    `reminderTimeOfDay` (HH:MM,与 reminderDate 配套) +
     `recurrence` (NONE/DAILY/CUSTOM,无 WEEKDAYS/WEEKLY) + `recurrenceDays` (1-7 数组) +
-    `clearReminder` (bool)。AI 自行把「5 分钟后」「明天下午 3 点」「每周一三五」转成结构化参数。
+    `clearReminder` (bool)。AI 自行把「5 分钟后」「明天下午 3 点」「每周一三五」转成结构化参数;
+    「3 月 15 日上午 10 点提醒我」类指定日期场景**优先**用 `reminderDate` + `reminderTimeOfDay`,
+    系统按本地时区组装 timestamp,AI 不用算时区/跨日/跨年。
 
 ## Key Conventions
 

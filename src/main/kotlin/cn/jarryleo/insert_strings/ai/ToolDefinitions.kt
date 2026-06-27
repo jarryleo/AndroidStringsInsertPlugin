@@ -173,6 +173,9 @@ object ToolDefinitions {
             "**支持设置提醒**:可选 reminderTime(Unix 毫秒时间戳) + recurrence(NONE/DAILY/CUSTOM,无 WEEKDAYS/WEEKLY)" +
                 " + recurrenceDays(1-7 数组,仅 CUSTOM 生效);" +
                 "**「工作日」= CUSTOM + [1,2,3,4,5],「周末」= CUSTOM + [6,7]**,不要传 WEEKDAYS / WEEKLY。" +
+                "**指定日期提醒**(用户说「3 月 15 日上午 10 点」):优先用 reminderDate(YYYY-MM-DD)" +
+                " + reminderTimeOfDay(HH:MM,缺省 09:00)两个结构化字段,系统按本地时区组装 timestamp," +
+                "AI 不用算时区、跨日、跨年;recurrence 强制 NONE。" +
                 "到点会在 IDE 右下角弹非模态提醒框,用户可选「完成 / 1m / 5m / 10m」。" +
             "**典型场景**:用户说「提醒我周五前修 X」「5 分钟后提醒我喝水」「明天下午 3 点开周会」时," +
             "先调 current_time 拿时间戳,再 todo_add(title=..., reminderTime=..., recurrence=...);" +
@@ -1011,7 +1014,32 @@ object ToolDefinitions {
                         "可选,首次提醒时间(Unix 毫秒时间戳)。" +
                             "用户说「5 分钟后提醒我喝水」时,先把 now + 5*60*1000 算出来再传;" +
                             "说「明天下午 3 点」时,用本地时区算出对应时间戳再传(系统按本地时区解析)。" +
-                            "省略时 = 不设提醒。新增后会立即进入调度队列,到点触发右下角弹框。"
+                            "**与 reminderDate 互斥**:传了 reminderDate 时,本字段被忽略," +
+                            "系统按\"日期 + 时分\"重新组装 timestamp。省略时 = 不设提醒。" +
+                            "新增后会立即进入调度队列,到点触发右下角弹框。"
+                    )
+                })
+                add("reminderDate", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "可选,指定日期提醒(YYYY-MM-DD 字符串,本地日期)。" +
+                            "**仅一次性提醒生效**(recurrence=NONE);循环类型下传了也会被忽略。" +
+                            "配合 reminderTimeOfDay 一起用,系统按本地时区组装 timestamp," +
+                            "AI 不用算时区、跨日、跨年。" +
+                            "用户说「3 月 15 日上午 10 点提醒我」→ reminderDate=\"2026-03-15\", " +
+                            "reminderTimeOfDay=\"10:00\";用户说「下周一提醒我交周报」→ 算下周一日期 " +
+                            "(假设是 2026-06-29),reminderDate=\"2026-06-29\", reminderTimeOfDay=\"09:00\"。" +
+                            "**不传本字段 = 走 reminderTime 的旧路径**(保留向后兼容)。"
+                    )
+                })
+                add("reminderTimeOfDay", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "可选,时分(HH:MM 24h 字符串,如 \"09:00\" / \"15:30\" / \"23:45\")," +
+                            "**仅与 reminderDate 配套使用**;不传 reminderDate 时本字段被忽略。" +
+                            "缺省时默认 \"09:00\"。"
                     )
                 })
                 add("recurrence", obj {
@@ -1090,7 +1118,26 @@ object ToolDefinitions {
                         "description",
                         "可选,新提醒时间(Unix 毫秒时间戳)。" +
                             "null = 不改;省略 = 不改;不传 recurrence 时,语义 = 一次性提醒。" +
+                            "**与 reminderDate 互斥**:传了 reminderDate 时,本字段被忽略," +
+                            "系统按\"日期 + 时分\"重新组装 timestamp。" +
                             "配合 clearReminder=true 可显式清除提醒。"
+                    )
+                })
+                add("reminderDate", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "可选,新指定日期(YYYY-MM-DD 字符串),语义同 todo_add.reminderDate。" +
+                            "null = 不改;**仅一次性提醒生效**。" +
+                            "配合 reminderTimeOfDay 一起用,系统按本地时区重新组装 timestamp。"
+                    )
+                })
+                add("reminderTimeOfDay", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "可选,新时分(HH:MM 字符串),语义同 todo_add.reminderTimeOfDay。" +
+                            "null = 不改;**仅与 reminderDate 配套使用**,且仅一次性提醒生效。"
                     )
                 })
                 add("recurrence", obj {

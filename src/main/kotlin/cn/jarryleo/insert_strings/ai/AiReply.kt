@@ -172,10 +172,20 @@ sealed class AiAction {
      * @param title    必填,代办的标题(trim 后非空);空时 driver 拒绝并返回错误 tool_result。
      * @param content  可选,详细描述(允许为空)。
      * @param priority 可选,优先级;为空时回退 NORMAL。容错大小写、空格、未知值。
-     * @param reminderTime   可选,首次提醒时间(unix 毫秒时间戳);null = 不设置提醒。
-     *                        AI 转换「5 分钟后」「明天下午 3 点」时,自己算好时间戳再传。
-     *                        一次性提醒时 = 触发时间;循环提醒时 = 首次触发时间,
-     *                        后续按 [recurrence] 滚动。
+     * @param reminderTime     可选,首次提醒时间(unix 毫秒时间戳);null = 不设置提醒。
+     *                          AI 转换「5 分钟后」「明天下午 3 点」时,自己算好时间戳再传。
+     *                          一次性提醒时 = 触发时间;循环提醒时 = 首次触发时间,
+     *                          后续按 [recurrence] 滚动。
+     *                          与 [reminderDate] 互斥:传了 [reminderDate] 时,本字段被忽略,
+     *                          系统按"日期 + 时分"重新组装 timestamp。
+     * @param reminderDate     可选,指定日期提醒(YYYY-MM-DD 字符串,本地日期)。
+     *                          **仅一次性提醒生效**(recurrence=NONE);循环类型下传了也会被忽略。
+     *                          配合 [reminderTimeOfDay] 一起用,系统按本地时区组装 timestamp,
+     *                          AI 不用算时区、跨日、跨年。例:用户说「3 月 15 日上午 10 点提醒我」,
+     *                          AI 传 reminderDate="2026-03-15", reminderTimeOfDay="10:00"。
+     * @param reminderTimeOfDay 可选,时分(HH:MM 24h 字符串),仅与 [reminderDate] 配套使用。
+     *                          缺省时默认 09:00。例:"09:30" / "15:00" / "23:45"。
+     *                          不与 [reminderDate] 同传时本字段被忽略。
      * @param recurrence     可选,循环类型(NONE/DAILY/CUSTOM,无 WEEKDAYS/WEEKLY);null/未知 = NONE。
      *                        NONE 时,触发后自动清除提醒;
      *                        DAILY/CUSTOM 时,触发后滚动到下一次。
@@ -189,6 +199,8 @@ sealed class AiAction {
         val content: String,
         val priority: String,
         val reminderTime: Long? = null,
+        val reminderDate: String? = null,
+        val reminderTimeOfDay: String? = null,
         val recurrence: String? = null,
         val recurrenceDays: List<Int>? = null,
     ) : AiAction()
@@ -207,6 +219,12 @@ sealed class AiAction {
      * @param isCompleted 新完成状态(null = 不改;true / false 直接赋值)。
      * @param reminderTime   提醒时间(同 [TodoAdd.reminderTime]);null = 不改;
      *                        配合 [clearReminder]=true 可实现「清除提醒」语义(此时 reminderTime/recurrence 等被忽略)。
+     *                        与 [reminderDate] 互斥:传了 [reminderDate] 时,本字段被忽略,
+     *                        系统按"日期 + 时分"重新组装 timestamp。
+     * @param reminderDate     指定日期(YYYY-MM-DD 字符串),语义同 [TodoAdd.reminderDate];
+     *                          null = 不改;**仅一次性提醒生效**。
+     * @param reminderTimeOfDay 时分(HH:MM 字符串),语义同 [TodoAdd.reminderTimeOfDay];
+     *                          null = 不改;**仅与 [reminderDate] 配套使用**,且仅一次性提醒生效。
      * @param recurrence     循环类型(同 [TodoAdd.recurrence]);null = 不改。
      * @param recurrenceDays 自定义循环的星期几(同 [TodoAdd.recurrenceDays]);null = 不改。
      * @param clearReminder  设为 true 时清除整条提醒(等价于把 TodoItem.reminder 置 null),
@@ -219,6 +237,8 @@ sealed class AiAction {
         val priority: String?,
         val isCompleted: Boolean?,
         val reminderTime: Long? = null,
+        val reminderDate: String? = null,
+        val reminderTimeOfDay: String? = null,
         val recurrence: String? = null,
         val recurrenceDays: List<Int>? = null,
         val clearReminder: Boolean = false,

@@ -33,6 +33,7 @@ internal class InsertStringsChatContextBuilder(
         private val HUMAN_TIME_FORMAT = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
         // reminder 摘要里的时间格式(2026.x 新增):yyyy-MM-dd HH:mm,精度足够让人/AI 理解。
         private val REMINDER_FMT = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+        private val TRIGGER_DATE_FMT = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
     }
 
     fun build(): String {
@@ -228,6 +229,13 @@ internal class InsertStringsChatContextBuilder(
                                                 "triggerInMinutes",
                                                 (at - nowMillis) / 60_000L
                                             )
+                                            // 触发日期(YYYY-MM-DD 本地),让 AI 一眼看出"是哪一天",方便回答
+                                            // 「明天的提醒是啥」「这周有哪些提醒」类问题,以及让 AI 写 todo_update 时
+                                            // 可以直接用 reminderDate 改日期。
+                                            addProperty(
+                                                "triggerDate",
+                                                TRIGGER_DATE_FMT.format(java.util.Date(at))
+                                            )
                                         }
                                         addProperty("recurrence", r.recurrence.name)
                                         if (tod != null) {
@@ -248,10 +256,14 @@ internal class InsertStringsChatContextBuilder(
                     "这是用户主页 Todo tab 维护的待办清单(active 部分前 ${TODO_CONTEXT_LIMIT} 条)。" +
                         "AI 可通过 todo_list / todo_add / todo_update / todo_delete 工具读写," +
                         "完整字段(content / completedAt / reminder 等)用 todo_list 拿。" +
-                        "upcomingReminders 是按 nextTriggerAt 升序的最近 5 条(用于「下一个提醒」类问题)。" +
+                        "upcomingReminders 是按 nextTriggerAt 升序的最近 5 条(用于「下一个提醒」类问题);" +
+                        "每条 reminder 里有 triggerDate(YYYY-MM-DD 本地)字段,告诉 AI 提醒落在哪一天。" +
                         "**典型用法**:用户说「提醒我 X」「记下 Y」时,调 todo_add;" +
                         "用户说「5 分钟后提醒我喝水」时,**先调 current_time 拿最新 timestamp**(上下文里的 now 可能已过时)," +
                         "再算 timestamp + 5*60*1000,再调 todo_add(title='喝水', reminderTime=..., recurrence='NONE');" +
+                        "用户说「3 月 15 日上午 10 点提醒我交季报」时,基于 current_time + timezone 算出 2026-03-15 这个日期," +
+                        "**优先**调 todo_add(title='交季报', reminderDate='2026-03-15', reminderTimeOfDay='10:00')," +
+                        "系统按本地时区组装 timestamp,AI 不用自己跨日跨年;" +
                         "用户说「明天下午 3 点」时,基于 current_time 的 timestamp + timezone 算次日 15:00 本地时间戳,再调 todo_add;" +
                         "用户说「每周一三五提醒开会」时,算下一次匹配日的时间戳,再调 todo_add(title='开会', reminderTime=..., recurrence='CUSTOM', recurrenceDays=[1,3,5]);" +
                         "用户问「我有什么待办」/「都做完了吗」时,调 todo_list 拿完整数据,本字段只够简单提醒场景。"

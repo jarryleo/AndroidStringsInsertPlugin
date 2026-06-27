@@ -466,6 +466,7 @@ private fun formatReminderTime(timestamp: Long): String {
 /**
  * 循环类型的简短描述,例如「每日 09:30」「周一/三/五 09:30」「一次性」。
  */
+@Suppress("DEPRECATION")
 private fun formatRecurrence(r: TodoReminder): String {
     val tod = r.timeOfDay?.format() ?: "-"
     return when (r.recurrence) {
@@ -728,6 +729,11 @@ private fun TodoEditForm(
  * - `timeOfDay` 只在「Save Reminder」时由 hourText/minuteText 解析得到,不在输入过程中维护。
  * - 「Now / +5m」按钮同时更新 hourText + minuteText(让输入框显示新值)。
  * - 校验:hour ∈ [0,23],minute ∈ [0,59],Save 时把无效输入显示为红色提示并不入库。
+ *
+ * **指定日期模式**(2026.x 一次性新增):
+ * - recurrence=NONE 时,UI 多出「日期」输入行(YYYY / MM / DD 三个数字框 + Today / Tomorrow 快捷按钮);
+ * - 日期只对一次性提醒生效(DAILY/CUSTOM 时整行不显示,沿用旧逻辑)。
+ * - 老 reminder 里 nextTriggerAt 是绝对 timestamp;UI 启动时把 timestamp 反推成「日期 + 时分」作为默认值。
  */
 @Composable
 private fun TodoReminderSection(
@@ -750,6 +756,14 @@ private fun TodoReminderSection(
     var customDays by remember(initial) {
         mutableStateOf((initial?.recurrenceDays ?: emptySet()).toMutableSet())
     }
+    // 指定日期(NONE 时用):从 initial.nextTriggerAt 反推本地年月日,无值时回退今天。
+    // 只在 initial 变化时同步(用户改输入框时不会被覆盖),与 hourText/minuteText 策略一致。
+    val seedCal = Calendar.getInstance().apply {
+        if (initial?.nextTriggerAt != null) timeInMillis = initial.nextTriggerAt!!
+    }
+    var yearText by remember(initial) { mutableStateOf("%04d".format(seedCal.get(Calendar.YEAR))) }
+    var monthText by remember(initial) { mutableStateOf("%02d".format(seedCal.get(Calendar.MONTH) + 1)) }
+    var dayText by remember(initial) { mutableStateOf("%02d".format(seedCal.get(Calendar.DAY_OF_MONTH))) }
     var error by remember { mutableStateOf("") }
 
     Column(
@@ -786,6 +800,67 @@ private fun TodoReminderSection(
                     onClick = { recurrence = r },
                     colors = colors,
                     primary = recurrence == r,
+                )
+            }
+        }
+
+        // 指定日期(2026.x 一次性新增):仅 NONE 时显示。DAILY / CUSTOM 由循环规则决定日期,无需指定。
+        if (recurrence == TodoRecurrence.NONE) {
+            SettingsLabel("Date", colors)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                CompactTextField(
+                    value = yearText,
+                    onValueChange = { input ->
+                        yearText = input.filter { it.isDigit() }.take(4)
+                    },
+                    modifier = Modifier.width(56.dp),
+                    singleLine = true,
+                    colors = colors,
+                )
+                Text("-", color = colors.text, style = compactTextStyle(colors.text))
+                CompactTextField(
+                    value = monthText,
+                    onValueChange = { input ->
+                        monthText = input.filter { it.isDigit() }.take(2)
+                    },
+                    modifier = Modifier.width(40.dp),
+                    singleLine = true,
+                    colors = colors,
+                )
+                Text("-", color = colors.text, style = compactTextStyle(colors.text))
+                CompactTextField(
+                    value = dayText,
+                    onValueChange = { input ->
+                        dayText = input.filter { it.isDigit() }.take(2)
+                    },
+                    modifier = Modifier.width(40.dp),
+                    singleLine = true,
+                    colors = colors,
+                )
+                Spacer(Modifier.width(6.dp))
+                CompactButton(
+                    text = "Today",
+                    onClick = {
+                        val cal = Calendar.getInstance()
+                        yearText = "%04d".format(cal.get(Calendar.YEAR))
+                        monthText = "%02d".format(cal.get(Calendar.MONTH) + 1)
+                        dayText = "%02d".format(cal.get(Calendar.DAY_OF_MONTH))
+                    },
+                    colors = colors,
+                )
+                CompactButton(
+                    text = "Tomorrow",
+                    onClick = {
+                        val cal = Calendar.getInstance().apply { add(Calendar.DAY_OF_MONTH, 1) }
+                        yearText = "%04d".format(cal.get(Calendar.YEAR))
+                        monthText = "%02d".format(cal.get(Calendar.MONTH) + 1)
+                        dayText = "%02d".format(cal.get(Calendar.DAY_OF_MONTH))
+                    },
+                    colors = colors,
                 )
             }
         }
@@ -936,12 +1011,25 @@ private fun TodoReminderSection(
                     }
                     val timeOfDay = TodoTimeOfDay(h, m)
                     val now = System.currentTimeMillis()
-                    // 一次性:今天过了就滚到明天;循环:scheduler 会自己算下一次。
-                    val candidate = combineNowWithTimeOfDay(now, timeOfDay)
-                    val finalTrigger = if (recurrence == TodoRecurrence.NONE && candidate <= now) {
-                        candidate + 24L * 60 * 60 * 1000
+                    val finalTrigger: Long = if (recurrence == TodoRecurrence.NONE) {
+                        // 一次性:按"用户指定的日期 + 时分"组装 timestamp,即使该时间已过也尊重日期
+                        // (用户写「3 月 15 日 10 点」就是 3 月 15 日 10 点;过期由 scheduler 兜底处理)。
+                        val y = yearText.toIntOrNull() ?: 0
+                        val mo = monthText.toIntOrNull() ?: 0
+                        val d = dayText.toIntOrNull() ?: 0
+                        if (y < 1970 || mo !in 1..12 || d !in 1..31) {
+                            error = "日期不合法,请检查 YYYY-MM-DD。"
+                            return@CompactButton
+                        }
+                        val cal = Calendar.getInstance().apply {
+                            clear()
+                            set(y, mo - 1, d, h, m, 0)
+                            set(Calendar.MILLISECOND, 0)
+                        }
+                        cal.timeInMillis
                     } else {
-                        candidate
+                        // 循环:按今天的时分组装,scheduler 会自己算下一次触发。
+                        combineNowWithTimeOfDay(now, timeOfDay)
                     }
                     val reminder = TodoReminder(
                         enabled = true,

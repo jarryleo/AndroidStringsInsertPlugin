@@ -1723,6 +1723,8 @@ internal class InsertStringsChatDriver(
                         val priority = cn.jarryleo.insert_strings.ai.TodoPriority.fromName(action.priority)
                         val reminder = buildReminderFromAiArgs(
                             reminderTime = action.reminderTime,
+                            reminderDate = action.reminderDate,
+                            reminderTimeOfDay = action.reminderTimeOfDay,
                             recurrence = action.recurrence,
                             recurrenceDays = action.recurrenceDays,
                         )
@@ -1791,12 +1793,17 @@ internal class InsertStringsChatDriver(
                             }
                             return@forEach
                         }
-                        // reminder 计算:clearReminder=true → null;否则按 reminderTime/recurrence/recurrenceDays 合成
+                        // reminder 计算:clearReminder=true → null;否则按 reminderTime/reminderDate/recurrence/recurrenceDays 合成
                         val newReminder: cn.jarryleo.insert_strings.ai.TodoReminder? = when {
                             action.clearReminder -> null
-                            action.reminderTime != null || action.recurrence != null || action.recurrenceDays != null -> {
+                            action.reminderTime != null || action.reminderDate != null ||
+                                action.reminderTimeOfDay != null || action.recurrence != null ||
+                                action.recurrenceDays != null -> {
                                 buildReminderFromAiArgs(
                                     reminderTime = action.reminderTime ?: current.reminder?.nextTriggerAt,
+                                    reminderDate = action.reminderDate,
+                                    reminderTimeOfDay = action.reminderTimeOfDay
+                                        ?: current.reminder?.timeOfDay?.format(),
                                     recurrence = action.recurrence,
                                     recurrenceDays = action.recurrenceDays,
                                 )
@@ -1912,17 +1919,45 @@ internal class InsertStringsChatDriver(
      * 把 AI 传入的 reminder 参数合成为 [cn.jarryleo.insert_strings.ai.TodoReminder]。
      *
      * 规则:
-     * - [reminderTime] 为 null 时返回 null(没有提醒) — 任何其它字段(reminderTime=null)
-     *   即便 AI 填了 recurrence/recurrenceDays 也视为「没传 reminder」,不构造。
+     * - 没有任何 reminder 信息([reminderTime] / [reminderDate] 都为 null)→ 返回 null(无提醒)。
+     * - [reminderDate] 出现时(仅一次性有效):
+     *   - 解析 [reminderDate] (YYYY-MM-DD) + [reminderTimeOfDay] (HH:MM,缺省 09:00) → 本地时区 timestamp。
+     *   - **忽略** [reminderTime](即便 AI 也传了 timestamp,以 [reminderDate] 为准 —— 这是用户
+     *     表达「指定日期」最直接的方式,避免 AI 自己算时区出错)。
+     *   - recurrence 强制 NONE(指定日期本身是"一次性"语义)。
+     * - 没传 [reminderDate] 时走旧路径(reminderTime 是绝对 timestamp)。
      * - [recurrence] 非法时回退 NONE;空时 = NONE(一次性)。
      * - [recurrenceDays] 仅在 recurrence=CUSTOM 时用,其它类型忽略。
-     * - timeOfDay 从 reminderTime 抽 hour:minute,供循环滚动。
+     * - timeOfDay 从最终 timestamp 抽 hour:minute,供循环滚动 / UI 展示。
      */
     private fun buildReminderFromAiArgs(
         reminderTime: Long?,
+        reminderDate: String?,
+        reminderTimeOfDay: String?,
         recurrence: String?,
         recurrenceDays: List<Int>?,
     ): cn.jarryleo.insert_strings.ai.TodoReminder? {
+        val parsedDate = parseReminderDate(reminderDate)
+        if (parsedDate != null) {
+            // 路径 A:用户用「指定日期」语义。reminderDate 出现即视为一次性,
+            // 即便 AI 也传了 recurrence/recurrenceDays 也忽略(避免互相冲突)。
+            val (hour, minute) = parseReminderTimeOfDay(reminderTimeOfDay) ?: (9 to 0)
+            val cal = java.util.Calendar.getInstance().apply {
+                clear()
+                set(parsedDate.first, parsedDate.second, parsedDate.third, hour, minute, 0)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }
+            val ts = cal.timeInMillis
+            val tod = cn.jarryleo.insert_strings.ai.TodoTimeOfDay(hour, minute)
+            return cn.jarryleo.insert_strings.ai.TodoReminder(
+                enabled = true,
+                nextTriggerAt = ts,
+                recurrence = cn.jarryleo.insert_strings.ai.TodoRecurrence.NONE,
+                timeOfDay = tod,
+                recurrenceDays = mutableSetOf(),
+            )
+        }
+        // 路径 B:旧路径,reminderTime 是绝对 timestamp
         if (reminderTime == null) return null
         val rec = cn.jarryleo.insert_strings.ai.TodoRecurrence.fromName(recurrence)
         val tod = cn.jarryleo.insert_strings.ai.TodoReminder.deriveDefaultsFrom(reminderTime).first
@@ -1936,6 +1971,34 @@ internal class InsertStringsChatDriver(
             timeOfDay = tod,
             recurrenceDays = days,
         )
+    }
+
+    /**
+     * 解析 [reminderDate] (YYYY-MM-DD) → (year, month0based, dayOfMonth);解析失败返回 null。
+     * 月份从 0 开始(与 [java.util.Calendar] 口径一致),内部转换时已经 +0 处理,调用方直接传给 Calendar.set 即可。
+     */
+    private fun parseReminderDate(raw: String?): Triple<Int, Int, Int>? {
+        if (raw.isNullOrBlank()) return null
+        val s = raw.trim()
+        if (s.length != 10 || s[4] != '-' || s[7] != '-') return null
+        val y = s.substring(0, 4).toIntOrNull() ?: return null
+        val m = s.substring(5, 7).toIntOrNull() ?: return null
+        val d = s.substring(8, 10).toIntOrNull() ?: return null
+        if (m !in 1..12 || d !in 1..31) return null
+        return Triple(y, m - 1, d)
+    }
+
+    /**
+     * 解析 [reminderTimeOfDay] (HH:MM) → (hour, minute);解析失败返回 null(由调用方决定默认值)。
+     */
+    private fun parseReminderTimeOfDay(raw: String?): Pair<Int, Int>? {
+        if (raw.isNullOrBlank()) return null
+        val s = raw.trim()
+        if (s.length != 5 || s[2] != ':') return null
+        val h = s.substring(0, 2).toIntOrNull() ?: return null
+        val m = s.substring(3, 5).toIntOrNull() ?: return null
+        if (h !in 0..23 || m !in 0..59) return null
+        return h to m
     }
 
     /**
