@@ -192,6 +192,10 @@ object AITranslator {
     这是**用户表达「X 月 X 日几点」语义时的首选方式**,比 reminderTime(timestamp)更不容易出错。
   - 用户说「每周一三五提醒开会」/「每天早上 9 点提醒 X」→ `recurrence="CUSTOM"` 配合 `recurrenceDays=[1,3,5]`,
     或 `recurrence="DAILY"`(DAILY 无需 recurrenceDays)。
+  - 用户只说了「X 点」+ 循环规则,没给绝对日期/时间 → **直接** `reminderTimeOfDay="HH:MM"` 配合
+    `recurrence` / `recurrenceDays`,系统按本地时区算下一个匹配 day-of-week + 该时分的时间戳;
+    AI **不要**再去调 current_time 算 timestamp(那容易出错)。例:「每周一 13 点开会」→
+    `reminderTimeOfDay="13:00", recurrence="CUSTOM", recurrenceDays=[1]`。
   - 用户说「工作日提醒我 X」/「上班日 9 点」→ **`recurrence="CUSTOM"` + `recurrenceDays=[1,2,3,4,5]`**(没有 WEEKDAYS 这个枚举值)。
   - 用户说「周末提醒我 X」/「周六周日」→ **`recurrence="CUSTOM"` + `recurrenceDays=[6,7]`**(没有 WEEKLY 这个枚举值)。
   - 用户说「每周一」/「每周三下午 4 点」→ `recurrence="CUSTOM"` + `recurrenceDays=[1]` / `[3]`,单 day 即可。
@@ -1011,8 +1015,14 @@ object AITranslator {
               用户说「下周一提醒我交周报」→ 算下周一日期(假设 2026-06-29),
               reminderDate="2026-06-29", reminderTimeOfDay="09:00"。
             - reminderTimeOfDay(可选,默认 "09:00"):时分(HH:MM 24h 字符串,
-              如 "09:00" / "15:30" / "23:45")。**仅与 reminderDate 配套使用**;
-              不传 reminderDate 时本字段被忽略。校验失败时回退 "09:00"。
+              如 "09:00" / "15:30" / "23:45")。**两种用法**:
+                (1) 与 reminderDate 配套 → 一次性「指定日期 + 时分」提醒(reminderDate 缺省 09:00);
+                (2) 与 recurrence + recurrenceDays 配套 → 「循环 + 时分」提醒,系统自动算下一个匹配
+                day-of-week + 时分的时间戳(AI 不用算 timestamp 与时区)。例:用户说
+                「每周一 13:00 提醒我开会」→ recurrence="CUSTOM", recurrenceDays=[1], reminderTimeOfDay="13:00"。
+              **NONE 循环单独传本字段被拒绝**(语义不清:今天 13:00 还是明天 13:00?),
+              需要先传 reminderDate 或 reminderTime。
+              校验失败(不是合法 HH:MM)时回退 "09:00"。
             - recurrence(可选,默认 "NONE"):循环类型,
               枚举 "NONE"(一次性,触发后自动清除)/ "DAILY"(每天固定时间)/
               "CUSTOM"(自定义,配合 recurrenceDays)。
@@ -1038,6 +1048,9 @@ object AITranslator {
             - 用户说「明天下午 3 点开周会」→ 先 current_time + 本地时区算 15:00 时间戳,
               再 todo_add(title="开周会", reminderTime=timestamp, recurrence="CUSTOM", recurrenceDays=[2])。
             - 用户说「每周一三五提醒开会」→ recurrence="CUSTOM", recurrenceDays=[1,3,5],reminderTime 传下一个匹配日的具体时间。
+            - 用户说「每周一 13:00 提醒我开会」(只想设时分+循环,不用 AI 算 timestamp)→
+              **优先** todo_add(title="开会", reminderTimeOfDay="13:00", recurrence="CUSTOM", recurrenceDays=[1]),
+              系统按本地时区算下一个周一的 13:00,AI 不用关心时区、跨日。
             - 用户说「工作日 9 点提醒我打卡」→ recurrence="CUSTOM", recurrenceDays=[1,2,3,4,5],reminderTime 传下一个工作日 9 点的本地时间戳。
             - 用户说「周末提醒我买菜」→ recurrence="CUSTOM", recurrenceDays=[6,7],reminderTime 传下一个周末的本地时间戳。
             - AI 主动建议「我帮你记下来?」并得到用户肯定 → 调本工具。
@@ -1052,6 +1065,7 @@ object AITranslator {
             {"type":"todo_add","title":"联系客户 Y","content":"谈 v2.0 上线时间","priority":"NORMAL"}
             {"type":"todo_add","title":"喝水","reminderTime":1730000000000,"recurrence":"NONE"}
             {"type":"todo_add","title":"3 月 15 日交季报","reminderDate":"2026-03-15","reminderTimeOfDay":"10:00"}
+            {"type":"todo_add","title":"每周一 13 点开会","reminderTimeOfDay":"13:00","recurrence":"CUSTOM","recurrenceDays":[1]}
             {"type":"todo_add","title":"工作日 9 点打卡","reminderTime":1730011200000,"recurrence":"CUSTOM","recurrenceDays":[1,2,3,4,5]}
             {"type":"todo_add","title":"周末买菜","reminderTime":1730011200000,"recurrence":"CUSTOM","recurrenceDays":[6,7]}
             {"type":"todo_add","title":"开周会","reminderTime":1730011200000,"recurrence":"CUSTOM","recurrenceDays":[2]}
@@ -1075,7 +1089,10 @@ object AITranslator {
               null = 不改;**仅一次性提醒生效**;与 reminderTimeOfDay 配套。
               用户说「把 X 改到 3 月 15 日上午 10 点」→ todo_update(id=..., reminderDate="2026-03-15", reminderTimeOfDay="10:00")。
             - reminderTimeOfDay(可选,默认 null):新时分(HH:MM 字符串),语义同 todo_add.reminderTimeOfDay。
-              null = 不改;**仅与 reminderDate 配套使用**,且仅一次性提醒生效。
+              null = 不改。
+              **两种用法**:
+                (1) 与 reminderDate 配套 → 一次性「指定日期 + 时分」;
+                (2) 与 recurrence 配套 → 把循环型 reminder 改成新时分,系统自动重算首次触发时间。
               想保留原时分只改日期时,可以再传一次原 reminderTimeOfDay 字符串。
             - recurrence(可选,默认 null):新循环类型(null = 不改;其它枚举同 todo_add.recurrence)。
               "NONE" = 一次性,触发后自动清除整条 reminder;循环类型触发后自动滚动到下一次。

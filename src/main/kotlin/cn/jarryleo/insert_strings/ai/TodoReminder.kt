@@ -39,6 +39,7 @@ class TodoReminder(
      * [TodoRecurrence.CUSTOM] + 合理 [recurrenceDays],并通过 [migrateLegacyRecurrence]
      * 在 init 阶段兜底。后续 [TodoService.loadState] 会再次校验 + 持久化回写。
      */
+    @Suppress("DEPRECATION")
     var recurrence: TodoRecurrence = recurrence
         set(value) {
             field = when (value) {

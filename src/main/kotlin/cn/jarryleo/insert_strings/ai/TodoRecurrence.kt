@@ -87,10 +87,16 @@ enum class TodoRecurrence {
  *
  * - [hour] 0-23
  * - [minute] 0-59
+ *
+ * **XmlSerializer 兼容**:IntelliJ XmlSerializer 反射创建时按构造参数顺序匹配,
+ * 必须给参数默认值,否则历史 XML 数据反序列化会抛
+ * "No argument provided for a required parameter"(见 2026.x 修复)。
+ * `init` 块的 require 校验在反序列化路径下也会跑,所以「0 ≤ hour ≤ 23」「0 ≤ minute ≤ 59」
+ * 这两条仍然由类自身保证;非法值会让 XmlSerializer 失败回退到默认值,不会污染磁盘。
  */
 data class TodoTimeOfDay(
-    val hour: Int,
-    val minute: Int,
+    var hour: Int = 0,
+    var minute: Int = 0,
 ) {
     init {
         require(hour in 0..23) { "hour must be in 0..23, got $hour" }

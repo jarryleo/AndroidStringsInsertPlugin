@@ -1918,17 +1918,20 @@ internal class InsertStringsChatDriver(
     /**
      * 把 AI 传入的 reminder 参数合成为 [cn.jarryleo.insert_strings.ai.TodoReminder]。
      *
-     * 规则:
-     * - 没有任何 reminder 信息([reminderTime] / [reminderDate] 都为 null)→ 返回 null(无提醒)。
-     * - [reminderDate] 出现时(仅一次性有效):
-     *   - 解析 [reminderDate] (YYYY-MM-DD) + [reminderTimeOfDay] (HH:MM,缺省 09:00) → 本地时区 timestamp。
-     *   - **忽略** [reminderTime](即便 AI 也传了 timestamp,以 [reminderDate] 为准 —— 这是用户
-     *     表达「指定日期」最直接的方式,避免 AI 自己算时区出错)。
-     *   - recurrence 强制 NONE(指定日期本身是"一次性"语义)。
-     * - 没传 [reminderDate] 时走旧路径(reminderTime 是绝对 timestamp)。
-     * - [recurrence] 非法时回退 NONE;空时 = NONE(一次性)。
-     * - [recurrenceDays] 仅在 recurrence=CUSTOM 时用,其它类型忽略。
-     * - timeOfDay 从最终 timestamp 抽 hour:minute,供循环滚动 / UI 展示。
+     * 优先级(从高到低):
+     * 1. [reminderDate] 出现 → 「指定日期 + 时分」语义:系统按本地时区组装 timestamp,
+     *    recurrence 强制 NONE(忽略 AI 传的 recurrence/recurrenceDays,避免语义冲突)。
+     * 2. [reminderTime] 出现 → 旧路径(绝对 timestamp),[reminderTimeOfDay] 被忽略。
+     * 3. [reminderTimeOfDay] + [recurrence] 出现(无 date / 无 time)→ 循环 + 时分语义:
+     *    DAILY → 下一个匹配 HH:MM 的时间戳;CUSTOM → 根据 [recurrenceDays] 找下一个匹配 day-of-week;
+     *    NONE → 拒绝(语义不清,需要 AI 改用 reminderDate 或 reminderTime)。
+     * 4. 都没有 → 返回 null(无提醒)。
+     *
+     * @param reminderTime       绝对时间戳(毫秒),旧 API
+     * @param reminderDate       YYYY-MM-DD 本地日期,与 [reminderTimeOfDay] 配套
+     * @param reminderTimeOfDay  HH:MM 24h 字符串,既能与 date 配套,也能与 recurrence 配套
+     * @param recurrence         循环类型
+     * @param recurrenceDays     CUSTOM 循环的星期几(1=周一...7=周日)
      */
     private fun buildReminderFromAiArgs(
         reminderTime: Long?,
@@ -1958,18 +1961,50 @@ internal class InsertStringsChatDriver(
             )
         }
         // 路径 B:旧路径,reminderTime 是绝对 timestamp
-        if (reminderTime == null) return null
+        if (reminderTime != null) {
+            val rec = cn.jarryleo.insert_strings.ai.TodoRecurrence.fromName(recurrence)
+            val tod = cn.jarryleo.insert_strings.ai.TodoReminder.deriveDefaultsFrom(reminderTime).first
+            val days = if (rec == cn.jarryleo.insert_strings.ai.TodoRecurrence.CUSTOM) {
+                (recurrenceDays ?: emptyList()).filter { it in 1..7 }.toMutableSet()
+            } else mutableSetOf()
+            return cn.jarryleo.insert_strings.ai.TodoReminder(
+                enabled = true,
+                nextTriggerAt = reminderTime,
+                recurrence = rec,
+                timeOfDay = tod,
+                recurrenceDays = days,
+            )
+        }
+        // 路径 C:reminderTimeOfDay + recurrence 组合 —— 让 AI 不用算 timestamp 也能写循环提醒。
+        // 典型场景:用户说「每周一 13:00 提醒我开会」→ recurrence=CUSTOM, recurrenceDays=[1], reminderTimeOfDay="13:00"。
+        val (hour, minute) = parseReminderTimeOfDay(reminderTimeOfDay) ?: return null
         val rec = cn.jarryleo.insert_strings.ai.TodoRecurrence.fromName(recurrence)
-        val tod = cn.jarryleo.insert_strings.ai.TodoReminder.deriveDefaultsFrom(reminderTime).first
-        val days = if (rec == cn.jarryleo.insert_strings.ai.TodoRecurrence.CUSTOM) {
-            (recurrenceDays ?: emptyList()).filter { it in 1..7 }.toMutableSet()
-        } else mutableSetOf()
+        val tod = cn.jarryleo.insert_strings.ai.TodoTimeOfDay(hour, minute)
+        val days = (recurrenceDays ?: emptyList()).filter { it in 1..7 }.toSet()
+        // 校验:CUSTOM 必填 recurrenceDays(否则 scheduler 的 computeNextTriggerAfter 会因 days 为空返回 null,
+        // 循环无法滚动)。NONE 不接受单独 reminderTimeOfDay(没 date 没 time 语义不清,直接拒绝)。
+        if (rec == cn.jarryleo.insert_strings.ai.TodoRecurrence.CUSTOM && days.isEmpty()) {
+            return null
+        }
+        if (rec == cn.jarryleo.insert_strings.ai.TodoRecurrence.NONE) {
+            // 没有 reminderDate 又没 reminderTime,只剩一个 reminderTimeOfDay 语义不清(今天 13:00?明天 13:00?)。
+            // 直接拒绝,提示 AI 改用 reminderDate 或 reminderTime。
+            return null
+        }
+        // 计算首次触发:用 recurrence + days 找下一个匹配 day-of-week + 时分。
+        val now = System.currentTimeMillis()
+        val allowedDays: Set<Int> = when (rec) {
+            cn.jarryleo.insert_strings.ai.TodoRecurrence.DAILY -> emptySet() // 空集 = 任意 day 都行
+            cn.jarryleo.insert_strings.ai.TodoRecurrence.CUSTOM -> days
+            else -> emptySet()
+        }
+        val firstTs = tod.nextOccurrence(now, allowedDays)
         return cn.jarryleo.insert_strings.ai.TodoReminder(
             enabled = true,
-            nextTriggerAt = reminderTime,
+            nextTriggerAt = firstTs,
             recurrence = rec,
             timeOfDay = tod,
-            recurrenceDays = days,
+            recurrenceDays = days.toMutableSet(),
         )
     }
 

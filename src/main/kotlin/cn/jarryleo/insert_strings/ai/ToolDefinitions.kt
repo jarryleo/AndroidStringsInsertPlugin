@@ -1037,9 +1037,14 @@ object ToolDefinitions {
                     addProperty("type", "string")
                     addProperty(
                         "description",
-                        "可选,时分(HH:MM 24h 字符串,如 \"09:00\" / \"15:30\" / \"23:45\")," +
-                            "**仅与 reminderDate 配套使用**;不传 reminderDate 时本字段被忽略。" +
-                            "缺省时默认 \"09:00\"。"
+                        "可选,时分(HH:MM 24h 字符串,如 \"09:00\" / \"15:30\" / \"23:45\")。" +
+                            "**两种用法**:" +
+                            "  (1) 与 reminderDate 配套 → 一次性「指定日期 + 时分」提醒(缺省 09:00);" +
+                            "  (2) 与 recurrence + recurrenceDays 配套 → 「循环 + 时分」提醒," +
+                            "如 reminderTimeOfDay=\"13:00\" + recurrence=\"CUSTOM\" + recurrenceDays=[1] 表示" +
+                            "「每周一 13:00 提醒」,系统自动算下一个匹配 day-of-week 的时间戳,AI 不用算。" +
+                            "**NONE 循环单独传本字段无意义**(语义不清:今天 13:00 还是明天?),会被系统拒绝," +
+                            "需要先用 reminderDate 或 reminderTime。"
                     )
                 })
                 add("recurrence", obj {
@@ -1137,7 +1142,9 @@ object ToolDefinitions {
                     addProperty(
                         "description",
                         "可选,新时分(HH:MM 字符串),语义同 todo_add.reminderTimeOfDay。" +
-                            "null = 不改;**仅与 reminderDate 配套使用**,且仅一次性提醒生效。"
+                            "null = 不改;**仅与 reminderDate 配套使用**,且仅一次性提醒生效。" +
+                            "**与 recurrence 配套时**也可单独传(把循环型 reminder 改成新的 HH:MM)," +
+                            "系统自动重算首次触发时间(下一个匹配 day-of-week + 新时分)。"
                     )
                 })
                 add("recurrence", obj {
