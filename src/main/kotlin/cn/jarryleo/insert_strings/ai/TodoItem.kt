@@ -58,13 +58,34 @@ class TodoItem(
     var title: String = "",
     var content: String = "",
     var priority: TodoPriority = TodoPriority.NORMAL,
-    var isCompleted: Boolean = false,
+    isCompleted: Boolean = false,
     var createdAt: Long = System.currentTimeMillis(),
     var completedAt: Long? = null,
     var reminder: TodoReminder? = null,
 ) {
 
-    val completeState = mutableStateOf(isCompleted)
+    /**
+     * UI 用 Compose state(2026.x 修复)。
+     *
+     * 历史 bug:`val completeState = mutableStateOf(isCompleted)` 只在构造时读一次
+     * [isCompleted](默认 false),所以 IntelliJ XmlSerializer 反序列化时——
+     *   1) 构造 TodoItem() → isCompleted=false → completeState = mutableStateOf(false)
+     *   2) 反射调用 setter 把 isCompleted 设为 true → completeState 仍是 false
+     * ——导致插件重启后所有已完成代办 UI 上不显示勾选,直到用户手动点一次。
+     *
+     * 修复:让 [isCompleted] setter 同步写 [_isCompletedState],保证任意入口(反序列化、
+     * 用户点击、TodoService.setCompleted、AI 工具)更新 isCompleted 后,UI 立即看到。
+     * 公开的 [completeState] 仍是 [State] 引用,UI 与 controller 代码不动。
+     */
+    private val _isCompletedState = mutableStateOf(isCompleted)
+
+    val completeState: androidx.compose.runtime.State<Boolean> get() = _isCompletedState
+
+    var isCompleted: Boolean = isCompleted
+        set(value) {
+            field = value
+            _isCompletedState.value = value
+        }
 
     fun copy(
         id: String = this.id,

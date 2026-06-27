@@ -330,9 +330,11 @@ class TodoReminderScheduler : Disposable {
         if (shouldCompleteTodo) {
             // 同步 Compose 状态 + service:Compose 端 completeState 不会自动从
             // service 字段读出,需要手动更新,否则 UI 上的删除线 / checkbox 勾选会延迟一帧。
+            // 2026.x 修复:不再直接写 completeState.value(只读 State),改写 isCompleted 让
+            // 自定义 setter 同步更新 Compose state。
             val current = service.get(itemId)
             if (current != null && !current.isCompleted) {
-                current.completeState.value = true
+                current.isCompleted = true
                 service.setCompleted(itemId, true)
             }
         }

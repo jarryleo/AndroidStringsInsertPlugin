@@ -176,7 +176,9 @@ internal class InsertStringsTodosController(
      */
     fun setCompleted(item: TodoItem, completed: Boolean) {
         val prev = item.isCompleted
-        item.completeState.value = completed
+        // 2026.x 修复:不再直接写 completeState.value(它是只读 State 了)—— 改写 isCompleted,
+        // 自定义 setter 会同步更新 Compose state,UI 立即看到新值。
+        item.isCompleted = completed
         TodoService.getInstance().setCompleted(item.id, completed)
         // 完成态切换时通知调度器重新调度(2026.x 增强):
         // - 勾选完成(isCompleted false→true):把已完成的代办从调度队列里摘掉,
