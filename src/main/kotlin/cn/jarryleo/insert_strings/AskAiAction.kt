@@ -28,8 +28,11 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
 import java.awt.*
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import java.awt.geom.RoundRectangle2D
 import javax.swing.*
 
 /**
@@ -77,6 +80,9 @@ class AskAiAction : AnAction() {
         val dialog = JDialog(window, "Ask AI", Dialog.ModalityType.MODELESS).apply {
             isUndecorated = true
             isResizable = true
+            // 2026.x 圆角边框:把 dialog 自身背景设透明,setShape 圆角外的区域不被
+            // 系统默认白底填满,真正呈现「圆角矩形」效果。
+            background = Color(0, 0, 0, 0)
         }
 
         // 弹框持有的轻量 chat state。showToast 直接改标题栏右侧的状态标签,
@@ -119,14 +125,19 @@ class AskAiAction : AnAction() {
             add(titleBar, BorderLayout.NORTH)
             add(composePanel, BorderLayout.CENTER)
             add(gripContainer, BorderLayout.SOUTH)
-            border = BorderFactory.createLineBorder(UIManager.getColor("Component.borderColor") ?: Color(0xC8C8C8), 1)
+            // 2026.x:不再用 LineBorder —— 矩形 1px 边框线在 setShape 圆角裁剪下
+            // 四个角处会被切掉,产生「边框在圆角处消失」的破洞。
+            // 改用 dialog.glassPane 画 1px 圆角描边(见下方),覆盖在所有子组件之上。
         }
 
         dialog.contentPane = contentPanel
-        dialog.preferredSize = Dimension(
-            (editor.component.width * 0.45).toInt().coerceIn(420, 720),
-            (editor.component.height * 0.6).toInt().coerceIn(360, 560)
-        )
+        // 2026.x 弹框尺寸:默认竖屏布局(聊天是纵向滚动的内容),保证 width <= height。
+        // 编辑器很宽(4K / 多列)时强制把 width 拉到不超 height,避免弹出「扁宽条」。
+        val rawWidth = (editor.component.width * 0.3).toInt().coerceIn(320, 600)
+        val rawHeight = (editor.component.height * 0.4).toInt().coerceIn(400, 760)
+        val width = minOf(rawWidth, rawHeight)
+        val height = maxOf(rawHeight, width + 40)
+        dialog.preferredSize = Dimension(width, height)
         dialog.pack()
 
         val editorLoc = editor.component.locationOnScreen
@@ -134,6 +145,40 @@ class AskAiAction : AnAction() {
             editorLoc.x + (editor.component.width - dialog.width) / 2,
             editorLoc.y + (editor.component.height - dialog.height) / 2
         )
+
+        // 2026.x 圆角边框:用 Window.setShape 把 dialog 裁成圆角矩形,resize 时重新应用。
+        val cornerRadius = 12.0
+        fun applyRoundedShape() {
+            dialog.shape = RoundRectangle2D.Double(
+                0.0, 0.0,
+                dialog.width.toDouble(), dialog.height.toDouble(),
+                cornerRadius, cornerRadius
+            )
+        }
+        applyRoundedShape()
+        dialog.addComponentListener(object : ComponentAdapter() {
+            override fun componentResized(e: ComponentEvent) = applyRoundedShape()
+        })
+
+        // 2026.x 圆角描边:用 dialog.glassPane 在所有子组件之上画 1px 圆角矩形描边。
+        // 解决「矩形 LineBorder 在 setShape 圆角裁剪下,四个角处出现破洞」的问题——
+        // glassPane 在 children 之后绘制,描边线完整覆盖圆角路径。
+        val borderColor = UIManager.getColor("Component.borderColor") ?: Color(0xC8C8C8)
+        dialog.glassPane = object : JComponent() {
+            override fun paintComponent(g: Graphics) {
+                if (!isVisible) return
+                val g2 = g.create() as Graphics2D
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                g2.color = borderColor
+                // stroke 1px,画在 [0, width-1] 范围内(Graphics2D 描边以中心线计)。
+                g2.draw(RoundRectangle2D.Double(
+                    0.5, 0.5,
+                    (width - 1).toDouble(), (height - 1).toDouble(),
+                    cornerRadius, cornerRadius
+                ))
+                g2.dispose()
+            }
+        }.apply { isVisible = true }
 
         // 装配 driver + 五个 controller(共享同一 ChatStateHolder)
         val stringsOps = InsertStringsStringsOpsController(state)
@@ -247,39 +292,82 @@ class AskAiAction : AnAction() {
      * 自绘标题栏:左侧标题、中部 toast(平时空)、右侧 Close 按钮。
      * 整条支持拖动。
      *
+     * 2026.x 微调:
+     * 1. 标题栏高度 36px(24px 内容 + 6px 上 + 6px 下),四面等距 padding(EmptyBorder(6,6,6,6)),
+     *    让「标题左侧 = 关闭右侧 = 上下间距」都是 6px,视觉上是一个均匀的方框。
+     * 2. 标题 label 强制 24px 高 + TOP_ALIGNMENT,与关闭按钮顶部对齐,二者上下边界重合。
+     * 3. 关闭按钮改成「实按钮」(带边框 + 背景),不再用透明文字,更直观;
+     *    大小 24×24,内部用 ✕ 字符作为关闭图标(占位小、跨平台)。
+     *
      * @return (titleBar, toastLabel) toastLabel 由 caller 注入到 ChatHolder 以便 showToast 用。
      */
     private fun createTitleBar(dialog: JDialog, title: String): Pair<JPanel, JBLabel> {
-        val titleBar = JPanel(BorderLayout()).apply {
-            preferredSize = Dimension(0, 32)
-            border = BorderFactory.createEmptyBorder(4, 10, 4, 10)
+        // 标题栏内边距 6px(上下左右),与关闭按钮 24×24 一起决定整条高度 = 6+24+6 = 36。
+        val titleBarHeight = 36
+        val innerPad = 6
+        val controlSize = 24  // 标题 label 与关闭按钮统一 24px 高,保证两者上下边对齐
+
+        val titleBar = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            // 四面等距 padding —— 让"标题左侧 / 关闭右侧"等于"上 / 下"。
+            border = BorderFactory.createEmptyBorder(innerPad, innerPad, innerPad, innerPad)
             val bgColor = UIManager.getColor("Panel.background") ?: Color(0xF2F2F2)
             background = bgColor
             isOpaque = true
+            preferredSize = Dimension(0, titleBarHeight)
+            minimumSize = Dimension(0, titleBarHeight)
         }
 
         val label = JBLabel(title).apply {
             font = font.deriveFont(Font.BOLD)
+            // 强制 24px 高,与关闭按钮上下边对齐(TOP_ALIGNMENT 让两者都从 y=innerPad 开始)。
+            val orig = preferredSize
+            preferredSize = Dimension(orig.width, controlSize)
+            maximumSize = Dimension(Int.MAX_VALUE, controlSize)
+            alignmentY = Component.TOP_ALIGNMENT
         }
-        titleBar.add(label, BorderLayout.WEST)
+        titleBar.add(label)
+
+        // 弹性间距:把 toast 推到中间、Close 推到最右
+        titleBar.add(Box.createHorizontalGlue())
 
         val toastLabel = JBLabel("").apply {
             font = font.deriveFont(Font.PLAIN, 12f)
             foreground = UIManager.getColor("Label.foreground") ?: Color(0x606060)
+            val orig = preferredSize
+            preferredSize = Dimension(orig.width, controlSize)
+            maximumSize = Dimension(Int.MAX_VALUE, controlSize)
+            alignmentY = Component.TOP_ALIGNMENT
         }
-        titleBar.add(toastLabel, BorderLayout.CENTER)
+        titleBar.add(toastLabel)
+        titleBar.add(Box.createHorizontalGlue())
 
-        val closeBtn = JButton("Close").apply {
+        // 实心 24×24 关闭按钮:用 ✕ Unicode 字符作图标,带平台默认按钮背景 + 1px 灰色描边,
+        // 不再用之前「透明文字看着像 label」的实现。
+        val closeBtn = JButton("✕").apply {
             isFocusPainted = false
-            isContentAreaFilled = false
-            isBorderPainted = false
-            font = font.deriveFont(Font.BOLD, 14f)
-            preferredSize = Dimension(60, 24)
-            margin = JBUI.insetsTop(8)
+            preferredSize = Dimension(controlSize, controlSize)
+            minimumSize = Dimension(controlSize, controlSize)
+            maximumSize = Dimension(controlSize, controlSize)
+            margin = JBUI.emptyInsets()
+            font = font.deriveFont(Font.BOLD, 13f)
+            foreground = UIManager.getColor("Button.foreground") ?: Color(0x333333)
+            // 平台默认按钮背景 + 1px 描边,看起来像个真正的按钮
+            isContentAreaFilled = true
+            background = UIManager.getColor("Button.background") ?: Color(0xE6E6E6)
+            border = BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(
+                    UIManager.getColor("Button.borderColor") ?: Color(0xBFBFBF), 1
+                ),
+                BorderFactory.createEmptyBorder(0, 0, 0, 0)
+            )
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+            alignmentY = Component.TOP_ALIGNMENT
+            // toolTip 让用户 hover 时知道这是关闭按钮(✕ 字符跨平台)
+            toolTipText = "Close"
             addActionListener { dialog.dispose() }
         }
-        titleBar.add(closeBtn, BorderLayout.EAST)
+        titleBar.add(closeBtn)
 
         val dragStart = Point()
         val dragListener = object : MouseAdapter() {

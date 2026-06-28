@@ -32,8 +32,11 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
 import java.awt.*
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import java.awt.geom.RoundRectangle2D
 import javax.swing.*
 
 /**
@@ -126,6 +129,8 @@ class ExtractStringsAction : AnAction() {
         val dialog = JDialog(window, "Extract strings.xml", Dialog.ModalityType.MODELESS).apply {
             isUndecorated = true
             isResizable = true
+            // 2026.x 圆角边框:透明背景 + setShape 圆角裁剪
+            background = Color(0, 0, 0, 0)
         }
 
         val state = ExtractStringsChatHolder(project = project)
@@ -157,14 +162,17 @@ class ExtractStringsAction : AnAction() {
             add(titleBar, BorderLayout.NORTH)
             add(composePanel, BorderLayout.CENTER)
             add(gripContainer, BorderLayout.SOUTH)
-            border = BorderFactory.createLineBorder(UIManager.getColor("Component.borderColor") ?: Color(0xC8C8C8), 1)
+            // 2026.x:不再用 LineBorder —— 矩形 1px 边框线在 setShape 圆角裁剪下
+            // 四个角处会被切掉。改用 dialog.glassPane 画 1px 圆角描边(见下方)。
         }
 
         dialog.contentPane = contentPanel
-        dialog.preferredSize = Dimension(
-            (editor.component.width * 0.45).toInt().coerceIn(420, 720),
-            (editor.component.height * 0.6).toInt().coerceIn(360, 560)
-        )
+        // 2026.x 弹框尺寸:默认竖屏布局,保证 width <= height(聊天是纵向滚动的内容)
+        val rawWidth = (editor.component.width * 0.3).toInt().coerceIn(320, 600)
+        val rawHeight = (editor.component.height * 0.4).toInt().coerceIn(400, 760)
+        val width = minOf(rawWidth, rawHeight)
+        val height = maxOf(rawHeight, width + 40)
+        dialog.preferredSize = Dimension(width, height)
         dialog.pack()
 
         val editorLoc = editor.component.locationOnScreen
@@ -172,6 +180,38 @@ class ExtractStringsAction : AnAction() {
             editorLoc.x + (editor.component.width - dialog.width) / 2,
             editorLoc.y + (editor.component.height - dialog.height) / 2
         )
+
+        // 2026.x 圆角边框:Window.setShape 圆角矩形 + resize 监听
+        val cornerRadius = 12.0
+        fun applyRoundedShape() {
+            dialog.shape = RoundRectangle2D.Double(
+                0.0, 0.0,
+                dialog.width.toDouble(), dialog.height.toDouble(),
+                cornerRadius, cornerRadius
+            )
+        }
+        applyRoundedShape()
+        dialog.addComponentListener(object : ComponentAdapter() {
+            override fun componentResized(e: ComponentEvent) = applyRoundedShape()
+        })
+
+        // 2026.x 圆角描边:用 glassPane 在所有子组件之上画 1px 圆角矩形描边,
+        // 解决「矩形 LineBorder 在 setShape 圆角裁剪下,四个角处出现破洞」的问题。
+        val borderColor = UIManager.getColor("Component.borderColor") ?: Color(0xC8C8C8)
+        dialog.glassPane = object : JComponent() {
+            override fun paintComponent(g: Graphics) {
+                if (!isVisible) return
+                val g2 = g.create() as Graphics2D
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                g2.color = borderColor
+                g2.draw(RoundRectangle2D.Double(
+                    0.5, 0.5,
+                    (width - 1).toDouble(), (height - 1).toDouble(),
+                    cornerRadius, cornerRadius
+                ))
+                g2.dispose()
+            }
+        }.apply { isVisible = true }
 
         val stringsOps = InsertStringsStringsOpsController(state)
         val sheetsOps = InsertStringsSheetsOpsController(state)
@@ -297,36 +337,65 @@ class ExtractStringsAction : AnAction() {
     }
 
     private fun createTitleBar(dialog: JDialog, title: String): Pair<JPanel, JBLabel> {
-        val titleBar = JPanel(BorderLayout()).apply {
-            preferredSize = Dimension(0, 32)
-            border = BorderFactory.createEmptyBorder(4, 10, 4, 10)
+        // 2026.x 微调:四面等距 padding(EmptyBorder(6,6,6,6)),让「标题左侧 = 关闭右侧 = 上 = 下」,
+        // 标题与关闭按钮同高 24px + TOP_ALIGNMENT 上下边对齐,关闭按钮改为「实按钮」带 ✕ 图标。
+        val titleBarHeight = 36
+        val innerPad = 6
+        val controlSize = 24
+
+        val titleBar = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            border = BorderFactory.createEmptyBorder(innerPad, innerPad, innerPad, innerPad)
             val bgColor = UIManager.getColor("Panel.background") ?: Color(0xF2F2F2)
             background = bgColor
             isOpaque = true
+            preferredSize = Dimension(0, titleBarHeight)
+            minimumSize = Dimension(0, titleBarHeight)
         }
 
         val label = JBLabel(title).apply {
             font = font.deriveFont(Font.BOLD)
+            val orig = preferredSize
+            preferredSize = Dimension(orig.width, controlSize)
+            maximumSize = Dimension(Int.MAX_VALUE, controlSize)
+            alignmentY = Component.TOP_ALIGNMENT
         }
-        titleBar.add(label, BorderLayout.WEST)
+        titleBar.add(label)
+        titleBar.add(Box.createHorizontalGlue())
 
         val toastLabel = JBLabel("").apply {
             font = font.deriveFont(Font.PLAIN, 12f)
             foreground = UIManager.getColor("Label.foreground") ?: Color(0x606060)
+            val orig = preferredSize
+            preferredSize = Dimension(orig.width, controlSize)
+            maximumSize = Dimension(Int.MAX_VALUE, controlSize)
+            alignmentY = Component.TOP_ALIGNMENT
         }
-        titleBar.add(toastLabel, BorderLayout.CENTER)
+        titleBar.add(toastLabel)
+        titleBar.add(Box.createHorizontalGlue())
 
-        val closeBtn = JButton("Close").apply {
+        val closeBtn = JButton("✕").apply {
             isFocusPainted = false
-            isContentAreaFilled = false
-            isBorderPainted = false
-            font = font.deriveFont(Font.BOLD, 14f)
-            preferredSize = Dimension(60, 24)
-            margin = JBUI.insetsTop(8)
+            preferredSize = Dimension(controlSize, controlSize)
+            minimumSize = Dimension(controlSize, controlSize)
+            maximumSize = Dimension(controlSize, controlSize)
+            margin = JBUI.emptyInsets()
+            font = font.deriveFont(Font.BOLD, 13f)
+            foreground = UIManager.getColor("Button.foreground") ?: Color(0x333333)
+            isContentAreaFilled = true
+            background = UIManager.getColor("Button.background") ?: Color(0xE6E6E6)
+            border = BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(
+                    UIManager.getColor("Button.borderColor") ?: Color(0xBFBFBF), 1
+                ),
+                BorderFactory.createEmptyBorder(0, 0, 0, 0)
+            )
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+            alignmentY = Component.TOP_ALIGNMENT
+            toolTipText = "Close"
             addActionListener { dialog.dispose() }
         }
-        titleBar.add(closeBtn, BorderLayout.EAST)
+        titleBar.add(closeBtn)
 
         val dragStart = Point()
         val dragListener = object : MouseAdapter() {
