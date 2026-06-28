@@ -187,8 +187,14 @@ class AskAiAction : AnAction() {
         val editorOps = InsertStringsEditorOpsController(state)
         // 把 driver 触发的 onInsertStringsInserted 自动替换路由到 controller 的 runReplaceSelection,
         // 与 AI 显式调用 replace_selection 工具走同一条路径,保证三层定位 + 防双重替换行为一致。
+        // 2026.x:replace_selection 工具参数为 (oldText, newText) —— 自动替换场景下
+        // oldText = 入口捕获的整段硬编码(选区文本),newText = 拼出的对 key 的引用;
+        // 选区文本等于 oldText,选区内只匹配 1 次,行为等价于「整段选区替换」。
+        val currentFile = editor.virtualFile
+        val capturedSelectionText = selectedText
         state.bindOnAutoReplace { key ->
-            editorOps.runReplaceSelection(AiAction.ReplaceSelection(key))
+            val newText = InsertStringsEditorOpsController.buildReferenceText(currentFile, key)
+            editorOps.runReplaceSelection(AiAction.ReplaceSelection(capturedSelectionText, newText))
         }
         val contextBuilder = InsertStringsChatContextBuilder(state)
         val driver = InsertStringsChatDriver(

@@ -231,7 +231,7 @@ object ToolDefinitions {
             "每次调用都暂停 tool loop,不要反复调用。"
 
     private const val DESC_REPLACE_SELECTION =
-        "把编辑器选中的硬编码文本替换为对 key 的引用(XML→@string/key,其它→R.string.key)。" +
+        "把选区里所有匹配 oldText 的子串替换为 newText(选区内全部出现都换,精确字面匹配)。" +
             "chatEntry=askAi/extractStrings 时「使用现有 key:」后**必须**先调本工具。" +
             " → load_tool_doc(\"replace_selection\")。"
 
@@ -996,15 +996,26 @@ object ToolDefinitions {
         return obj {
             addProperty("type", "object")
             add("properties", obj {
-                add("key", obj {
+                add("oldText", obj {
                     addProperty("type", "string")
                     addProperty(
                         "description",
-                        "必填,要引用的字符串 key(snake_case)。系统会把当前 IDE 编辑器选中的硬编码文本替换为 `@string/<key>`(XML 布局)或 `R.string.<key>`(其它文件),并关闭聊天视图。"
+                        "必填,选区内要被替换的子串(精确字面匹配,非正则)。" +
+                            "选区里所有匹配此字符串的位置**全部**替换为 newText(整段选区内的多次出现都换);" +
+                            "选区里 0 次出现工具返回失败 + 选区前 60 字符预览。空串会直接拒绝(防止无限循环)。"
+                    )
+                })
+                add("newText", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "必填,把 oldText 替换成的目标文本(原样写入,不做任何转换)。" +
+                            "翻译查重 +「使用现有 key」场景:newText = \"@string/<key>\"(XML 布局)或 \"R.string.<key>\"(Kotlin/Java/...);" +
+                            "精准子串替换场景:newText = \"@string/<key>\" / \"R.string.<key>\",oldText = 选区里要换的那段子串。"
                     )
                 })
             })
-            add("required", JsonArray().apply { add("key") })
+            add("required", JsonArray().apply { add("oldText"); add("newText") })
         }
     }
 

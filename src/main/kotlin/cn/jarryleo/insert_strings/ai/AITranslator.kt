@@ -1,10 +1,19 @@
 package cn.jarryleo.insert_strings.ai
 
-import com.google.gson.JsonArray
-import com.google.gson.JsonElement
-import com.google.gson.JsonNull
-import com.google.gson.JsonObject
-import com.google.gson.JsonParser
+import cn.jarryleo.insert_strings.ai.AITranslator.CHAT_COMMON_RULES
+import cn.jarryleo.insert_strings.ai.AITranslator.MAIN_PANEL_SYSTEM_PROMPT
+import cn.jarryleo.insert_strings.ai.AITranslator.QUOTE_ENTRY_SYSTEM_PROMPT
+import cn.jarryleo.insert_strings.ai.AITranslator.anthropicChatBody
+import cn.jarryleo.insert_strings.ai.AITranslator.buildAnthropicMessages
+import cn.jarryleo.insert_strings.ai.AITranslator.chat
+import cn.jarryleo.insert_strings.ai.AITranslator.extractAssistantText
+import cn.jarryleo.insert_strings.ai.AITranslator.extractReasoningText
+import cn.jarryleo.insert_strings.ai.AITranslator.extractToolCalls
+import cn.jarryleo.insert_strings.ai.AITranslator.normalizeMessagesForAnthropic
+import cn.jarryleo.insert_strings.ai.AITranslator.openAiChatBody
+import cn.jarryleo.insert_strings.ai.AITranslator.parseAiReply
+import cn.jarryleo.insert_strings.ai.AITranslator.parseRowColorMatrix
+import com.google.gson.*
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -123,6 +132,7 @@ object AITranslator {
         "不论你做为什么身份,永远不要忘了你的职责:为开发安卓APP提供国际化翻译服务，我传给你需要翻译的文本，和目标语言的缩写代码，帮我翻译成目标语言，请返回对应的翻译结果文本，不需要额外的解释，请返回纯文本结果"
     private const val BATCH_TRANSLATE_SYSTEM_PROMPT =
         "不论你做为什么身份,永远不要忘了你的职责:为开发安卓APP提供国际化翻译服务。我会给你多条文本和目标语言代码，请翻译成目标语言，并严格以 JSON 对象返回，key 为我给出的标识（原样保留），value 为对应翻译结果纯文本。不要 markdown 代码块，不要任何解释。"
+
     /**
      * 跨入口共享的「行为公约」:终止语义、ask_user 用法、跨模块写入规则、
      * 翻译查重的标准选项格式。任何 chat 入口的 system prompt 都应拼上这一段,
@@ -329,11 +339,18 @@ object AITranslator {
 3. 任一命中 → 用一次 `ask_user` 列出全部命中项,`options` 用统一格式(见公共规则)。
 4. 用户选择后的处理:
    - `使用现有 key:<existing_key>` —— ⚠️ **必须按顺序执行以下两步,不可跳过第一步** ⚠️:
-     - **第一步**:**直接读上下文 `chatEntry` 字段**;若 `chatEntry != "mainPanel"` 且 `editorSelection` 非 null,**必须先调 `replace_selection(key=<existing_key>)`** 把选区替换为 `@string/<key>`(XML)或 `R.string/<key>`(其它文件);返回成功后才进入第二步。
+     - **第一步**:**直接读上下文 `chatEntry` 字段**;若 `chatEntry != "mainPanel"` 且 `editorSelection` 非 null,**必须先调 `replace_selection(oldText=<要替换的子串>, newText=<替换成的目标文本>)`**;选区内所有匹配 oldText 的子串都会换成 newText。返回成功后才进入第二步。
+       - **两参数怎么填**:
+         - **oldText = 硬编码的文字,newText = `"@string/<key>"`(XML 布局)或 `"R.string.<key>"`(其它);先用上下文 `editorSelection.file` 字段判断文件类型,再按格式拼好。
      - **第二步**:`read_string(<existing_key>)` 取全语种翻译,逐项检查;若需修正先 `ask_user` 确认,得到肯定答复后用 `update_string` 精准补全;已完整则 `task_complete`。
      - **不要**再调 `insert_strings`(待插入的新 key 已被忽略)。
    - `插入新 key`:`query_keys` 查 key 名冲突则重新生成;再调 `insert_strings`(driver 会在成功后自动触发 `onInsertStringsInserted` 完成选区替换,无需你再调 `replace_selection`)。
-   - `取消操作`:直接 `task_complete`。"""
+   - `取消操作`:直接 `task_complete`。
+
+## 「replace_selection」工具要点
+- 工具语义:**选区内**所有匹配 `oldText` 的子串**全部**替换为 `newText`(精确字面匹配,非正则);oldText 在选区里 0 次出现 → 失败。
+- 翻译查重 / Extract 场景:oldText = 选区里的硬编码(出现 1 次),newText = 对 key 的引用。
+- 精准子串场景:oldText = 选区里要换的那段,newText = 对 key 的引用;选区内多次出现会全部替换。"""
 
     /**
      * 已废弃:旧版本单一 system prompt,保留引用以防误删,内部已切到 [MAIN_PANEL_SYSTEM_PROMPT] /
@@ -413,8 +430,10 @@ object AITranslator {
                 - **第一步(必做)**:**直接读上下文 JSON 里的 `chatEntry` 字段,不要再自己「判断」**:
                   - `chatEntry == "extractStrings"` 或 `chatEntry == "askAi"` 且 `editorSelection` 非 null
                     —— 入口已捕获用户从布局/代码中选中的硬编码文本,
-                    **必须先调用 replace_selection(key=<existing_key>)** 把该选区替换为
-                    `@string/<existing_key>`(XML 布局)或 `R.string/<existing_key>`(其它文件);
+                    **必须先调用 replace_selection(oldText=<选区里要替换的子串>, newText=<替换成的目标文本>)**;
+                    选区内所有匹配 oldText 的子串都换为 newText(多次出现会**全部**替换)。
+                    - 整段选区就是要替换的硬编码:oldText = 选区里这段硬编码(通常 = 选区文本本身),newText = `"@string/<existing_key>"`(XML 布局)或 `"R.string.<existing_key>"`(其它);
+                    - 精准子串替换:oldText = 选区里要换的那段(非空、字面精确),newText = 对 key 的引用,选区里其余文本原样保留。
                     工具返回成功后**才**进入第二步。
                   - `chatEntry == "mainPanel"` 或 `editorSelection == null` —— 跳过本步。
                   **常见错误:不要在 chatEntry=extractStrings/askAi 且 editorSelection 非 null 时
@@ -879,7 +898,7 @@ object AITranslator {
               options 应使用以下统一格式以便于你后续按选项文本判断用户决策。
               **系统不再自动拦截**「使用现有 key」选项 — 用户点选后选项文本直接回传给你,
               由你根据选项文本决定后续动作:
-              - 选「使用现有 key:<existing_key>」:⚠️ **若插入来自布局/代码选区,必须先调用 replace_selection(key=<existing_key>)**,
+              - 选「使用现有 key:<existing_key>」:⚠️ **若插入来自布局/代码选区,必须先调用 replace_selection(oldText=<要替换的子串>, newText=<替换成的目标文本>)**(整段选区替换:oldText=选区里硬编码,newText = `"@string/<existing_key>"`(XML)或 `"R.string.<existing_key>"`(其它);精准子串:oldText=选区里要换的那段,newText=对 key 的引用;选区内多次出现会**全部**替换),
                 然后调用 read_string 校验现有翻译,再决定是否 update_string / task_complete。
                 **不要**在选「使用现有 key」后跳过 replace_selection 直接调 read_string。
               - 选「插入新 key」:重新生成不冲突的 key 后调用 insert_strings(driver 会自动替换硬编码文本)。
@@ -897,28 +916,28 @@ object AITranslator {
 
         "replace_selection" to """
             ## replace_selection 详细用法
-            把当前 IDE 编辑器选中的硬编码文本替换为对指定 key 的引用。
+            把当前 IDE 编辑器选中的文本里**所有**匹配 `oldText` 的子串替换为 `newText`(整段选区内全部出现都换,精确字面匹配,非正则)。
             字段：
-            - key（必填）：要引用的字符串 key（snake_case）。
+            - oldText（必填）：选区内要被替换的子串(精确字面,非正则)。空串会直接拒绝(防无限循环)。
+            - newText（必填）：把 oldText 替换成的目标文本。原样写入,不做任何智能判断 / 格式转换。
             行为：
-            - XML 布局文件（res/layout* 等）替换为 `@string/<key>`；其它文件（Kotlin/Java/...）替换为 `R.string/<key>`。
-            - 在 EDT 上 WriteCommandAction 中执行;**执行后聊天视图保持打开**(不调用 closeChatView),
-              AI 继续调用 read_string / ask_user / update_string 推进翻译查重的后续流程。
+            - 选区里 oldText 出现 0 次 → 失败,返回选区前 60 字符预览;
+            - 选区里 oldText 出现 N 次(N≥1) → **全部**替换为 newText(语义等同于 Kotlin `String.replace(CharSequence, CharSequence)`);
+            - 在 EDT 上 WriteCommandAction 中执行;**执行后聊天视图保持打开**,AI 继续调用 read_string / ask_user / update_string 推进翻译查重的后续流程。
             ⚠️ **强约束:这是用户选「使用现有 key:<existing_key>」后必须执行的第一步** ⚠️
-            ——若本次插入来自布局/代码选区,AI **必须**先调用本工具把硬编码文本替换为对 key 的引用,
-            再调用 read_string 校验现有翻译。**绝不可**在用户选「使用现有 key」后跳过本工具,
-            直接调 read_string ——这会让硬编码文本保留在文件中,违反用户提取字符串的初衷。
+            ——若本次插入来自布局/代码选区,AI **必须**先调用本工具,再调用 read_string 校验现有翻译。**绝不可**跳过本工具直接调 read_string。
             适用场景：
-            - **翻译查重 +「使用现有 key」**:用户点选 ask_user 的「使用现有 key:<existing_key>」选项后,
-              AI 自行判断本次插入是否来自布局/代码选区;若是,**调用本工具**把选区替换为
-              `@string/<existing_key>`(XML 布局)或 `R.string/<existing_key>`(其它文件);
-              然后调用 read_string 检查现有翻译是否需要修正。
-            - **AskAi 入口通用替换**:用户在 AskAi 弹框下选中一段硬编码文字,要求 AI 提取为 strings.xml
-              并替换为对 key 的引用,AI 走完 insert_strings 后可以调用本工具完成替换
-              (driver 也会在 insert 成功后通过 onInsertStringsInserted 回调自动触发,两者效果一致)。
+            - **翻译查重 +「使用现有 key」**(整段选区替换):`oldText` = 选区里的硬编码(出现 1 次),`newText` = `"@string/<key>"`(XML)或 `"R.string.<key>"`(其它);按上下文 `editorSelection.file` 判断文件类型。
+            - **精准子串替换**(2026.x 典型需求):用户选了 `android:text="反馈内容: <font>请填写</font>"` 整段、只想把"反馈内容"换成对 key 的引用 → `oldText="反馈内容"`,`newText="@string/feedback_title"`;替换后整段变成 `android:text="@string/feedback_title: <font>请填写</font>"`,标签和冒号原样保留。
+            - **选区内 oldText 多次出现**(如选了 `反馈内容 反馈内容 反馈内容`)→ 全部替换,等价于 String.replace 语义,不会漏。
             限制：仅在 chat 入口(Extract / AskAi 弹框)有效;主面板聊天视图无编辑器上下文,会返回失败信息。
             示例：
-            {"type":"replace_selection","key":"hello_world"}
+            // 整段选区替换(XML 布局):选区文本="反馈内容",oldText 出现 1 次
+            {"type":"replace_selection","oldText":"反馈内容","newText":"@string/feedback_title"}
+            // 整段选区替换(Kotlin/Java)
+            {"type":"replace_selection","oldText":"反馈内容","newText":"R.string.feedback_title"}
+            // 精准子串:选区="android:text=\"反馈内容: <font>请填写</font>\"",只把"反馈内容"换成引用
+            {"type":"replace_selection","oldText":"反馈内容","newText":"@string/feedback_title"}
         """.trimIndent(),
 
         "task_complete" to """
@@ -1571,7 +1590,10 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         }
     }
 
-    private fun parseBatchTranslateResult(responseText: String, items: List<Pair<String, String>>): Map<String, String> {
+    private fun parseBatchTranslateResult(
+        responseText: String,
+        items: List<Pair<String, String>>
+    ): Map<String, String> {
         val root = extractJsonObject(responseText)
         return try {
             if (root == null) throw IllegalStateException("No JSON object found in batch translate result")
@@ -1757,6 +1779,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                             reasoning = parser.reasoningText,
                             toolCalls = parser.toolCalls,
                         )
+
                         AiProtocol.ANTHROPIC -> buildAnthropicSyntheticBody(
                             content = parser.contentText,
                             reasoning = parser.reasoningText,
@@ -2068,7 +2091,10 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         if (context.isBlank()) return ToolDefinitions.SheetContext(null, emptyList())
         return runCatching {
             val root = JsonParser.parseString(context).asJsonObject
-            val sheets = root.getAsJsonObject("googleSheets") ?: return@runCatching ToolDefinitions.SheetContext(null, emptyList())
+            val sheets = root.getAsJsonObject("googleSheets") ?: return@runCatching ToolDefinitions.SheetContext(
+                null,
+                emptyList()
+            )
             val defaultName = sheets.get("defaultSheetName")?.takeIf { !it.isJsonNull }?.asString
             val available = sheets.getAsJsonArray("availableSheets")?.mapNotNull { el ->
                 if (el.isJsonPrimitive) el.asString else null
@@ -2371,7 +2397,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                             ChatMessage(
                                 role = "tool",
                                 content = "[自动补全] 类型:${tc.name} 状态:已取消 " +
-                                    "信息:协议要求每个 tool_use 必须有 tool_result,系统自动补齐以满足协议。",
+                                        "信息:协议要求每个 tool_use 必须有 tool_result,系统自动补齐以满足协议。",
                                 toolCallId = tc.id
                             )
                         )
@@ -2755,12 +2781,14 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 } ?: AiAction.QueryKeys.SearchIn.KEY
                 AiAction.QueryKeys(module, pattern, limit, offset, includeTranslations, searchIn)
             }
+
             ToolDefinitions.TOOL_READ_STRING -> {
                 val name = args.get("name")?.asString?.trim() ?: return null
                 if (name.isEmpty()) return null
                 val module = args.get("module")?.asString?.trim()?.takeIf { it.isNotEmpty() }
                 AiAction.ReadString(module, name)
             }
+
             ToolDefinitions.TOOL_UPDATE_STRING -> {
                 val name = args.get("name")?.asString?.trim() ?: return null
                 if (name.isEmpty()) return null
@@ -2772,6 +2800,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 if (translations.isEmpty()) return null
                 AiAction.UpdateString(module, name, translations)
             }
+
             ToolDefinitions.TOOL_DELETE_STRING -> {
                 val name = args.get("name")?.asString?.trim() ?: return null
                 if (name.isEmpty()) return null
@@ -2782,6 +2811,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 } ?: emptyList()
                 AiAction.DeleteString(module, name, languages)
             }
+
             ToolDefinitions.TOOL_FIND_KEYS_BY_TEXT -> {
                 val text = args.get("text")?.asString?.trim() ?: return null
                 if (text.isEmpty()) return null
@@ -2792,6 +2822,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val limit = args.get("limit")?.let { runCatching { it.asInt }.getOrNull() } ?: 30
                 AiAction.FindKeysByText(text, matchType, caseSensitive, limit)
             }
+
             ToolDefinitions.TOOL_FIND_ROWS_BY_TEXT -> {
                 val text = args.get("text")?.asString?.trim() ?: return null
                 if (text.isEmpty()) return null
@@ -2803,6 +2834,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val limit = args.get("limit")?.let { runCatching { it.asInt }.getOrNull() } ?: 30
                 AiAction.FindRowsByText(text, spreadsheetId, sheetName, column, matchType, caseSensitive, limit)
             }
+
             ToolDefinitions.TOOL_INSERT_STRINGS -> {
                 val name = args.get("name")?.asString?.trim() ?: return null
                 val module = args.get("module")?.asString?.trim()?.takeIf { it.isNotEmpty() }
@@ -2812,6 +2844,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                     AiAction.InsertStrings(module, name, translations)
                 } else null
             }
+
             ToolDefinitions.TOOL_ASK_USER -> {
                 // 修复:更宽容的解析 —— 部分模型会省略 question 字段或把它写成非字符串,
                 // 之前直接 return null → 进入 failedToolCalls → 用户看不到问题内容。
@@ -2822,6 +2855,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                     rawQuestion == null || rawQuestion.isJsonNull -> "(AI 尝试提问但未提供问题内容,请在输入框回复)"
                     rawQuestion.isJsonPrimitive -> rawQuestion.asString.trim()
                         .ifEmpty { "(AI 尝试提问但问题内容为空,请在输入框回复)" }
+
                     else -> {
                         // 复杂类型(number/array/object)退化到 toString,再 strip 引号
                         val asText = rawQuestion.toString().trim('"').trim()
@@ -2834,10 +2868,12 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 } ?: emptyList()
                 AiAction.AskUser(question, options)
             }
+
             ToolDefinitions.TOOL_LOAD_TOOL_DOC -> {
                 val tool = args.get("tool")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: return null
                 AiAction.LoadToolDoc(tool)
             }
+
             ToolDefinitions.TOOL_TASK_COMPLETE -> {
                 val summary = args.get("summary")?.asString?.trim().orEmpty()
                 val status = args.get("status")?.asString?.trim().orEmpty()
@@ -2852,6 +2888,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val limit = args.get("limit")?.let { runCatching { it.asInt }.getOrNull() }
                 AiAction.TodoList(filter, limit)
             }
+
             ToolDefinitions.TOOL_TODO_ADD -> {
                 // title 必填;缺失 / 空 / 非字符串 → 返回 null(让 driver 生成「解析失败」tool_result)
                 val title = args.get("title")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: return null
@@ -2881,6 +2918,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                     recurrenceDays = recurrenceDays,
                 )
             }
+
             ToolDefinitions.TOOL_TODO_UPDATE -> {
                 // id 必填;缺失 / 空 / 非字符串 → 返回 null
                 val id = args.get("id")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: return null
@@ -2920,14 +2958,17 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                     clearReminder = clearReminder,
                 )
             }
+
             ToolDefinitions.TOOL_TODO_DELETE -> {
                 val id = args.get("id")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: return null
                 AiAction.TodoDelete(id)
             }
+
             ToolDefinitions.TOOL_CURRENT_TIME -> {
                 // 不需要任何参数;dummpy / 空 args 都 OK
                 AiAction.CurrentTime()
             }
+
             ToolDefinitions.TOOL_SHEETS_OPERATION -> {
                 val operationText = args.get("operation")?.asString ?: return null
                 val operation = runCatching {
@@ -2992,6 +3033,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             ToolDefinitions.TOOL_GET_EDITOR_FILE -> {
                 AiAction.GetEditorFile()
             }
+
             ToolDefinitions.TOOL_READ_FILE -> {
                 val path = args.get("path")?.asString?.trim() ?: return null
                 if (path.isEmpty()) return null
@@ -3000,6 +3042,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val maxLines = args.get("maxLines")?.let { runCatching { it.asInt }.getOrNull() } ?: 600
                 AiAction.ReadFile(path, startLine, endLine, maxLines)
             }
+
             ToolDefinitions.TOOL_EDIT_FILE -> {
                 val path = args.get("path")?.asString?.trim() ?: return null
                 val oldText = args.get("oldText")?.asString ?: return null
@@ -3009,6 +3052,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val replaceAll = args.get("replaceAll")?.let { runCatching { it.asBoolean }.getOrNull() } ?: false
                 AiAction.EditFile(path, oldText, newText, useRegex, replaceAll)
             }
+
             ToolDefinitions.TOOL_CREATE_FILE -> {
                 val path = args.get("path")?.asString?.trim() ?: return null
                 val content = args.get("content")?.asString ?: return null
@@ -3016,6 +3060,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val overwrite = args.get("overwrite")?.let { runCatching { it.asBoolean }.getOrNull() } ?: false
                 AiAction.CreateFile(path, content, overwrite)
             }
+
             ToolDefinitions.TOOL_SEARCH_IN_FILES -> {
                 val pattern = args.get("pattern")?.asString ?: return null
                 if (pattern.isEmpty()) return null
@@ -3026,6 +3071,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val limit = args.get("limit")?.let { runCatching { it.asInt }.getOrNull() } ?: 100
                 AiAction.SearchInFiles(pattern, useRegex, caseSensitive, filePattern, relativeDir, limit)
             }
+
             ToolDefinitions.TOOL_FIND_REFERENCES -> {
                 val symbol = args.get("symbol")?.asString?.trim() ?: return null
                 if (symbol.isEmpty()) return null
@@ -3034,6 +3080,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val limit = args.get("limit")?.let { runCatching { it.asInt }.getOrNull() } ?: 100
                 AiAction.FindReferences(symbol, kind, caseSensitive, limit)
             }
+
             ToolDefinitions.TOOL_LIST_FILES -> {
                 val relativeDir = args.get("relativeDir")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: "."
                 val pattern = args.get("pattern")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: "*"
@@ -3048,18 +3095,23 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 if (path.isEmpty()) return null
                 AiAction.FileInfo(path)
             }
+
             ToolDefinitions.TOOL_READ_FILES -> {
                 val pathsArr = args.get("paths")?.asJsonArray ?: return null
-                val paths = pathsArr.mapNotNull { it.takeIf { el -> el.isJsonPrimitive }?.asString?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                val paths = pathsArr.mapNotNull {
+                    it.takeIf { el -> el.isJsonPrimitive }?.asString?.trim()?.takeIf { s -> s.isNotEmpty() }
+                }
                 if (paths.isEmpty()) return null
                 val maxLines = args.get("maxLines")?.let { runCatching { it.asInt }.getOrNull() } ?: 0
                 AiAction.ReadFiles(paths, maxLines)
             }
+
             ToolDefinitions.TOOL_DELETE_FILE -> {
                 val path = args.get("path")?.asString?.trim() ?: return null
                 if (path.isEmpty()) return null
                 AiAction.DeleteFile(path)
             }
+
             ToolDefinitions.TOOL_MOVE_FILE -> {
                 val src = args.get("src")?.asString?.trim() ?: return null
                 val dst = args.get("dst")?.asString?.trim() ?: return null
@@ -3068,10 +3120,15 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             }
             // endregion
             ToolDefinitions.TOOL_REPLACE_SELECTION -> {
-                val key = args.get("key")?.asString?.trim() ?: return null
-                if (key.isEmpty()) return null
-                AiAction.ReplaceSelection(key)
+                // 2026.x:参数是 (oldText, newText) —— 选区里所有匹配 oldText 的子串全部替换为 newText。
+                // 整段选区就是要替换的硬编码 → oldText = 选区文本,newText = "@string/<key>" / "R.string.<key>";
+                // 精准子串替换 → oldText = 选区里要换的那段,newText = 对 key 的引用。
+                val oldText = args.get("oldText")?.asString ?: return null
+                if (oldText.isEmpty()) return null
+                val newText = args.get("newText")?.asString ?: return null
+                AiAction.ReplaceSelection(oldText, newText)
             }
+
             else -> null
         }
     }
@@ -3231,12 +3288,15 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                     element.isJsonPrimitive -> element.asString
                     element.isJsonObject -> element.asJsonObject.get("text")?.asString
                         ?: element.asJsonObject.get("content")?.extractText()
+
                     else -> null
                 }
             }.joinToString("")
+
             isJsonObject -> asJsonObject.get("text")?.asString
                 ?: asJsonObject.get("content")?.extractText()
                 ?: toString()
+
             else -> ""
         }
     }

@@ -384,19 +384,28 @@ sealed class AiAction {
     ) : AiAction()
 
     /**
-     * 把当前 IDE 编辑器选中的硬编码文本替换为对指定 key 的引用。
+     * 把当前 IDE 编辑器选中的文本里**所有**与 [oldText] 匹配的子串替换为 [newText](整段选区内全部替换)。
      *
-     * 典型用法:用户从布局/代码中选中一段硬编码文字,要求 AI 提取为 strings.xml。
-     * AI 走完翻译查重 + insert_strings 流程后,driver 会回调 [ChatStateHolder.onInsertStringsInserted]
-     * 触发本动作;或在「使用现有 key」场景下由 AI 显式调用本工具来触发同样的替换。
+     * 典型用法:用户从布局/代码中选中一段硬编码文字,要求 AI 提取为 strings.xml 并替换。
+     * - **整段选区就是要替换的硬编码**(翻译查重 / Extract 流程):oldText = 选区里这段
+     *   硬编码字面内容,newText = `"@string/<key>"`(XML 布局)或 `"R.string.<key>"`(其它文件);
+     *   选区里只出现 1 次,替换后整段变成对 key 的引用。
+     * - **精准子串替换**(2026.x 典型需求):用户选了 `android:text="反馈内容: <font>请填写</font>"`
+     *   整段,只想把"反馈内容"换成对 key 的引用、保留 HTML 标签和冒号 → oldText = "反馈内容",
+     *   newText = "@string/feedback_title";替换后整段变成
+     *   `android:text="@string/feedback_title: <font>请填写</font>"`,标签和冒号原样保留。
+     * - **同一子串在选区里出现多次**:全部替换(不抛错,逐个替换,最终结果是「选区里所有
+     *   oldText 都换成 newText」),跟 String.replace 语义一致,不会漏位置也不会换错位置。
      *
-     * 行为:XML 布局文件替换为 `@string/<key>`,其它文件替换为 `R.string/<key>`;
-     * 在 EDT 上 WriteCommandAction 中执行;**执行后聊天视图保持打开**,AI 继续调用
+     * 执行:在 EDT 上 WriteCommandAction 中执行;**执行后聊天视图保持打开**,AI 继续调用
      * read_string / ask_user / update_string 推进翻译查重的后续流程。
      * 无编辑器上下文(主面板聊天)或选区失效时,driver 会返回失败 tool_result。
+     *
+     * 失败条件:[oldText] 为空,或 [oldText] 在当前选区中 0 次匹配(返回失败 + 选区前 60 字符预览)。
      */
     data class ReplaceSelection(
-        val key: String
+        val oldText: String,
+        val newText: String,
     ) : AiAction()
 
     /**
