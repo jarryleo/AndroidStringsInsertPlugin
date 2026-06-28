@@ -3,9 +3,12 @@ package cn.jarryleo.insert_strings.ui
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -25,12 +28,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import cn.jarryleo.insert_strings.ai.ToolCall
 import cn.jarryleo.insert_strings.phrases.QuickPhrase
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlin.time.Duration.Companion.microseconds
 
 @Composable
 fun AiChatContent(
@@ -171,38 +178,91 @@ private fun AiChatBody(
     val listState = rememberLazyListState()
     val renderItems = buildChatRenderItems(chatMessages)
 
-    // 2026.x 修复:「贴底跟随」式自动滚动
-    // 原逻辑:每次新消息加入 / 流式文本更新时,无条件 animateScrollToItem 滚到底。
-    // 痛点:AI 回复文本很长时(气泡超出界面高度),用户上滑想看中间内容,会被
-    // 持续触发的滚动拉回底部,完全没法自由浏览。
+    // 自动滚动跟随逻辑:
     //
-    // 新逻辑:跟踪「用户是否贴底」状态(用 LazyListState.canScrollForward 判定,
-    // 即「还能不能继续往下滚」,false = 已贴底),只有贴底时才自动跟随,否则
-    // 让用户保留阅读位置;用户主动滑回底部后,下次流式 chunk 触发又恢复跟随。
-    val isAtBottom = remember { mutableStateOf(true) }
+    // 核心问题:流式输出时内容持续增长,canScrollForward 在内容增长后短暂变 true,
+    // 导致基于 canScrollForward 的 isAtBottom 误判为"用户不在底部",自动滚动失效。
+    // 同时,animateScrollToItem 的动画被下一个 chunk 取消,滚动永远到不了底,加剧问题。
+    //
+    // 解决方案:
+    // 1. 用 userScrolledUp 替代 isAtBottom:追踪 firstVisibleItemIndex 和 scrollOffset,
+    //    只有当这些值实际变化时(用户真的滚了)才标记为上滑。内容增长不会改变这些值,
+    //    因此不会误判。
+    // 2. 流式滚动用即时 scrollToItemBottomAligned(一帧内完成),避免动画被取消。
+    // 3. scrollToItemBottomAligned 优化:已可见的 item 只做微调,不做"跳到顶再调到底"
+    //    的两步操作,消除高频 chunk 下的视觉抖动。
+
+    data class ScrollPos(val index: Int, val offset: Int)
+    val userScrolledUp = remember { mutableStateOf(false) }
+    var lastScrollPos by remember { mutableStateOf(ScrollPos(0, 0)) }
     LaunchedEffect(listState) {
-        snapshotFlow { listState.canScrollForward }
+        snapshotFlow {
+            ScrollPos(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+        }
             .distinctUntilChanged()
-            .collect { canForward ->
-                isAtBottom.value = !canForward
+            .collect { pos ->
+                val prev = lastScrollPos
+                if (pos.index < prev.index ||
+                    (pos.index == prev.index && pos.offset < prev.offset)
+                ) {
+                    userScrolledUp.value = true
+                } else if (pos.index >= prev.index && pos.offset >= prev.offset) {
+                    if (!listState.canScrollForward) {
+                        userScrolledUp.value = false
+                    }
+                }
+                lastScrollPos = pos
             }
     }
 
-    // 新消息加入时:仅当用户当前贴底才滚到底(用户主动上滑读历史时不打扰)。
+    // 新消息加入时的滚动策略:
+    //  - **用户消息**:强制滚到底(用户发消息了就表示阅读完了,必须把视线拉到最底)
+    //    —— 不受 userScrolledUp 影响。用 animate 做平滑过渡。
+    //  - **AI 消息**:仅当用户未上滑时才滚到底;用户在阅读历史时不打扰。
+    //    用即时滚动,避免动画被紧随的流式 effect 取消。
     LaunchedEffect(chatMessages.size) {
-        if (!isAtBottom.value) return@LaunchedEffect
-        if (renderItems.isNotEmpty()) {
-            listState.animateScrollToItem(renderItems.size - 1)
+        val newMsg = chatMessages.lastOrNull() ?: return@LaunchedEffect
+        if (newMsg.role != "user" && userScrolledUp.value) return@LaunchedEffect
+        if (renderItems.isEmpty()) return@LaunchedEffect
+        val targetIndex = renderItems.size - 1
+        snapshotFlow { listState.layoutInfo.totalItemsCount }
+            .filter { it > targetIndex }
+            .first()
+        if (newMsg.role == "user") {
+            userScrolledUp.value = false
+            listState.animateScrollToItemBottomAligned(targetIndex)
+        } else {
+            listState.scrollToItemBottomAligned(targetIndex)
         }
     }
-    // 流式生成中:最后一条消息的 thinking / content 持续变化,仅在贴底时跟随。
-    // 离开底部后(用户上滑)就停止追他;用户滑回底部后,下一个 chunk 触发会恢复跟随。
+    // 流式生成中:每个 chunk 触发 effect,仅在用户未上滑时跟随。
+    // 用户上滑后停止跟随;用户滑回底部时,userScrolledUp 变 false,
+    // effect 重新 fire,立即恢复跟随。
+    //
+    // 使用即时 scrollToItemBottomAligned:一帧内完成,不被后续 chunk 取消。
+    // 已可见的 item 只做微调(不做"跳到顶再调到底"),消除抖动。
     val lastStreamingMessage = chatMessages.lastOrNull { it.streaming }
-    LaunchedEffect(lastStreamingMessage?.thinking, lastStreamingMessage?.content) {
-        if (lastStreamingMessage == null || chatMessages.isEmpty()) return@LaunchedEffect
-        if (isAtBottom.value && renderItems.isNotEmpty()) {
-            listState.animateScrollToItem(renderItems.size - 1)
-        }
+    LaunchedEffect(lastStreamingMessage?.thinking, lastStreamingMessage?.content, userScrolledUp.value) {
+        if (lastStreamingMessage == null) return@LaunchedEffect
+        if (userScrolledUp.value) return@LaunchedEffect
+        if (renderItems.isEmpty()) return@LaunchedEffect
+        val targetIndex = renderItems.size - 1
+        snapshotFlow { listState.layoutInfo.totalItemsCount }
+            .filter { it > targetIndex }
+            .first()
+        listState.scrollToItemBottomAligned(targetIndex)
+    }
+
+    // AI 提问按钮出现时:options 通过 copy() 写入最后一条消息,chatMessages.size 不变,
+    // 流式也已停止,前两个 effect 都不会触发。单独监听 options 变化,
+    // 等一帧让按钮完成布局后滚到底部,确保用户能看到按钮。
+    val lastMsgOptions = chatMessages.lastOrNull()?.options
+    LaunchedEffect(lastMsgOptions) {
+        if (lastMsgOptions.isNullOrEmpty()) return@LaunchedEffect
+        if (renderItems.isEmpty()) return@LaunchedEffect
+        val targetIndex = renderItems.size - 1
+        delay(200.microseconds)
+        listState.scrollToItemBottomAligned(targetIndex)
     }
     Column(
         modifier = Modifier.fillMaxSize(),
@@ -1842,4 +1902,45 @@ private fun formatMessageTimestamp(timestamp: Long): String {
             now.get(Calendar.DAY_OF_YEAR) == msgCal.get(Calendar.DAY_OF_YEAR)
     val pattern = if (sameDay) "HH:mm" else "MM-dd HH:mm"
     return SimpleDateFormat(pattern, Locale.getDefault()).format(Date(timestamp))
+}
+
+/**
+ * 滚动到指定 index 并让 item **底部**对齐 viewport **底部**。
+ *
+ * 优化:若 item 已可见,直接计算底部偏差做单次 scrollBy,避免"先跳到顶再调到底"的
+ * 两步操作。流式输出时 item 始终可见,每个 chunk 只做一次微调,消除视觉抖动。
+ *
+ * 若 item 不可见(首次出现或跳转),回退到 scrollToItem(顶对齐) + 等一帧 + 底部对齐。
+ */
+private suspend fun LazyListState.scrollToItemBottomAligned(index: Int) {
+    val visibleItem = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+    if (visibleItem != null) {
+        val overflow = (visibleItem.offset + visibleItem.size) - layoutInfo.viewportEndOffset
+        if (overflow > 0) scrollBy(overflow.toFloat())
+        return
+    }
+    scrollToItem(index, 0)
+    withFrameNanos { /* one frame */ }
+    val item = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index } ?: return
+    val overflow = (item.offset + item.size) - layoutInfo.viewportEndOffset
+    if (overflow > 0) scrollBy(overflow.toFloat())
+}
+
+/**
+ * 同 [scrollToItemBottomAligned],但 scroll 阶段用动画而非即时落位。
+ * 用于用户消息等非高频场景,提供平滑的视觉过渡。
+ * 已可见的 item 同样做单次 animateScrollBy 优化。
+ */
+private suspend fun LazyListState.animateScrollToItemBottomAligned(index: Int) {
+    val visibleItem = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+    if (visibleItem != null) {
+        val overflow = (visibleItem.offset + visibleItem.size) - layoutInfo.viewportEndOffset
+        if (overflow > 0) animateScrollBy(overflow.toFloat())
+        return
+    }
+    animateScrollToItem(index, 0)
+    withFrameNanos { /* one frame */ }
+    val item = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index } ?: return
+    val overflow = (item.offset + item.size) - layoutInfo.viewportEndOffset
+    if (overflow > 0) animateScrollBy(overflow.toFloat())
 }
