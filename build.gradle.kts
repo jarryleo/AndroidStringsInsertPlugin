@@ -10,7 +10,7 @@ plugins {
 }
 
 group = "cn.jarryleo"
-version = "3.12.0"
+version = "3.12.1"
 
 repositories {
     mavenCentral()

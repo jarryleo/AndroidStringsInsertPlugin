@@ -194,14 +194,14 @@ internal class InsertStringsStringsOpsController(
         val results = StringsService.updateKey(project, moduleName, action.name, action.translations)
         val successCount = results.values.count { it == "成功" }
         val totalTarget = action.translations.size
-        val updated = results.size
-        val skipped = totalTarget - updated
+        val processed = results.size
+        val failed = processed - successCount
         return buildString {
             append("[工具执行结果] 类型:update_string key:").append(action.name)
             append(" 模块:").append(moduleName)
-            append(" 状态:").append(if (successCount == updated && updated == totalTarget) "成功" else "部分失败")
+            append(" 状态:").append(if (successCount == processed && processed == totalTarget) "成功" else "部分失败")
             append(" 成功:").append(successCount).append('/').append(totalTarget)
-            if (skipped > 0) append(" 跳过(无该语言文件):").append(skipped)
+            if (failed > 0) append(" 失败:").append(failed)
             appendLine()
             results.forEach { (lang, msg) ->
                 append("  ").append(lang).append(": ").appendLine(msg)

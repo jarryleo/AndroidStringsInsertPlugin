@@ -409,7 +409,10 @@ object AITranslator {
             - 系统在写入前会兜底补齐你漏写的语种(用 `values` 英文文本填),并裁剪你多写但目标模块没有的语种;但**不要依赖这个兜底** —— 兜底会导致界面出现英文/未翻译文本,你应该在 tool call 里就给齐。
             - 若上下文有 currentKeys，优先用第一个 key 作为 name；多 key 时可为每个 key 分别返回 insert_strings。
             - 可以同时返回多个 insert_strings 动作插入多个字符串。
-            - 翻译内容中 XML 特殊字符需转义：&amp; &lt; &gt; &quot; &apos;。
+            - 你不用考虑转义,系统会自动转义。
+            - **CDATA / Data 包裹不用你管**:如果目标模块里**已存在**该 key 的翻译用了 `<![CDATA[...]]>` 或 `<Data>...</Data>` 包裹(常见于带 HTML 标签的翻译),
+              你直接发翻译后的纯文本/HTML 即可,系统会**自动沿用原包裹**(把新文本塞进同样的 CDATA/Data 块里),不会丢。
+              新增 key(模块里之前没有)则按需自行决定要不要用 CDATA — 通常纯文本不必加,带 `<`/`>` 的建议加。
             - **插入前的两道查重均由 AI 自助完成,系统不再自动跑**:
               1. **原文查重(必做,主要查重依据)**:用 find_keys_by_text 扫描**用户消息中的原始文本**
                  (用户从布局/代码中选中的硬编码文本,或用户在消息中直接输入的待翻译文本),
@@ -507,6 +510,9 @@ object AITranslator {
             - 若 key 在某语言文件中不存在则在该文件中创建条目。
             - 适用场景：「只改 X 的繁体」「修正 Z 的某个语言翻译」「新增某语言翻译」。
             - 不适用场景：要全量覆盖某 key 的全部语言翻译时，请改用 insert_strings。
+            - **CDATA / Data 包裹不用你管**:如果原翻译用了 `<![CDATA[...]]>` 或 `<Data>...</Data>`(带 HTML 标签的那种),
+              你直接发翻译后的纯文本/HTML 即可,系统会**自动沿用原包裹**;不要自己手写 CDATA,反而可能让 Android 端
+              把 `<` 当字面量渲染、lint 报 unescaped <。
             示例（仅改中文与法语，不动英语）：
             {"type":"update_string","module":"app","name":"hello_world","translations":{"values-zh-rCN":"你好世界","values-fr":"Bonjour le monde"}}
         """.trimIndent(),

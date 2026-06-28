@@ -129,9 +129,24 @@ object StringsService {
     }
 
     /**
+     * 合法 Android 语言目录名:values / values-zh-rCN / values-b+en+US 等。
+     * 用来兜住 AI 偶发把语言名包成 `<|"|<values-ar|"|>` 之类的脏 key —— 这种串
+     * 不能直接落盘成目录,但如果只校验「必须以 values 开头 + 合法目录字符」太松,
+     * 「values-ar]]>」之类的尾巴也会过;这里用完整正则一次性收口,失败时给 AI
+     * 一条明确「应该长啥样」的错误信息,让它下一轮自己改。
+     */
+    private val validLanguagePattern = Regex("^values[A-Za-z0-9+_-]*$")
+
+    /**
      * 部分语言更新:只更新 [translations] 中列出的语言,其他语言保持原样。
      * 若 key 在某个语言文件中不存在,则在该语言文件中创建新条目。
      * 若 key 在所有文件都不存在,则视为新增(各语言按 translations 写入)。
+     *
+     * 2026.x:目标语言文件不存在时会自动通过 [ContextManager.ensureLanguageFile]
+     * 在模块的 res 目录下补齐 `values[-xxx]/strings.xml`,而不是像旧版那样
+     * 静默跳过导致 AI 看到「部分失败 0/1 跳过(无该语言文件)」。这与
+     * insert_strings 批处理在 [cn.jarryleo.insert_strings.ui.InsertStringsChatDriver]
+     * 里的补齐行为对齐 —— 写动作一律「缺啥建啥」。
      *
      * @return 每个语言的更新结果,key 为语言目录名(例: "values-zh-rTW"),
      *         value 为 "成功" / "失败: <原因>"
@@ -144,15 +159,24 @@ object StringsService {
     ): Map<String, String> {
         if (key.isEmpty()) return mapOf("" to "失败: key 为空")
         if (translations.isEmpty()) return mapOf("" to "失败: translations 为空,未提供任何语言")
-        val files = ContextManager.getInstance(project).getModuleFiles(moduleName)
+        val context = ContextManager.getInstance(project)
+        val files = context.getModuleFiles(moduleName)
         if (files.isEmpty()) {
             return mapOf("" to "失败: 模块 '$moduleName' 不存在或没有 strings.xml")
         }
-        val results = mutableMapOf<String, String>()
+        val fileByLang = files.associate { (valuesDir, stringsFile) -> valuesDir.name to stringsFile }
+        val results = linkedMapOf<String, String>()
         WriteCommandAction.runWriteCommandAction(project) {
-            files.forEach { (valuesDir, stringsFile) ->
-                val lang = valuesDir.name
-                val newText = translations[lang] ?: return@forEach
+            translations.forEach { (lang, newText) ->
+                if (!validLanguagePattern.matches(lang)) {
+                    results[lang] = "失败: 语言目录名 '$lang' 不合法,应为 'values' 或 'values-<bcp47>'(如 values-ar、values-zh-rCN、values-b+en+US)"
+                    return@forEach
+                }
+                val stringsFile = fileByLang[lang] ?: context.ensureLanguageFile(moduleName, lang)
+                if (stringsFile == null) {
+                    results[lang] = "失败: 模块 '$moduleName' 缺少 res 目录,无法创建 '$lang/strings.xml'"
+                    return@forEach
+                }
                 try {
                     val ok = updateOrCreateInFile(stringsFile, key, newText)
                     results[lang] = if (ok) "成功" else "失败: 写入失败"
@@ -363,7 +387,12 @@ object StringsService {
         val document = FileDocumentManager.getInstance().getDocument(file) ?: return false
         val xml = document.text
         val escapedKey = Regex.escape(key)
-        val escapedText = AndroidStringEscaper.escape(newText)
+        // 2026.x:key 已存在时,若原值有 <![CDATA[]]> / <Data></Data> 包裹,
+        // 自动给 newText 套上同样的包裹 — 防止 AI 翻译/修改时漏写导致丢格式标记。
+        // 详见 [AndroidStringEscaper.preserveWrapping] 注释。
+        val existingText = getStringText(file, key)
+        val finalText = AndroidStringEscaper.preserveWrapping(existingText, newText)
+        val escapedText = AndroidStringEscaper.escape(finalText)
         val newNode = "<string name=\"$key\">$escapedText</string>"
 
         // 已存在则替换(只动节点内容,前后空白与缩进保持不变)

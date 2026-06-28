@@ -2293,7 +2293,19 @@ internal class InsertStringsChatDriver(
             val existingInfo = contextMgr.scanModuleForKey(targetModule, action.name)
             val existingTranslations = existingInfo.associate { it.language to it.text }
             val merged = existingTranslations.toMutableMap()
-            merged.putAll(action.translations)
+            // 逐项合并:AI 漏写 <![CDATA[]]> / <Data></Data> 包裹时,沿用原有包裹 —
+            // 避免 insert_strings 覆写带 HTML 的翻译时把包裹一起吞掉(丢了之后
+            // Android 端会按字面量渲染 <,lint 也会报 unescaped <)。详见
+            // [cn.jarryleo.insert_strings.xml.AndroidStringEscaper.preserveWrapping]。
+            action.translations.forEach { (lang, aiText) ->
+                val existing = merged[lang]
+                merged[lang] = if (existing != null) {
+                    cn.jarryleo.insert_strings.xml.AndroidStringEscaper
+                        .preserveWrapping(existing, aiText)
+                } else {
+                    aiText
+                }
+            }
             // 兜底:确保 values(默认英语)一定存在,避免漏写导致 values/strings.xml 被清空
             if (DEFAULT_LANGUAGE !in merged) merged[DEFAULT_LANGUAGE] = ""
 
