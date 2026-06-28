@@ -246,12 +246,12 @@ private fun AiChatBody(
                     modifier = Modifier.width(68.dp),
                     colors = colors,
                 )
-                CompactButton(
+                /*CompactButton(
                     text = "Back",
                     onClick = onClose,
                     modifier = Modifier.width(56.dp),
                     colors = colors,
-                )
+                )*/
             }
         }
 

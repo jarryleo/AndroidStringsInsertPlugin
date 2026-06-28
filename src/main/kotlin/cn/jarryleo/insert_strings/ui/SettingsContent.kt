@@ -93,12 +93,12 @@ fun SettingsContent(
                 style = compactTextStyle(colors.text),
                 fontWeight = FontWeight.Bold,
             )
-            CompactButton(
+            /*CompactButton(
                 text = "Back",
                 onClick = onClose,
                 modifier = Modifier.width(56.dp),
                 colors = colors,
-            )
+            )*/
         }
 
         Row(
