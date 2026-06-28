@@ -206,11 +206,11 @@ object AITranslator {
 - 不确定模块有哪些语种时,先 `query_keys` / `read_string` 探查,或直接读 `context.modules[].xmlFiles`;**不要**靠猜。
 - 「插入翻译」优先用 `recommendedDefaultModule`;用户明确指定模块时按用户来。
 - 操作 strings.xml 时**不要**触发 google sheet 写入。
-- 自动生成 key:snake_case,长度 ≤ 40 字符,查重后冲突则重新生成。
+- 自动生成 key:snake_case,英文小写,不要用拼音,长度 ≤ 40 字符,查重后冲突则重新生成。
 
 ## 翻译查重(插入翻译前必做)
 1. **原文查重**(必做,主要依据):用 `find_keys_by_text` 扫描**用户消息中的原始文本**(布局/代码中的硬编码文本,或用户在消息中直接输入的待翻译文本),`matchType=exact` 跑一次、再 `contains` 兜底;同时可跑 `query_keys(searchIn=text/both)` 跨多语种翻译文本搜索提高命中率。
-   - 2026.x:`find_keys_by_text` 已固定全模块 + 全语言目录搜索(不再接受 module / language 参数),语义对齐「跨模块 + 跨语言找重复」,无需 AI 自行挑范围。
+   - `find_keys_by_text` 已固定全模块 + 全语言目录搜索(不再接受 module / language 参数),语义对齐「跨模块 + 跨语言找重复」,无需 AI 自行挑范围。
    - 原因:用户选中的硬编码文本通常**就是目标语言翻译**(如中文「登录」),values/ 译文用词可能不同,按 AI 翻译后的英语查会漏命中。
 2. **Key 名查重**:生成 key 后用 `query_keys(searchIn=key)` 检查是否已存在。
 3. 任一命中 → 用一次 `ask_user` 列出全部命中项,`question` 中明确写出找到的现有 key 与所在模块,`options` 用统一格式(见公共规则)。
