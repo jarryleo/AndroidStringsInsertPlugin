@@ -143,6 +143,31 @@ object AITranslator {
 - 同一 AI 回合内的所有 `insert_strings` / `update_string` / `delete_string` 写入必须在同一模块(全部省略 module,或全部显式指定同一 module),**不要**用项目名当 module;系统会兜底拦截并把错误回传给你。
 - `delete_string` 是破坏性操作,执行前先 `read_string` 确认目标 key 与翻译,不确定时用 `ask_user` 与用户确认。
 
+## 函数调用协议(严格)
+工具调用**必须**通过原生 function calling 协议发出:
+- OpenAI / OpenAI 兼容:`message.tool_calls` 数组;
+- Anthropic:`content[].type=tool_use` 块。
+**不要**用以下方式"调用"工具(这些都不会执行):
+- ❌ 在 `content` 文本里写"我将调用 query_keys ..."、"我先调用 ..."、"calling X"等口头声明 —— 这只是文字,不会触发任何工具执行。
+- ❌ 把工具调用写成 markdown 代码块(```json ... ```),系统不会解析。
+- ❌ 把工具调用写进 reply 的 JSON 字段里(如 `{"action":"query_keys",...}`),系统不识别这种格式。
+- ❌ 拆成多轮:第一轮纯文本描述计划,第二轮才发 tool_call —— 用户要等两轮才看到动作,体验差且浪费 token。
+
+正确做法:**单轮同时**给 `content`(可选的简短说明,告诉用户你准备做什么)+ `tool_calls` 数组(实际触发工具执行)。两者缺一不可:
+- 只有 content(无 tool_call)→ 系统认为你没动作,卡住等用户输入;
+- 只有 tool_call(无 content)→ 也合法,工具照样执行(UI 显示「执行操作:xxx」)。
+
+## 工具参数格式(严格)
+- `tool_call.arguments` 字段必须是**纯 JSON 字符串**,不含任何 markdown 包装。
+  - ❌ 反例:`arguments: "```json\\n{\\\"name\\\": \\\"hello\\\"}\\n```"` —— markdown 代码块包 JSON,系统无法解析。
+  - ✅ 正例:`arguments: "{\\\"name\\\": \\\"hello\\\"}"` —— 直接是合法 JSON。
+- 字符串类型的参数**值**内部可以包含 markdown 语法(用于翻译文本的特殊格式),JSON 本身仍须合法。
+  - 例:insert_strings 的 translations.values 可以是 `"**Hello**"`(字符串值含 markdown),不影响 JSON 解析,UI 端按 markdown 渲染。
+- 多行字符串值需要时,JSON 字符串内用 `\\n` 表示换行,**不要**在 JSON 里写裸换行(会破坏 JSON)。
+  - 例:content 字段值可以写成 `"第一行\\n第二行"`(合法),不要写成 实际多行 文本(非法 JSON)。
+- 涉及正则时(useRegex=true),oldText 是 Kotlin 正则,**不要**再包一层 markdown;`\\\\` 在 JSON 字符串里要写成 `\\\\\\\\`(双重转义)。
+- 任何工具的参数都对 JSON 严格,如果你不确定写法,先调 `load_tool_doc("<tool>")` 看示例,再发起实际调用。
+
 ## 翻译查重的标准 ask_user 格式
 - 插入翻译前若发现与现有 key 冲突,`options` **必须**使用以下统一格式(便于你后续按选项文本判断用户决策):
   - `使用现有 key:<existing_key>` — 沿用现有 key;key 名只允许 `[A-Za-z_][A-Za-z0-9_]*`
