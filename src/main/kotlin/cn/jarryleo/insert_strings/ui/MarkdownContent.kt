@@ -402,6 +402,10 @@ private fun collectInlineText(node: Node): String {
         when (child) {
             is Text -> sb.append(child.literal)
             is Code -> sb.append(child.literal)
+            // inline HTML/XML(如选区里的 `<TextView ... />`):commonmark 把内容存
+            // 在 `literal` 而非子节点,这里必须显式追加,否则默认走 else 分支
+            // 递归到 firstChild = null,整段标签会被吞成空串。
+            is HtmlInline -> sb.append(child.literal)
             is SoftLineBreak -> sb.append('\n')
             is HardLineBreak -> sb.append('\n')
             is StrongEmphasis -> sb.append(collectInlineText(child))
@@ -439,6 +443,22 @@ private fun AnnotatedString.Builder.renderInlineNode(
                 SpanStyle(
                     fontFamily = FontFamily.Monospace,
                     background = palette.inlineCodeBackground,
+                    fontSize = 11.sp,
+                )
+            ) {
+                append(node.literal.orEmpty())
+            }
+        }
+
+        // inline HTML/XML(例如选区里的 `<TextView ... />`):commonmark 把它解析成
+        // HtmlInline 节点,内容存在 `literal` 而非子节点。旧实现走 else 分支递归
+        // firstChild,结果整段标签被吞,UI 只能看到普通文字。改为显式追加字面量,
+        // 并用次要色 + 等宽字体提示「这是被引用的源码片段」。
+        is HtmlInline -> {
+            withStyle(
+                SpanStyle(
+                    fontFamily = FontFamily.Monospace,
+                    color = palette.secondaryText,
                     fontSize = 11.sp,
                 )
             ) {
