@@ -7,11 +7,7 @@ import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -27,17 +23,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cn.jarryleo.insert_strings.ai.ChatMessage
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
 import cn.jarryleo.insert_strings.ai.ToolCall
 import cn.jarryleo.insert_strings.phrases.QuickPhrase
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import java.text.SimpleDateFormat
 import java.util.*
-import kotlin.time.Duration.Companion.microseconds
 
 @Composable
 fun AiChatContent(
@@ -193,20 +187,44 @@ private fun AiChatBody(
     //    的两步操作,消除高频 chunk 下的视觉抖动。
 
     data class ScrollPos(val index: Int, val offset: Int)
+
+    // userScrolledUp 检测:
+    // 关键问题:仅靠 firstVisibleItemIndex/Offset 的方向判断无法区分
+    // 「用户主动上滑」与「内容增长/插入导致的布局重算」。
+    // 快速连续加入多个气泡时,firstVisibleItemScrollOffset 会因布局重算而
+    // 波动,被误判为用户上滑,userScrolledUp 误翻 true 导致自动滚动失效。
+    //
+    // 修复:结合 isScrollInProgress 判断——只有真正在滚动(isScrollInProgress=true)
+    // 才进行方向判断;内容增长/插入不触发 isScrollInProgress,不会被误判。
+    // 滚动停止后,根据 canScrollForward 决定是否重置状态。
     val userScrolledUp = remember { mutableStateOf(false) }
     var lastScrollPos by remember { mutableStateOf(ScrollPos(0, 0)) }
     LaunchedEffect(listState) {
         snapshotFlow {
-            ScrollPos(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+            Triple(
+                listState.isScrollInProgress,
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset
+            )
         }
             .distinctUntilChanged()
-            .collect { pos ->
+            .collect { (scrolling, index, offset) ->
+                val pos = ScrollPos(index, offset)
                 val prev = lastScrollPos
-                if (pos.index < prev.index ||
-                    (pos.index == prev.index && pos.offset < prev.offset)
-                ) {
-                    userScrolledUp.value = true
-                } else if (pos.index >= prev.index && pos.offset >= prev.offset) {
+                if (scrolling) {
+                    // 真正在滚动:用方向判断
+                    if (pos.index < prev.index ||
+                        (pos.index == prev.index && pos.offset < prev.offset)
+                    ) {
+                        userScrolledUp.value = true
+                    } else if (pos.index >= prev.index && pos.offset >= prev.offset) {
+                        if (!listState.canScrollForward) {
+                            userScrolledUp.value = false
+                        }
+                    }
+                } else {
+                    // 非滚动状态(内容增长/插入):只根据最终位置重置
+                    // 如果已在最底部(canScrollForward=false),重置为未上滑
                     if (!listState.canScrollForward) {
                         userScrolledUp.value = false
                     }
@@ -214,6 +232,10 @@ private fun AiChatBody(
                 lastScrollPos = pos
             }
     }
+
+    // 引用气泡作为 LazyColumn 的第 0 项,导致所有 renderItems 在 LazyColumn 中的索引
+    // 整体偏移 1。scrollToItem 系列函数期望的是 LazyColumn 索引,必须加上这个偏移。
+    val quoteOffset = if (quotedContentState.value.isNullOrBlank()) 0 else 1
 
     // 新消息加入时的滚动策略:
     //  - **用户消息**:强制滚到底(用户发消息了就表示阅读完了,必须把视线拉到最底)
@@ -224,7 +246,7 @@ private fun AiChatBody(
         val newMsg = chatMessages.lastOrNull() ?: return@LaunchedEffect
         if (newMsg.role != "user" && userScrolledUp.value) return@LaunchedEffect
         if (renderItems.isEmpty()) return@LaunchedEffect
-        val targetIndex = renderItems.size - 1
+        val targetIndex = renderItems.size - 1 + quoteOffset
         snapshotFlow { listState.layoutInfo.totalItemsCount }
             .filter { it > targetIndex }
             .first()
@@ -246,7 +268,7 @@ private fun AiChatBody(
         if (lastStreamingMessage == null) return@LaunchedEffect
         if (userScrolledUp.value) return@LaunchedEffect
         if (renderItems.isEmpty()) return@LaunchedEffect
-        val targetIndex = renderItems.size - 1
+        val targetIndex = renderItems.size - 1 + quoteOffset
         snapshotFlow { listState.layoutInfo.totalItemsCount }
             .filter { it > targetIndex }
             .first()
@@ -257,11 +279,16 @@ private fun AiChatBody(
     // 流式也已停止,前两个 effect 都不会触发。单独监听 options 变化,
     // 等一帧让按钮完成布局后滚到底部,确保用户能看到按钮。
     val lastMsgOptions = chatMessages.lastOrNull()?.options
-    LaunchedEffect(lastMsgOptions) {
+    val lastToolCallId = chatMessages.lastOrNull()?.toolCallId
+    val lastToolCalls = chatMessages.lastOrNull()?.toolCalls
+    val lastProtocolSummary = chatMessages.lastOrNull()?.protocolSummary
+    val lastProtocolVisible = chatMessages.lastOrNull()?.protocolVisible
+    LaunchedEffect(lastMsgOptions, lastToolCallId, lastToolCalls, lastProtocolSummary, lastProtocolVisible) {
         if (lastMsgOptions.isNullOrEmpty()) return@LaunchedEffect
         if (renderItems.isEmpty()) return@LaunchedEffect
-        val targetIndex = renderItems.size - 1
-        delay(200.microseconds)
+        if (userScrolledUp.value) return@LaunchedEffect
+        withFrameNanos { /* one frame */ }
+        val targetIndex = renderItems.size - 1 + quoteOffset
         listState.scrollToItemBottomAligned(targetIndex)
     }
     Column(
