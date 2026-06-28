@@ -24,6 +24,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cn.jarryleo.insert_strings.ai.ChatMessage
+import kotlinx.coroutines.flow.distinctUntilChanged
 import cn.jarryleo.insert_strings.ai.ToolCall
 import cn.jarryleo.insert_strings.phrases.QuickPhrase
 import com.google.gson.JsonObject
@@ -169,23 +170,37 @@ private fun AiChatBody(
     val quotedContentState = remember { mutableStateOf(quoteContent) }
     val listState = rememberLazyListState()
     val renderItems = buildChatRenderItems(chatMessages)
-    // 新消息加入时滚到末尾(用户期待看到刚发的内容)
+
+    // 2026.x 修复:「贴底跟随」式自动滚动
+    // 原逻辑:每次新消息加入 / 流式文本更新时,无条件 animateScrollToItem 滚到底。
+    // 痛点:AI 回复文本很长时(气泡超出界面高度),用户上滑想看中间内容,会被
+    // 持续触发的滚动拉回底部,完全没法自由浏览。
+    //
+    // 新逻辑:跟踪「用户是否贴底」状态(用 LazyListState.canScrollForward 判定,
+    // 即「还能不能继续往下滚」,false = 已贴底),只有贴底时才自动跟随,否则
+    // 让用户保留阅读位置;用户主动滑回底部后,下次流式 chunk 触发又恢复跟随。
+    val isAtBottom = remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.canScrollForward }
+            .distinctUntilChanged()
+            .collect { canForward ->
+                isAtBottom.value = !canForward
+            }
+    }
+
+    // 新消息加入时:仅当用户当前贴底才滚到底(用户主动上滑读历史时不打扰)。
     LaunchedEffect(chatMessages.size) {
+        if (!isAtBottom.value) return@LaunchedEffect
         if (renderItems.isNotEmpty()) {
             listState.animateScrollToItem(renderItems.size - 1)
         }
     }
-    // 流式生成中:最后一条消息的 thinking / content 会持续变化,需要保持滚到末尾,
-    // 否则用户看到的就是"卡住"的旧文本。但用户如果已经主动向上滚动阅读历史,
-    // 就不应该把视图强制拉回底部,否则会变成"追着他跑"的糟糕体验。
-    // 判定:仅当「最后一项已可见」时跟随滚动,否则让用户保留当前阅读位置。
+    // 流式生成中:最后一条消息的 thinking / content 持续变化,仅在贴底时跟随。
+    // 离开底部后(用户上滑)就停止追他;用户滑回底部后,下一个 chunk 触发会恢复跟随。
     val lastStreamingMessage = chatMessages.lastOrNull { it.streaming }
     LaunchedEffect(lastStreamingMessage?.thinking, lastStreamingMessage?.content) {
         if (lastStreamingMessage == null || chatMessages.isEmpty()) return@LaunchedEffect
-        val layout = listState.layoutInfo
-        val lastVisible = layout.visibleItemsInfo.lastOrNull()?.index ?: -1
-        val isAtBottom = lastVisible >= renderItems.size - 1
-        if (isAtBottom) {
+        if (isAtBottom.value && renderItems.isNotEmpty()) {
             listState.animateScrollToItem(renderItems.size - 1)
         }
     }
