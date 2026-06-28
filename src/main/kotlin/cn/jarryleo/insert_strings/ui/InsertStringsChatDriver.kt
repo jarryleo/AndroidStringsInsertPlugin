@@ -638,11 +638,12 @@ internal class InsertStringsChatDriver(
                     // 工具调用回合:thinking 写思考过程;
                     // content 在 protocolSummary 非空时(有真实非 ask_user 工具)留空,避免冗余文本进入 AI 上下文。
                     // 含 ask_user 时 content = reply.reply(有前言正文);只有 failed 时 content 空 + summary 提示。
-                    val displayContent = when {
+                    /*val displayContent = when {
                         summary != null && !hasAskUser && reply.failedToolCalls.isEmpty() -> ""
                         summary != null && reply.failedToolCalls.isNotEmpty() -> ""
                         else -> reply.reply
-                    }
+                    }*/
+                    val displayContent = reply.reply
                     AssistantDisplay(displayContent, summary, reply.reasoning)
                 }
             }
