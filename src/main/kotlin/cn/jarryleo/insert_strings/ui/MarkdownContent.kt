@@ -9,6 +9,7 @@ import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalUriHandler
@@ -347,6 +348,19 @@ private fun renderTable(
         section = section.next
     }
 
+    // 列宽分配策略(2026.x 修复):
+    // 旧实现只给「非最后一列」加 weight(1f),最后一列走自然宽度。
+    // 一旦最后一列内容较长(URL / 长句 / 中文段落),它会按字面宽度撑开,挤掉
+    // 其他列的可用空间,导致前面几列变得很窄、文字被压成密集换行,整张表高得
+    // 失控,严重时滚一下要看半天。
+    //
+    // 新策略:**所有列统一 weight(1f)**,平均瓜分可用宽度。这样:
+    //  - 无论哪一列内容偏长,各列宽度始终相等,没有「一列极窄、其余极宽」的情况;
+    //  - 长文本在固定列宽内 wrap,各行高度由该行最长单元格决定,可预测;
+    //  - 短内容列只是横向留白,不影响其他列的布局。
+    //
+    // 同时把每列加上 `Modifier.padding(end = 6.dp)`,在等宽列之间留一点视觉间隙,
+    // 避免相邻单元格贴在一起时难以分辨边界。
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -357,7 +371,8 @@ private fun renderTable(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(palette.codeBlockBackground)
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.Top,
             ) {
                 headerCells.forEachIndexed { i, text ->
                     Text(
@@ -365,7 +380,9 @@ private fun renderTable(
                         color = palette.text,
                         fontWeight = FontWeight.Bold,
                         style = compactTextStyle(palette.text),
-                        modifier = if (i < headerCells.size - 1) Modifier.weight(1f) else Modifier,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = if (i < headerCells.size - 1) 6.dp else 0.dp),
                     )
                 }
             }
@@ -380,14 +397,17 @@ private fun renderTable(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.Top,
             ) {
                 row.forEachIndexed { i, text ->
                     Text(
                         text = text,
                         color = palette.text,
                         style = compactTextStyle(palette.text),
-                        modifier = if (i < row.size - 1) Modifier.weight(1f) else Modifier,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = if (i < row.size - 1) 6.dp else 0.dp),
                     )
                 }
             }
