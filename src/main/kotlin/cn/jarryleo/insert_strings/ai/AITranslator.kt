@@ -266,20 +266,26 @@ object AITranslator {
     /**
      * AskAi / ExtractStrings 弹框的 system prompt(chatEntry=askAi 或 extractStrings)。
      *
-     * 与主面板的差异:
+     * 与主面板的差异(2026.x 调整):
      * 1. 顶部有一个「引用内容」气泡,气泡底部有 4 个预置按钮(翻译 / 解释 / 总结 / 复制)。
      *    按下前三个会发一句**短指令**(如「请把引用内容翻译成中文。」),**不**把原文塞进 user 消息;
      *    原文在上下文 JSON 的 `editorSelection.text` 字段,AI 必须从该字段读取。
      * 2. 弹框场景有编辑器选区 —— `chatEntry != "mainPanel"` 且 `editorSelection` 非 null 时,
      *    用户选「使用现有 key:」后**必须**先调 `replace_selection`。
-     * 3. 弹框不做 Google Sheets / 大文件操作 —— 工具列表与主面板不同。
+     * 3. **工具集与主面板相同**(2026.x):Ask AI 现在可以读写 Sheets、调文件 / 编辑器工具、
+     *    管理 代办 —— 用户从弹框里也能直接做这些事,不必切到主面板。仅以下两类入口专用:
+     *    - `replace_selection` 在主面板永远不可用(主面板无编辑器选区上下文,会失败)。
+     *    - `editorSelection` 上下文仅在弹框(且有选区)时存在。
      */
     private const val QUOTE_ENTRY_SYSTEM_PROMPT =
         """你是 Android 应用国际化字符串管理助手,运行在「引用内容」弹框(Ask AI / Extract strings.xml)中。通过 function calling 与系统协作:调用工具执行操作,调用 `task_complete` 结束任务。
 
 ## 工具集(按需加载详细用法)
 - **strings.xml**:query_keys / read_string / find_keys_by_text / insert_strings / update_string / delete_string
-- **编辑器选区替换**:replace_selection
+- **Google Sheets**:sheets_operation(基础/行列/冻结/审查/颜色/批量) / find_rows_by_text
+- **文件 / 编辑器**:get_editor_file / read_file / edit_file / create_file / search_in_files / find_references / list_files
+- **代办**:todo_list / todo_add / todo_update / todo_delete(用户主页 Todo tab 维护的清单,可读写)
+- **编辑器选区替换**(本入口专用):replace_selection
 - **通用**:ask_user / load_tool_doc / task_complete
 - 详细字段 / 枚举值 / 示例 → 先调 `load_tool_doc("<tool>")` 获取,再发起实际调用。
 
@@ -1903,11 +1909,10 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         val chatEntry = extractChatEntry(context)
         val systemPrompt = systemPromptFor(chatEntry)
         val activeRole = activeRolePrompt()
-        val tools = if (chatEntry == CHAT_ENTRY_MAIN_PANEL) {
-            ToolDefinitions.openAiTools(sheetCtx, projectBase)
-        } else {
-            ToolDefinitions.openAiToolsQuoteEntry(sheetCtx)
-        }
+        // 2026.x:统一使用完整工具集,Ask AI / ExtractStrings 弹框与主面板权限一致。
+        // 工具本身已按 `replace_selection` 在主面板(无 editorSelection)会失败做兜底,
+        // 没必要在 schema 层强行裁剪 —— 反而限制用户从弹框里操作 Sheets / 文件 / 代办。
+        val tools = ToolDefinitions.openAiTools(sheetCtx, projectBase)
         val root = JsonObject().apply {
             addProperty("model", model)
             add("tools", tools)
@@ -1952,11 +1957,8 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
         val chatEntry = extractChatEntry(context)
         val systemPrompt = systemPromptFor(chatEntry)
         val activeRole = activeRolePrompt()
-        val tools = if (chatEntry == CHAT_ENTRY_MAIN_PANEL) {
-            ToolDefinitions.anthropicTools(sheetCtx, projectBase)
-        } else {
-            ToolDefinitions.anthropicToolsQuoteEntry(sheetCtx)
-        }
+        // 2026.x:统一使用完整工具集,Ask AI / ExtractStrings 弹框与主面板权限一致。
+        val tools = ToolDefinitions.anthropicTools(sheetCtx, projectBase)
         val root = JsonObject().apply {
             addProperty("model", model)
             addProperty("max_tokens", 16000)

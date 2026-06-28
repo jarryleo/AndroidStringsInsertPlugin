@@ -42,19 +42,10 @@ object ToolDefinitions {
         projectBase: String? = null
     ): JsonArray = buildAnthropicTools(sheetContext, projectBase)
 
-    /**
-     * 引用入口(AskAi / ExtractStrings 弹框)的精简工具集 —— 只暴露 strings.xml 操作
-     * + replace_selection + 通用工具。**不**包含 Google Sheets 与文件操作域(弹框场景
-     * 用不到,避免污染 AI 的工具视野和上下文)。
-     */
-    fun openAiToolsQuoteEntry(
-        sheetContext: SheetContext = SheetContext(null, emptyList())
-    ): JsonArray = buildOpenAiToolsQuoteEntry(sheetContext)
-
-    /** Anthropic 协议的引用入口工具集。 */
-    fun anthropicToolsQuoteEntry(
-        sheetContext: SheetContext = SheetContext(null, emptyList())
-    ): JsonArray = buildAnthropicToolsQuoteEntry(sheetContext)
+    // 2026.x 移除:openAiToolsQuoteEntry / anthropicToolsQuoteEntry 之前给 Ask AI 弹框
+    // 用的精简工具集(只 strings.xml + replace_selection)。现在 Ask AI 与主面板权限一致,
+    // 统一调用 [openAiTools] / [anthropicTools] 全集。保留旧 API 名称会导致误用,
+    // 故直接删掉(无外部调用方,grep 已确认)。
 
     /** 工具名 → JSON Schema 的 properties 引用,供 driver 在解析 tool_call.arguments 时复用。 */
     val toolNames: List<String> = listOf(
@@ -283,7 +274,7 @@ object ToolDefinitions {
             add(openAiTool(TOOL_SEARCH_IN_FILES, descSearch, openAiSearchInFilesParams()))
             add(openAiTool(TOOL_FIND_REFERENCES, DESC_FIND_REFERENCES, openAiFindReferencesParams()))
             add(openAiTool(TOOL_LIST_FILES, descList, openAiListFilesParams()))
-            // 代办域:用户在主页 Todo tab 维护的清单,AI 可读写
+            // 代办域:用户在主页 代办 tab 维护的清单,AI 可读写
             add(openAiTool(TOOL_TODO_LIST, DESC_TODO_LIST, openAiTodoListParams()))
             add(openAiTool(TOOL_TODO_ADD, DESC_TODO_ADD, openAiTodoAddParams()))
             add(openAiTool(TOOL_TODO_UPDATE, DESC_TODO_UPDATE, openAiTodoUpdateParams()))
@@ -334,41 +325,9 @@ object ToolDefinitions {
         }
     }
 
-    /**
-     * 引用入口(AskAi / ExtractStrings 弹框)的精简工具集。
-     * 只暴露 strings.xml 操作 + replace_selection + 通用工具,
-     * 不包含 Google Sheets 与文件操作域(弹框场景用不到)。
-     */
-    private fun buildOpenAiToolsQuoteEntry(@Suppress("UNUSED_PARAMETER") ctx: SheetContext): JsonArray {
-        return JsonArray().apply {
-            add(openAiTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
-            add(openAiTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
-            add(openAiTool(TOOL_DELETE_STRING, DESC_DELETE_STRING, openAiDeleteStringParams()))
-            add(openAiTool(TOOL_QUERY_KEYS, DESC_QUERY_KEYS, openAiQueryKeysParams()))
-            add(openAiTool(TOOL_READ_STRING, DESC_READ_STRING, openAiReadStringParams()))
-            add(openAiTool(TOOL_FIND_KEYS_BY_TEXT, DESC_FIND_KEYS_BY_TEXT, openAiFindKeysByTextParams()))
-            add(openAiTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
-            add(openAiTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
-            add(openAiTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
-            add(openAiTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
-        }
-    }
-
-    /** Anthropic 协议的引用入口工具集。 */
-    private fun buildAnthropicToolsQuoteEntry(@Suppress("UNUSED_PARAMETER") ctx: SheetContext): JsonArray {
-        return JsonArray().apply {
-            add(anthropicTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
-            add(anthropicTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
-            add(anthropicTool(TOOL_DELETE_STRING, DESC_DELETE_STRING, openAiDeleteStringParams()))
-            add(anthropicTool(TOOL_QUERY_KEYS, DESC_QUERY_KEYS, openAiQueryKeysParams()))
-            add(anthropicTool(TOOL_READ_STRING, DESC_READ_STRING, openAiReadStringParams()))
-            add(anthropicTool(TOOL_FIND_KEYS_BY_TEXT, DESC_FIND_KEYS_BY_TEXT, openAiFindKeysByTextParams()))
-            add(anthropicTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
-            add(anthropicTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
-            add(anthropicTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
-            add(anthropicTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
-        }
-    }
+    // 2026.x 移除 buildOpenAiToolsQuoteEntry / buildAnthropicToolsQuoteEntry(原引用入口精简工具集)。
+    // Ask AI 弹框现在与主面板用同一份全集(由 [openAiTools] / [anthropicTools] 暴露),
+    // 这两个函数无外部调用方,保留只会让 schema 维护成本翻倍。
 
     private fun openAiTool(name: String, description: String, parameters: JsonObject): JsonObject {
         return JsonObject().apply {
