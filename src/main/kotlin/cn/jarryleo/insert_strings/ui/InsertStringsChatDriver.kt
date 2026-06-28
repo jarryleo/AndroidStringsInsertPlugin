@@ -927,16 +927,22 @@ internal class InsertStringsChatDriver(
             return
         }
 
-        // Priority 7: 文件操作域(get_editor_file / read_file / edit_file /
-        //   create_file / search_in_files / find_references / list_files)
+        // Priority 7: 文件操作域(get_editor_file / read_file / read_files / edit_file /
+        //   create_file / delete_file / move_file / search_in_files / find_references /
+        //   list_files / file_info)—— 2026.x 新增 4 个写代码工具(file_info / read_files /
+        //   delete_file / move_file)
         val fileEntries = unprocessed.filter {
             it.action is AiAction.GetEditorFile ||
                 it.action is AiAction.ReadFile ||
+                it.action is AiAction.ReadFiles ||
                 it.action is AiAction.EditFile ||
                 it.action is AiAction.CreateFile ||
+                it.action is AiAction.DeleteFile ||
+                it.action is AiAction.MoveFile ||
                 it.action is AiAction.SearchInFiles ||
                 it.action is AiAction.FindReferences ||
-                it.action is AiAction.ListFiles
+                it.action is AiAction.ListFiles ||
+                it.action is AiAction.FileInfo
         }
         if (fileEntries.isNotEmpty()) {
             unprocessed.removeAll(fileEntries)
@@ -998,6 +1004,11 @@ internal class InsertStringsChatDriver(
                 is AiAction.TodoUpdate -> "todo_update"
                 is AiAction.TodoDelete -> "todo_delete"
                 is AiAction.CurrentTime -> "current_time"
+                // 2026.x 新增 4 个写代码工具
+                is AiAction.FileInfo -> "file_info"
+                is AiAction.ReadFiles -> "read_files"
+                is AiAction.DeleteFile -> "delete_file"
+                is AiAction.MoveFile -> "move_file"
             }
             state.chatMessages.add(
                 ChatMessage(
@@ -1555,22 +1566,30 @@ internal class InsertStringsChatDriver(
                     when (action) {
                         is AiAction.GetEditorFile -> fileOps.runGetEditorFile(action)
                         is AiAction.ReadFile -> fileOps.runReadFile(action)
+                        is AiAction.ReadFiles -> fileOps.runReadFiles(action)
                         is AiAction.EditFile -> fileOps.runEditFile(action)
                         is AiAction.CreateFile -> fileOps.runCreateFile(action)
+                        is AiAction.DeleteFile -> fileOps.runDeleteFile(action)
+                        is AiAction.MoveFile -> fileOps.runMoveFile(action)
                         is AiAction.SearchInFiles -> fileOps.runSearchInFiles(action)
                         is AiAction.FindReferences -> fileOps.runFindReferences(action)
                         is AiAction.ListFiles -> fileOps.runListFiles(action)
+                        is AiAction.FileInfo -> fileOps.runFileInfo(action)
                         else -> return@forEach
                     }
                 } catch (e: Exception) {
                     val typeLabel = when (action) {
                         is AiAction.GetEditorFile -> "get_editor_file"
                         is AiAction.ReadFile -> "read_file"
+                        is AiAction.ReadFiles -> "read_files"
                         is AiAction.EditFile -> "edit_file"
                         is AiAction.CreateFile -> "create_file"
+                        is AiAction.DeleteFile -> "delete_file"
+                        is AiAction.MoveFile -> "move_file"
                         is AiAction.SearchInFiles -> "search_in_files"
                         is AiAction.FindReferences -> "find_references"
                         is AiAction.ListFiles -> "list_files"
+                        is AiAction.FileInfo -> "file_info"
                         else -> "file_op"
                     }
                     "[工具执行异常] $typeLabel 失败:${e.message ?: "unknown"}".also {

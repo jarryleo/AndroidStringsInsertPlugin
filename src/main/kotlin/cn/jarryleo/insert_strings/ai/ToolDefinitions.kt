@@ -59,11 +59,15 @@ object ToolDefinitions {
         TOOL_FIND_ROWS_BY_TEXT,
         TOOL_GET_EDITOR_FILE,
         TOOL_READ_FILE,
+        TOOL_READ_FILES,
         TOOL_EDIT_FILE,
         TOOL_CREATE_FILE,
+        TOOL_DELETE_FILE,
+        TOOL_MOVE_FILE,
         TOOL_SEARCH_IN_FILES,
         TOOL_FIND_REFERENCES,
         TOOL_LIST_FILES,
+        TOOL_FILE_INFO,
         TOOL_TODO_LIST,
         TOOL_TODO_ADD,
         TOOL_TODO_UPDATE,
@@ -85,11 +89,15 @@ object ToolDefinitions {
     const val TOOL_FIND_ROWS_BY_TEXT = "find_rows_by_text"
     const val TOOL_GET_EDITOR_FILE = "get_editor_file"
     const val TOOL_READ_FILE = "read_file"
+    const val TOOL_READ_FILES = "read_files"
     const val TOOL_EDIT_FILE = "edit_file"
     const val TOOL_CREATE_FILE = "create_file"
+    const val TOOL_DELETE_FILE = "delete_file"
+    const val TOOL_MOVE_FILE = "move_file"
     const val TOOL_SEARCH_IN_FILES = "search_in_files"
     const val TOOL_FIND_REFERENCES = "find_references"
     const val TOOL_LIST_FILES = "list_files"
+    const val TOOL_FILE_INFO = "file_info"
     const val TOOL_TODO_LIST = "todo_list"
     const val TOOL_TODO_ADD = "todo_add"
     const val TOOL_TODO_UPDATE = "todo_update"
@@ -172,13 +180,27 @@ object ToolDefinitions {
         "读项目内任意文件。> 1.5MB 拒绝(改用 search_in_files)。maxLines 默认 600,startLine/endLine 翻页。" +
             " → load_tool_doc(\"read_file\")。"
 
+    private const val DESC_READ_FILES =
+        "批量读 2-10 个文件(一次 round-trip,省 N-1 次往返 + 共享 '--- begin content ---' 框架)。" +
+            "每文件默认 maxLines=300(防合并爆 token)。" +
+            " → load_tool_doc(\"read_files\")。"
+
     private const val DESC_EDIT_FILE =
         "精准修改项目内文件。useRegex=false 时 oldText 全文精确唯一匹配;true 时按 Kotlin 正则。" +
-            "> 3MB 拒绝。原子写。→ load_tool_doc(\"edit_file\")。"
+            "> 3MB 拒绝。原子写。IDE 缓存已自动重读。" +
+            " → load_tool_doc(\"edit_file\")。"
 
     private val DESC_CREATE_FILE =
         "创建新文件(支持嵌套目录)。overwrite 默认 false(防误覆盖)。" +
             " → load_tool_doc(\"create_file\")。"
+
+    private const val DESC_DELETE_FILE =
+        "删除文件或空目录(破坏性)。非空目录会拒绝(需 AI 先 list_files + 逐个删)。" +
+            "目标已打开的 tab 会自动关闭。→ load_tool_doc(\"delete_file\")。"
+
+    private const val DESC_MOVE_FILE =
+        "移动/重命名文件或目录(等价 mv)。dst 已存在会拒绝(防误覆盖);自动 mkdirs 父目录。" +
+            "IDE 已打开的 src tab 会自动关闭。→ load_tool_doc(\"move_file\")。"
 
     private const val DESC_SEARCH_IN_FILES =
         "在项目内按文本/正则搜索,返回 filePath+line+col+matchedText。" +
@@ -192,6 +214,10 @@ object ToolDefinitions {
     private const val DESC_LIST_FILES =
         "列举项目内某目录的文件/子目录,支持 glob 与递归(最多 10 层)。" +
             " → load_tool_doc(\"list_files\")。"
+
+    private const val DESC_FILE_INFO =
+        "读文件元信息(大小/行数/mtime/是否目录),不读全文。" +
+            "先看'文件存不存在 / 多大'时用这个,省 token。→ load_tool_doc(\"file_info\")。"
 
     // endregion
 
@@ -254,10 +280,14 @@ object ToolDefinitions {
         val descFindRows = appendSheetContext(DESC_FIND_ROWS_BY_TEXT, ctx)
         val descGetEditor = appendProjectContext(DESC_GET_EDITOR_FILE, projectBase)
         val descReadFile = appendProjectContext(DESC_READ_FILE, projectBase)
+        val descReadFiles = appendProjectContext(DESC_READ_FILES, projectBase)
         val descEditFile = appendProjectContext(DESC_EDIT_FILE, projectBase)
         val descCreateFile = appendProjectContext(DESC_CREATE_FILE, projectBase)
+        val descDeleteFile = appendProjectContext(DESC_DELETE_FILE, projectBase)
+        val descMoveFile = appendProjectContext(DESC_MOVE_FILE, projectBase)
         val descSearch = appendProjectContext(DESC_SEARCH_IN_FILES, projectBase)
         val descList = appendProjectContext(DESC_LIST_FILES, projectBase)
+        val descFileInfo = appendProjectContext(DESC_FILE_INFO, projectBase)
         return JsonArray().apply {
             add(openAiTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
             add(openAiTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
@@ -269,11 +299,15 @@ object ToolDefinitions {
             add(openAiTool(TOOL_FIND_ROWS_BY_TEXT, descFindRows, openAiFindRowsByTextParams()))
             add(openAiTool(TOOL_GET_EDITOR_FILE, descGetEditor, openAiGetEditorFileParams()))
             add(openAiTool(TOOL_READ_FILE, descReadFile, openAiReadFileParams()))
+            add(openAiTool(TOOL_READ_FILES, descReadFiles, openAiReadFilesParams()))
             add(openAiTool(TOOL_EDIT_FILE, descEditFile, openAiEditFileParams()))
             add(openAiTool(TOOL_CREATE_FILE, descCreateFile, openAiCreateFileParams()))
+            add(openAiTool(TOOL_DELETE_FILE, descDeleteFile, openAiDeleteFileParams()))
+            add(openAiTool(TOOL_MOVE_FILE, descMoveFile, openAiMoveFileParams()))
             add(openAiTool(TOOL_SEARCH_IN_FILES, descSearch, openAiSearchInFilesParams()))
             add(openAiTool(TOOL_FIND_REFERENCES, DESC_FIND_REFERENCES, openAiFindReferencesParams()))
             add(openAiTool(TOOL_LIST_FILES, descList, openAiListFilesParams()))
+            add(openAiTool(TOOL_FILE_INFO, descFileInfo, openAiFileInfoParams()))
             // 代办域:用户在主页 代办 tab 维护的清单,AI 可读写
             add(openAiTool(TOOL_TODO_LIST, DESC_TODO_LIST, openAiTodoListParams()))
             add(openAiTool(TOOL_TODO_ADD, DESC_TODO_ADD, openAiTodoAddParams()))
@@ -292,10 +326,14 @@ object ToolDefinitions {
         val descFindRows = appendSheetContext(DESC_FIND_ROWS_BY_TEXT, ctx)
         val descGetEditor = appendProjectContext(DESC_GET_EDITOR_FILE, projectBase)
         val descReadFile = appendProjectContext(DESC_READ_FILE, projectBase)
+        val descReadFiles = appendProjectContext(DESC_READ_FILES, projectBase)
         val descEditFile = appendProjectContext(DESC_EDIT_FILE, projectBase)
         val descCreateFile = appendProjectContext(DESC_CREATE_FILE, projectBase)
+        val descDeleteFile = appendProjectContext(DESC_DELETE_FILE, projectBase)
+        val descMoveFile = appendProjectContext(DESC_MOVE_FILE, projectBase)
         val descSearch = appendProjectContext(DESC_SEARCH_IN_FILES, projectBase)
         val descList = appendProjectContext(DESC_LIST_FILES, projectBase)
+        val descFileInfo = appendProjectContext(DESC_FILE_INFO, projectBase)
         return JsonArray().apply {
             add(anthropicTool(TOOL_INSERT_STRINGS, DESC_INSERT_STRINGS, openAiInsertStringsParams()))
             add(anthropicTool(TOOL_UPDATE_STRING, DESC_UPDATE_STRING, openAiUpdateStringParams()))
@@ -307,11 +345,15 @@ object ToolDefinitions {
             add(anthropicTool(TOOL_FIND_ROWS_BY_TEXT, descFindRows, openAiFindRowsByTextParams()))
             add(anthropicTool(TOOL_GET_EDITOR_FILE, descGetEditor, openAiGetEditorFileParams()))
             add(anthropicTool(TOOL_READ_FILE, descReadFile, openAiReadFileParams()))
+            add(anthropicTool(TOOL_READ_FILES, descReadFiles, openAiReadFilesParams()))
             add(anthropicTool(TOOL_EDIT_FILE, descEditFile, openAiEditFileParams()))
             add(anthropicTool(TOOL_CREATE_FILE, descCreateFile, openAiCreateFileParams()))
+            add(anthropicTool(TOOL_DELETE_FILE, descDeleteFile, openAiDeleteFileParams()))
+            add(anthropicTool(TOOL_MOVE_FILE, descMoveFile, openAiMoveFileParams()))
             add(anthropicTool(TOOL_SEARCH_IN_FILES, descSearch, openAiSearchInFilesParams()))
             add(anthropicTool(TOOL_FIND_REFERENCES, DESC_FIND_REFERENCES, openAiFindReferencesParams()))
             add(anthropicTool(TOOL_LIST_FILES, descList, openAiListFilesParams()))
+            add(anthropicTool(TOOL_FILE_INFO, descFileInfo, openAiFileInfoParams()))
             // 代办域
             add(anthropicTool(TOOL_TODO_LIST, DESC_TODO_LIST, openAiTodoListParams()))
             add(anthropicTool(TOOL_TODO_ADD, DESC_TODO_ADD, openAiTodoAddParams()))
@@ -716,14 +758,19 @@ object ToolDefinitions {
             add("sheets_color")
             add("sheets_batch_modify")
             add("find_rows_by_text")
-            // 文件 / 内容 / 引用操作
+            // 文件 / 内容 / 引用操作(2026.x 强化:11 个工具,推荐用 code_ops 一次拿全)
+            add("code_ops")
             add("get_editor_file")
             add("read_file")
+            add("read_files")
             add("edit_file")
             add("create_file")
+            add("delete_file")
+            add("move_file")
             add("search_in_files")
             add("find_references")
             add("list_files")
+            add("file_info")
             // 通用
             add("ask_user")
             add("load_tool_doc")
@@ -1149,6 +1196,70 @@ object ToolDefinitions {
                     addProperty("type", "integer")
                     addProperty("description", "可选,最大返回条数,默认 500。")
                 })
+            })
+        }
+    }
+
+    private fun openAiFileInfoParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("path", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,文件/目录路径(相对项目根或项目内绝对路径)。")
+                })
+            })
+            add("required", JsonArray().apply { add("path") })
+        }
+    }
+
+    private fun openAiReadFilesParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("paths", obj {
+                    addProperty("type", "array")
+                    add("items", obj { addProperty("type", "string") })
+                    addProperty("description", "必填,要读取的文件路径列表(2-10 个,相对项目根或项目内绝对路径)。")
+                })
+                add("maxLines", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "可选,每个文件单次最大返回行数,默认 300,最大 300。")
+                })
+            })
+            add("required", JsonArray().apply { add("paths") })
+        }
+    }
+
+    private fun openAiDeleteFileParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("path", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,要删除的文件或空目录路径(相对项目根或项目内绝对路径)。")
+                })
+            })
+            add("required", JsonArray().apply { add("path") })
+        }
+    }
+
+    private fun openAiMoveFileParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("src", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,源路径(相对项目根或项目内绝对路径)。")
+                })
+                add("dst", obj {
+                    addProperty("type", "string")
+                    addProperty("description", "必填,目标路径(相对项目根或项目内绝对路径)。dst 已存在会拒绝。")
+                })
+            })
+            add("required", JsonArray().apply {
+                add("src")
+                add("dst")
             })
         }
     }

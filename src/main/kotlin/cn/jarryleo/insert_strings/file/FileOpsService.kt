@@ -3,10 +3,12 @@ package cn.jarryleo.insert_strings.file
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.editor.Editor
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.ProjectFileIndex
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
 import com.intellij.psi.search.FilenameIndex
@@ -127,6 +129,11 @@ class FileOpsService(private val project: Project) {
         const val MAX_EDIT_BYTES = 3_000_000L  // 3MB
         /** find_references 默认搜索的文件后缀。 */
         val REFERENCE_FILE_EXTENSIONS = setOf("java", "kt", "xml")
+        /** 批量 read_files 单次允许的最大文件数(防 token 爆炸)。 */
+        const val MAX_BATCH_READ_FILES = 10
+        /** 批量 read_files 单文件最大返回行数(比单文件 read_file 默认 600 略低,
+         *  防止 N 个文件合并超长)。 */
+        const val MAX_BATCH_READ_LINES = 300
     }
 
     // ============================================================
@@ -376,6 +383,21 @@ class FileOpsService(private val project: Project) {
 
     /**
      * 原子写文件:先写到临时文件,再 rename 覆盖,避免半写状态污染磁盘。
+     *
+     * 关键点(rename 完成后):
+     *  1. 拿到 target 对应的 [VirtualFile](优先用 VFS 缓存),如果文件刚被创建,可能要先 `refresh`。
+     *  2. `vFile.refresh(false, false)` —— 让 VFS 重新读文件(同步返回)。
+     *  3. 如果该文件正被编辑器打开,`FileDocumentManager.reloadFromDisk(document)` 强制重读 —
+     *    这是修复"磁盘改了但 IDE 还显示老内容"的关键步骤。
+     *  4. `FileEditorManager.updateFilePresentation(vFile)` 让打开的编辑器重画 tab 标题/图标。
+     *  5. `DaemonCodeAnalyzer.restart(vFile)` 重跑语法高亮、错误检查、imports 检查等
+     *     后台分析任务,用户改完代码能立即看到红色下划线/补全建议。
+     *
+     * 这 4 步缺一不可:
+     *  - 只 refresh VFS → 编辑器不重读,显示的还是缓存的旧内容(用户报告的核心 bug)
+     *  - 只 reloadFromDisk → PSI 缓存未刷新,跳转/补全可能跳到旧定义
+     *  - 只 updateFilePresentation → 标题更新了但内容还是旧的
+     *  - 不 restart DaemonCodeAnalyzer → 代码分析基于旧 PSI,红色波浪线延迟出现
      */
     private fun writeAtomic(target: Path, content: String) {
         ApplicationManager.getApplication().runWriteAction {
@@ -387,11 +409,63 @@ class FileOpsService(private val project: Project) {
             try {
                 Files.writeString(tmp, content, StandardCharsets.UTF_8)
                 Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                // 写盘后立即通知 IDE 各层缓存重读(在 write action 内同步触发,确保 reload
+                // 看到的就是这次写盘的最新内容;否则 background refresh 可能与下一次操作竞争)
+                refreshIdeCachesAfterWrite(target)
             } catch (e: Exception) {
                 runCatching { Files.deleteIfExists(tmp) }
                 throw e
             }
         }
+    }
+
+    /**
+     * 写盘后通知 IntelliJ 各层缓存重读,让编辑器 / PSI / Daemon Code Analyzer
+     * 立即看到新内容。详见 [writeAtomic] 的注释。
+     */
+    private fun refreshIdeCachesAfterWrite(target: Path) {
+        val vFile = resolveVirtualFile(target) ?: return
+        // 1. VFS 层:重新读文件系统元数据
+        vFile.refresh(false, false)
+        // 2. Document 层:如果该文件在编辑器中打开,强制重读磁盘内容
+        val docManager = FileDocumentManager.getInstance()
+        val document = docManager.getDocument(vFile)
+        if (document != null) {
+            // isSaveNeeded 检测到磁盘比 document 新时,reloadFromDisk 会重新加载
+            runCatching { docManager.reloadFromDisk(document) }
+        }
+        // 3. 编辑器层:通知 tab 标题/图标刷新(例如未保存标记清除)
+        runCatching { FileEditorManager.getInstance(project).updateFilePresentation(vFile) }
+        // 4. PSI 层:丢掉 PsiFile 缓存,让下次访问时重新解析
+        //    PsiManager.findFile 会用 stale 缓存(尤其是结构修改场景),需主动 invalidate
+        runCatching {
+            PsiManager.getInstance(project).findFile(vFile)?.let { psi ->
+                // 触发 PSI 重新解析(等价于让 IDE 看到新的文件内容/结构)
+                psi.subtreeChanged()
+            }
+        }
+        // 5. 后台分析:重跑高亮、错误检查、补全等。
+        //    IntelliJ 2025.1.3 的 DaemonCodeAnalyzer.restart() 只接受 PsiFile,需要转一次。
+        runCatching {
+            PsiManager.getInstance(project).findFile(vFile)?.let { psiFile ->
+                com.intellij.codeInsight.daemon.DaemonCodeAnalyzer.getInstance(project).restart(psiFile)
+            }
+        }
+    }
+
+    /**
+     * 把 [Path] 解析为 [VirtualFile](优先命中 VFS 缓存)。
+     * 文件可能是新建的(刚被 createFile 落盘)或已有的。
+     */
+    private fun resolveVirtualFile(path: Path): VirtualFile? {
+        return runCatching {
+            val lfs = com.intellij.openapi.vfs.LocalFileSystem.getInstance()
+            lfs.findFileByIoFile(path.toFile()) ?: run {
+                // 极端情况:VFS 还没建立索引(刚创建的文件),用 URL 兜底
+                val url = "file://${path.toAbsolutePath().toString().replace('\\', '/')}"
+                VirtualFileManager.getInstance().findFileByUrl(url)
+            }
+        }.getOrNull()
     }
 
     private fun countOccurrences(haystack: String, needle: String): Int {
@@ -733,6 +807,205 @@ class FileOpsService(private val project: Project) {
                 fileName,
                 GlobalSearchScope.projectScope(project)
             ).toList()
+        }
+    }
+
+    // ============================================================
+    // 8) 文件元信息:file_info
+    // ============================================================
+
+    /**
+     * 读取文件元信息(2026.x 新增),不读全文。
+     *
+     * 返回:[FileMeta],含 size / lineCount / lastModified / exists / isDirectory / isRegularFile。
+     * 路径越界/不存在时 exists=false,其它字段为 0 / ""。
+     */
+    data class FileMeta(
+        val path: String,
+        val exists: Boolean,
+        val sizeBytes: Long,
+        val lineCount: Int,
+        val lastModifiedMillis: Long,
+        val isDirectory: Boolean,
+        val isRegularFile: Boolean,
+        val fileName: String,
+    )
+
+    fun fileInfo(path: String): FileMeta {
+        val resolved = resolveProjectPath(path)
+        val fileName = path.substringAfterLast('/').substringAfterLast('\\')
+        if (resolved == null) {
+            return FileMeta(path, false, 0L, 0, 0L, false, false, fileName)
+        }
+        if (!resolved.exists()) {
+            return FileMeta(path, false, 0L, 0, 0L, false, false, fileName)
+        }
+        val isDir = Files.isDirectory(resolved)
+        val isReg = Files.isRegularFile(resolved)
+        val size = if (isReg) Files.size(resolved) else 0L
+        val mtime = runCatching { Files.getLastModifiedTime(resolved).toMillis() }.getOrDefault(0L)
+        val lineCount = if (isReg) {
+            // 用 NIO 读 64KB 块估算行数,避免 OOM(超大文件也安全)
+            runCatching {
+                Files.newBufferedReader(resolved, StandardCharsets.UTF_8).use { reader ->
+                    var count = 0
+                    var lastCharWasNewline = true
+                    val buf = CharArray(8192)
+                    while (true) {
+                        val n = reader.read(buf)
+                        if (n <= 0) break
+                        for (i in 0 until n) {
+                            if (buf[i] == '\n') count++
+                        }
+                        lastCharWasNewline = buf[n - 1] == '\n'
+                    }
+                    if (!lastCharWasNewline) count++
+                    count
+                }
+            }.getOrDefault(0)
+        } else 0
+        return FileMeta(path, true, size, lineCount, mtime, isDir, isReg, fileName)
+    }
+
+    // ============================================================
+    // 9) 批量读取:read_files
+    // ============================================================
+
+    /**
+     * 批量读取多个文件(2026.x 新增),每个文件独立应用 [readFile] 同样的约束。
+     *
+     * @return [List]<[ReadResult]> 与 [paths] 一一对应;失败的文件其 [ReadResult.content] 是错误信息,
+     *         [ReadResult.fileSize] = 0(便于 controller 区分"成功"和"失败")。
+     */
+    fun readFiles(paths: List<String>, maxLines: Int = MAX_BATCH_READ_LINES): List<ReadResult> {
+        return paths.map { p ->
+            try {
+                readFile(p, startLine = 0, endLine = -1, maxLines = maxLines)
+            } catch (e: Exception) {
+                ReadResult(
+                    content = "[失败] ${e.message ?: "unknown"}",
+                    totalLines = 0,
+                    startLine = 0,
+                    endLine = 0,
+                    truncated = false,
+                    fileSize = 0L,
+                )
+            }
+        }
+    }
+
+    // ============================================================
+    // 10) 删除文件:delete_file
+    // ============================================================
+
+    /**
+     * 删除文件或空目录(2026.x 新增)。
+     *
+     * 行为:
+     * - 是文件 → 直接删除
+     * - 是空目录 → 直接删除
+     * - 是非空目录 → 抛 [IllegalArgumentException] 拒绝(必须 AI 先递归清空)
+     *
+     * 越界路径 / 不存在路径会被拒绝。
+     * 成功后 IDE 自动关闭已打开的 tab(如果该文件在编辑器中打开),PSI 缓存由 VFS 失效。
+     */
+    fun deleteFile(path: String) {
+        val resolved = resolveProjectPath(path)
+            ?: error("[拒绝] 路径解析失败:'$path' 不在项目根目录 ${project.basePath} 内。")
+        if (!resolved.exists()) {
+            error("[失败] 路径不存在:'$path'")
+        }
+        if (Files.isDirectory(resolved)) {
+            // 用 Files.list 流式检查,避免 Files.newDirectoryStream 资源泄漏
+            val hasContent = Files.list(resolved).use { stream ->
+                stream.findAny().isPresent
+            }
+            if (hasContent) {
+                error("[失败] 目录非空,拒绝删除:'$path'。请先 list_files 看子项并逐个删除。")
+            }
+            // 删除空目录 + 通知 IDE
+            ApplicationManager.getApplication().runWriteAction {
+                val vFile = resolveVirtualFile(resolved)
+                Files.delete(resolved)
+                vFile?.refresh(false, false)
+            }
+        } else if (Files.isRegularFile(resolved)) {
+            val vFile = resolveVirtualFile(resolved)
+            // 如果该文件正被编辑器打开,先关闭对应 tab(否则删除会失败或保留 stale tab)
+            val editorManager = FileEditorManager.getInstance(project)
+            if (vFile != null && editorManager.isFileOpen(vFile)) {
+                runCatching { editorManager.closeFile(vFile) }
+            }
+            ApplicationManager.getApplication().runWriteAction {
+                Files.delete(resolved)
+                vFile?.refresh(false, false)
+                // 通知 PSI 缓存失效
+                runCatching {
+                    PsiManager.getInstance(project).findFile(vFile ?: return@runCatching)?.subtreeChanged()
+                }
+            }
+        } else {
+            error("[失败] 路径不是文件也不是目录:'$path'")
+        }
+    }
+
+    // ============================================================
+    // 11) 移动/重命名:move_file
+    // ============================================================
+
+    /**
+     * 移动或重命名文件/目录(2026.x 新增)。
+     *
+     * 行为:
+     * - 等价于 `mv <src> <dst>`(用 Files.move + REPLACE_EXISTING_ATOMIC_MOVE,
+     *   在大多数文件系统上是原子的,不会留半写状态)。
+     * - 目标已存在 → 抛 [IllegalArgumentException] 拒绝(防误覆盖)。
+     * - 自动 mkdirs 创建目标父目录。
+     * - 跨目录移动也支持(目标父目录会自动创建)。
+     */
+    fun moveFile(src: String, dst: String) {
+        val srcPath = resolveProjectPath(src)
+            ?: error("[拒绝] src 路径解析失败:'$src' 不在项目根目录 ${project.basePath} 内。")
+        val dstPath = resolveProjectPath(dst)
+            ?: error("[拒绝] dst 路径解析失败:'$dst' 不在项目根目录 ${project.basePath} 内。")
+        if (!srcPath.exists()) {
+            error("[失败] src 不存在:'$src'")
+        }
+        if (dstPath.exists()) {
+            error("[失败] dst 已存在,拒绝覆盖:'$dst'。如需覆盖请先 delete 后 move。")
+        }
+        // 自动创建目标父目录
+        dstPath.parent?.let { parent ->
+            if (!parent.exists()) {
+                Files.createDirectories(parent)
+            }
+        }
+        // 如果 src 在编辑器中打开,先关闭(否则移动后 IDE 仍持有旧路径的 Document,产生 stale state)
+        val vFile = resolveVirtualFile(srcPath)
+        if (vFile != null) {
+            val editorManager = FileEditorManager.getInstance(project)
+            if (editorManager.isFileOpen(vFile)) {
+                runCatching { editorManager.closeFile(vFile) }
+            }
+        }
+        ApplicationManager.getApplication().runWriteAction {
+            Files.move(
+                srcPath, dstPath,
+                java.nio.file.StandardCopyOption.ATOMIC_MOVE
+            )
+            // 通知 IDE 两端:src 失效、dst 出现
+            resolveVirtualFile(srcPath)?.let { it.refresh(false, false) }
+            resolveVirtualFile(dstPath)?.let { vDst ->
+                vDst.refresh(false, false)
+                // 重跑代码分析(若目标是代码文件)。
+                // IntelliJ 2025.1.3 的 DaemonCodeAnalyzer.restart() 只接受 PsiFile,
+                // 需要 PsiManager.getInstance(project).findFile(vDst) 转一次。
+                runCatching {
+                    PsiManager.getInstance(project).findFile(vDst)?.let { psiFile ->
+                        com.intellij.codeInsight.daemon.DaemonCodeAnalyzer.getInstance(project).restart(psiFile)
+                    }
+                }
+            }
         }
     }
 }

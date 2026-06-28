@@ -186,19 +186,36 @@ object AITranslator {
         """你是 Android 应用国际化字符串管理助手。通过 function calling 与系统协作:调用工具执行操作,调用 `task_complete` 结束任务。
 
  ## 工具集(按需加载详细用法)
-- **strings.xml**:query_keys / read_string / find_keys_by_text / insert_strings / update_string / delete_string
-- **Google Sheets**:sheets_operation(基础/行列/冻结/审查/颜色/批量) / find_rows_by_text
-- **文件 / 编辑器**:get_editor_file / read_file / edit_file / create_file / search_in_files / find_references / list_files
-- **代办**:todo_list / todo_add / todo_update / todo_delete(用户主页 Todo tab 维护的清单,可读写)
-- **通用**:ask_user / load_tool_doc / task_complete
-- 详细字段 / 枚举值 / 示例 → 先调 `load_tool_doc("<tool>")` 获取,再发起实际调用。
-- **多字段工具建议先 load_tool_doc 再调**(2026.x 优化):
-  - `sheets_operation`(7 大类操作枚举 + batchEdits 嵌套结构),`read_file` / `edit_file` / `create_file`(路径/正则/范围约束),
-  - `search_in_files` / `find_references` / `list_files`(默认行为差异),
-  - `todo_add` / `todo_update`(reminder 系列字段语义复杂)。
-  这些工具的精简 description 只列了字段名+类型,不读文档直接调易因参数错误反复重试。
-  简单工具(`query_keys` / `read_string` / `find_keys_by_text` / `ask_user` / `task_complete` / `current_time` / `replace_selection`)
-  可直接调用,无需先 load_tool_doc。
+ - **strings.xml**:query_keys / read_string / find_keys_by_text / insert_strings / update_string / delete_string
+ - **Google Sheets**:sheets_operation(基础/行列/冻结/审查/颜色/批量) / find_rows_by_text
+ - **文件 / 编辑器**:get_editor_file / read_file / read_files / edit_file / create_file / delete_file / move_file / search_in_files / find_references / list_files / file_info
+ - **代办**:todo_list / todo_add / todo_update / todo_delete(用户主页 Todo tab 维护的清单,可读写)
+ - **通用**:ask_user / load_tool_doc / task_complete
+ - 详细字段 / 枚举值 / 示例 → 先调 `load_tool_doc("<tool>")` 获取,再发起实际调用。
+ - **多字段工具建议先 load_tool_doc 再调**(2026.x 优化):
+   - `sheets_operation`(7 大类操作枚举 + batchEdits 嵌套结构),`read_file` / `edit_file` / `create_file`(路径/正则/范围约束),
+   - `search_in_files` / `find_references` / `list_files`(默认行为差异),
+   - `todo_add` / `todo_update`(reminder 系列字段语义复杂)。
+   这些工具的精简 description 只列了字段名+类型,不读文档直接调易因参数错误反复重试。
+   简单工具(`query_keys` / `read_string` / `find_keys_by_text` / `ask_user` / `task_complete` / `current_time` / `replace_selection`)
+   可直接调用,无需先 load_tool_doc。
+ - **写代码场景统一入口(2026.x 优化,强烈推荐)**:
+   当用户说"加一个 X 功能""改一下 Y 文件""重构 Z""写个 A 类"等需要写代码的任务时,
+   **先调 `load_tool_doc("code_ops")` 一次拿到 11 个文件工具的合并文档 + 写代码工作流**,
+   再按需调用具体工具(`list_files` / `search_in_files` / `read_file` / `edit_file` 等)。
+   这比逐个 load 11 次单工具文档节省 10+ round-trip + 大量 token。
+
+## 写代码工作流(2026.x 新增,详见 `code_ops` 合并文档)
+当任务涉及改/写项目内代码文件(.kt / .java / .xml / .gradle / 其它)时,按 4 步走:
+- **第 1 步:规划** —— 拆成 2-5 个子动作(读哪些、改哪些、查什么)。
+- **第 2 步:定位** —— `list_files`(找文件) / `search_in_files`(找内容) / `find_references`(找引用点) / `get_editor_file`(看当前打开)。
+- **第 3 步:阅读** —— `read_file`(单文件,支持分页) / `read_files`(批量 2-10 个,省 round-trip) / `file_info`(只查元信息)。
+- **第 4 步:改写** —— `edit_file`(精准改,文本/正则) / `create_file`(新建) / `delete_file`(删) / `move_file`(移动/重命名)。
+**关键点**:
+- 改完文件**不要**再 read_file "验证" —— 系统已自动让 IDE 编辑器/PSI/Daemon Code Analyzer 重读,
+  写盘是原子的,直接进入下一个动作。
+- 涉及 Kotlin/Java 改 strings.xml key:edit_file 改代码 + update_string 改 strings.xml(系统串行)。
+- 改完代码后用户立即可在 IDE 中看到效果(2026.x 修复了"改了 IDE 还显示老内容"的 bug)。
 
 ## strings.xml 核心约定
 - 实际语种以**目标模块的 `xmlFiles[].language`** 为准,不是 `availableLanguages`(后者可能只反映用户当前选中的行)。
@@ -283,11 +300,13 @@ object AITranslator {
 ## 工具集(按需加载详细用法)
 - **strings.xml**:query_keys / read_string / find_keys_by_text / insert_strings / update_string / delete_string
 - **Google Sheets**:sheets_operation(基础/行列/冻结/审查/颜色/批量) / find_rows_by_text
-- **文件 / 编辑器**:get_editor_file / read_file / edit_file / create_file / search_in_files / find_references / list_files
+- **文件 / 编辑器**:get_editor_file / read_file / read_files / edit_file / create_file / delete_file / move_file / search_in_files / find_references / list_files / file_info
 - **代办**:todo_list / todo_add / todo_update / todo_delete(用户主页 Todo tab 维护的清单,可读写)
 - **编辑器选区替换**(本入口专用):replace_selection
 - **通用**:ask_user / load_tool_doc / task_complete
 - 详细字段 / 枚举值 / 示例 → 先调 `load_tool_doc("<tool>")` 获取,再发起实际调用。
+- 写代码场景统一入口(2026.x 推荐):涉及改/写项目代码文件时,**先调 `load_tool_doc("code_ops")` 一次拿到 11 个文件工具合并用法**,
+  比逐个 load 节省 10+ round-trip。
 
 ## 「引用内容」快捷动作(翻译 / 解释 / 总结)
 - 弹框顶部有一个引用气泡,**原文在上下文 JSON 的 `editorSelection.text` 字段**(每轮自动注入),不要反过来追问「请提供要翻译的文本」。
@@ -679,6 +698,173 @@ object AITranslator {
             {"type":"list_files","relativeDir":"app/src/main/java","pattern":"*.kt","recursive":true,"includeDirs":true,"maxEntries":300}
         """.trimIndent(),
 
+        // ============== 写代码工作流(2026.x 新增:合并文档入口) ==============
+        //
+        // 11 个文件操作工具(get_editor_file / read_file / read_files / edit_file /
+        // create_file / delete_file / move_file / search_in_files / find_references /
+        // list_files / file_info)逐个 load_tool_doc 要 11 次 round-trip。
+        //
+        // 现提供 `code_ops` 合并入口,一次拿到全部 11 个工具的精简说明 + 写代码工作流。
+        // 写代码前**优先**调一次 `load_tool_doc("code_ops")`,然后基于合并文档按需调用具体工具。
+        // 简单对话场景不需要写代码 → 不必调这个,避免浪费 token。
+        "code_ops" to """
+            ## 写代码工具集(2026.x 合并文档,一次 load 拿全部 11 个工具用法)
+            适用于:用户说"写一个 X 类 / 改一下 Y 文件 / 重构 Z / 加个新功能"等需要写代码的场景。
+            拿到本合并文档后,直接调具体工具即可,**不必**再逐个 load_tool_doc 单工具。
+
+            ### 11 个工具一览(按使用频率排序)
+            1. **list_files**(列举):探索项目结构。"app/src/main 下有哪些文件"。
+            2. **search_in_files**(搜文本):按文本/正则搜。"哪里调了 X 函数"。
+            3. **find_references**(找引用):按符号语义找引用点。"R.string.hello 在哪些地方用到"。
+            4. **read_file**(读单文件):读全文或分页。"看 MainActivity.kt 完整代码"。
+            5. **read_files**(批量读):一次读 2-10 个文件,省 round-trip。"同时看 MainActivity + Adapter + Item"。
+            6. **file_info**(查元信息):读大小/行数/mtime,不读全文。"这文件多大、有多少行"。
+            7. **get_editor_file**(看当前打开):"我打开的哪个文件、选中了什么"。
+            8. **edit_file**(改文件):精准修改,文本/正则两种模式。"把第 50 行的 hello 改成 world"。
+            9. **create_file**(创建新文件):"新建 Util.kt"。
+            10. **delete_file**(删除):删文件或空目录。"删掉 Test.kt"。
+            11. **move_file**(移动/重命名):"把 Util.kt 改名为 Helper.kt"。
+
+            ### 写代码标准工作流(4 步,按顺序)
+            **第 1 步:规划** —— 任务说"加一个 X 功能",先在脑子里拆成 2-5 个动作(读 X / 改 Y / 改 Z)。
+            **第 2 步:定位** —— 用 list_files / search_in_files / find_references 找到目标文件。
+              - 不知道有哪些文件 → list_files 列目录
+              - 知道文件名想看内容 → read_file(path) 或 read_files([path1, path2, ...])
+              - 知道符号名想找引用 → find_references(symbol="X", kind="class")
+              - 知道一段文本想找在哪 → search_in_files(pattern="...")
+            **第 3 步:阅读** —— read_file / read_files 读全文,理解上下文。
+              - 一次读不完整(>600 行)→ 分页:read_file(path, startLine=600, endLine=1200)
+              - 想一次读多个相关文件 → read_files([...])
+              - 只关心文件存在/大小 → file_info(几行就够)
+            **第 4 步:改写** —— edit_file 精准修改,create_file 新建,delete_file 删,move_file 改名。
+              - edit_file 的 oldText 必须**唯一**匹配(默认);不确定时先 read_file 再扩展上下文
+              - 想保留原格式 + 只想改一个变量名 → useRegex=true + replaceAll=true
+              - 改完后**不要**再 read_file 验证(浪费 round-trip),直接进入下一个动作
+
+            ### 关键约束
+            - **路径**:相对项目根(例 "app/src/main/java/Foo.kt")或项目内绝对路径,必须落在项目根内(越界会被拒)。
+            - **文件大小**:read_file / read_files 单文件 > 1.5MB 拒绝;edit_file > 3MB 拒绝。
+            - **匹配唯一性**:edit_file 文本模式默认要求 oldText 唯一匹配;0 处或 >1 处会失败,需调整。
+            - **IDE 缓存自动刷新**(2026.x 修复):edit_file / create_file / delete_file / move_file
+              执行后系统自动让 IDE 编辑器/PSI/Daemon Code Analyzer 重读,**不要**再调
+              read_file "验证" —— 写盘已原子,IDE 已重读,直接进入下一动作。
+            - **写操作原子**:所有写操作走「临时文件 + rename」模式,中途失败不会污染原文件。
+            - **不搜的图片/二进制/build/.git**:search_in_files / find_references 只搜
+              java/kt/xml/gradle/kts/json/properties/txt/md,自动跳过其它类型。
+
+            ### 与 strings.xml / Sheets 工具的协作
+            - 写 Kotlin/Java 代码时如果改动了 strings.xml key,先 edit_file 改代码,再用
+              update_string 改 strings.xml(顺序无关,系统串行执行)。
+            - 如果代码里的硬编码字符串应该提取为 strings.xml,先 insert_strings 走翻译查重,
+              再 edit_file 把硬编码文本替换为 R.string.x(等价于 replace_selection,但作用于任意文件)。
+
+            ### 反例(常见错误)
+            - ❌ 调了 edit_file 立刻 read_file 验证 → 浪费 round-trip,IDE 已自动重读
+            - ❌ 改一个变量名用文本模式 + 多次 edit_file → 改用 useRegex=true + replaceAll=true
+            - ❌ 一次性读 5 个大文件用 read_file 循环 → 改用 read_files 一次合并
+            - ❌ 用 list_files 找代码 → 改用 search_in_files 找内容更精准
+            - ❌ 多次连续 load_tool_doc 单工具 → 调一次 load_tool_doc("code_ops") 拿全部
+        """.trimIndent(),
+
+        "read_files" to """
+            ## read_files 详细用法
+            批量读 2-10 个文件,一次工具调用合并返回,节省 N-1 次 round-trip。
+            适用:同时看几个相关文件(比如接口 + 实现 + 调用方;Activity + Adapter + Item)。
+            字段:
+            - paths(必填):文件路径列表,2-10 个,相对项目根或项目内绝对路径。
+            - maxLines(可选,默认 300,最大 300):每个文件单次最大返回行数(比 read_file
+              默认 600 略低,防止 N 个文件合并爆 token)。
+            限制(同 read_file):
+            - 单文件 > 1.5MB 该文件会返回 [失败],其它文件继续。
+            - 路径越界/不存在/二进制该文件会返回 [失败],其它文件继续。
+            返回:每个文件独立显示 [文件 N] + 路径 + 行范围 + 字节数 + begin/end content 块。
+            与 read_file 的对比:
+            - read_file 一次只读 1 个,无路径框架共享(每文件 4 行框架),N 个文件要 N 次 round-trip。
+            - read_files 一次读 N 个,框架合并,token 更省,延迟更低(尤其 N 较大时)。
+            典型场景:
+            - "看一下 A.kt B.kt C.kt 三个文件" → read_files(["a.kt","b.kt","c.kt"])
+            - 大文件分页 → read_file(startLine=X,endLine=Y)(不要用 read_files)
+            示例:
+            {"type":"read_files","paths":["app/src/main/AndroidManifest.xml","app/build.gradle.kts"]}
+            {"type":"read_files","paths":["a.kt","b.kt"],"maxLines":200}
+        """.trimIndent(),
+
+        "delete_file" to """
+            ## delete_file 详细用法
+            删除文件或**空**目录(破坏性)。**非空目录会被拒**(必须先 list_files 看子项并逐个删)。
+            字段:
+            - path(必填):文件或空目录路径,相对项目根或项目内绝对路径。
+            行为:
+            - 是文件 → 直接删除
+            - 是空目录 → 直接删除
+            - 是非空目录 → 拒绝(返回错误信息,需 AI 自行递归删子项)
+            - 是符号链接 → 不会跟随符号链接(防越界误删)
+            成功后 IDE 行为:
+            - 若该文件在编辑器中打开 → 自动关闭 tab
+            - Project 面板文件树刷新
+            - PSI 缓存失效
+            - Daemon Code Analyzer 重跑(高亮/补全/错误检查)
+            典型场景:
+            - "删掉 Test.kt" → delete_file("app/src/main/java/.../Test.kt")
+            - "删掉整个 util 目录" → 先 list_files 看子项,再逐个 delete_file(目录会在
+              最后一项删除时自动清空)
+            反例:
+            - ❌ 删整个目录时用 delete_file 一次性传 → 改为递归 list_files + 多次 delete_file
+            - ❌ 不确定文件在哪 → 先 search_in_files / find_references 定位
+            示例:
+            {"type":"delete_file","path":"app/src/main/java/com/foo/Test.kt"}
+        """.trimIndent(),
+
+        "move_file" to """
+            ## move_file 详细用法
+            移动或重命名文件 / 目录(等价于 `mv`)。
+            字段:
+            - src(必填):源路径(相对项目根或项目内绝对路径)。
+            - dst(必填):目标路径(相对项目根或项目内绝对路径)。
+            行为:
+            - dst 已存在 → 拒绝(防误覆盖,需 AI 先 delete 再 move,或选别的目标名)
+            - 自动创建 dst 父目录(mkdirs)
+            - 跨目录移动也支持
+            - 原子移动(StandardCopyOption.ATOMIC_MOVE),中途失败不会留半写状态
+            成功后 IDE 行为:
+            - 若 src 在编辑器中打开 → 自动关闭旧 tab
+            - Project 面板文件树刷新(src 消失,dst 出现)
+            - Daemon Code Analyzer 重跑(若 dst 是代码文件)
+            典型场景:
+            - 重命名 → move_file("Foo.kt", "Bar.kt")
+            - 移动到别的目录 → move_file("app/old/X.kt", "app/new/X.kt")
+            反例:
+            - ❌ dst 已存在还硬调 → 先 delete 或选新名字
+            - ❌ 想批量移动多个文件 → 调多次 move_file(原子,安全)
+            示例:
+            {"type":"move_file","src":"app/src/main/java/Foo.kt","dst":"app/src/main/java/Bar.kt"}
+            {"type":"move_file","src":"old/utils","dst":"new/utils"}
+        """.trimIndent(),
+
+        "file_info" to """
+            ## file_info 详细用法
+            读取文件 / 目录的元信息,**不读全文**。比 read_file 节省大量 token。
+            字段:
+            - path(必填):路径(相对项目根或项目内绝对路径)。
+            返回字段:
+            - exists: 是否存在(越界/不存在 → false,其它字段全为 0)
+            - sizeBytes: 文件字节数(目录为 0)
+            - lineCount: 文件行数(目录为 0)
+            - isDirectory / isRegularFile: 类型
+            - lastModified: 最后修改时间(yyyy-MM-dd HH:mm:ss 本地时区)
+            - fileName: 文件名带后缀
+            典型场景:
+            - "X 文件存在吗" → file_info("path/X.kt")
+            - "X 文件多大" → file_info(读 sizeBytes)
+            - "X 文件有多少行" → file_info(读 lineCount)
+            - 编辑前看 mtime 决定是否要 read_file 重读
+            反例:
+            - ❌ 想知道文件内容 → 改用 read_file(本工具不给内容)
+            - ❌ 想列目录下所有文件 → 改用 list_files
+            示例:
+            {"type":"file_info","path":"app/src/main/java/com/foo/MainActivity.kt"}
+        """.trimIndent(),
+
         "ask_user" to """
             ## ask_user 详细用法
             向用户提问并等待用户回复。每次调用都会暂停 tool loop 直到用户响应——因此不要反复调用本工具。
@@ -762,14 +948,19 @@ object AITranslator {
               - insert_strings、query_keys、read_string、update_string、delete_string、find_keys_by_text
               - sheets_basic、sheets_row_ops、sheets_column_ops、sheets_freeze、sheets_review、sheets_color、sheets_batch_modify
               - find_rows_by_text
-              - get_editor_file、read_file、edit_file、create_file、search_in_files、find_references、list_files
+              - **code_ops**(2026.x 写代码工作流合并文档,推荐)**:** 一次拿到全部 11 个文件操作工具的用法
+              - get_editor_file、read_file、read_files、edit_file、create_file、delete_file、move_file
+              - search_in_files、find_references、list_files、file_info
               - todo_list、todo_add、todo_update、todo_delete
-              - ask_user、load_tool_doc、task_complete
+              - ask_user、load_tool_doc、replace_selection、task_complete
             使用规则：
+            - 写代码相关任务(用户说"改 X 文件""加 Y 功能""重构 Z")→ **优先** `load_tool_doc("code_ops")`
+              一次拿到全部 11 个工具用法,避免反复调 11 次单工具文档,省 10+ round-trip + token。
             - 不确定工具字段时再调本工具，不要在每次任务开始时一次性加载所有文档。
             - 系统对「连续调用 load_tool_doc」有次数上限（防止 AI 反复加载文档而不执行操作），所以一次最多加载需要的 1-2 个文档，拿到后立即返回实际工具调用。
             - 文档返回后会作为 tool 消息回传给你，你据此直接返回正确的工具调用，**不要重复请求同一工具的文档**。
             示例：
+            {"type":"load_tool_doc","tool":"code_ops"}
             {"type":"load_tool_doc","tool":"sheets_batch_modify"}
         """.trimIndent(),
 
@@ -2850,6 +3041,30 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val includeDirs = args.get("includeDirs")?.let { runCatching { it.asBoolean }.getOrNull() } ?: false
                 val maxEntries = args.get("maxEntries")?.let { runCatching { it.asInt }.getOrNull() } ?: 500
                 AiAction.ListFiles(relativeDir, pattern, recursive, includeDirs, maxEntries)
+            }
+            // 2026.x 新增 4 个写代码工具
+            ToolDefinitions.TOOL_FILE_INFO -> {
+                val path = args.get("path")?.asString?.trim() ?: return null
+                if (path.isEmpty()) return null
+                AiAction.FileInfo(path)
+            }
+            ToolDefinitions.TOOL_READ_FILES -> {
+                val pathsArr = args.get("paths")?.asJsonArray ?: return null
+                val paths = pathsArr.mapNotNull { it.takeIf { el -> el.isJsonPrimitive }?.asString?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                if (paths.isEmpty()) return null
+                val maxLines = args.get("maxLines")?.let { runCatching { it.asInt }.getOrNull() } ?: 0
+                AiAction.ReadFiles(paths, maxLines)
+            }
+            ToolDefinitions.TOOL_DELETE_FILE -> {
+                val path = args.get("path")?.asString?.trim() ?: return null
+                if (path.isEmpty()) return null
+                AiAction.DeleteFile(path)
+            }
+            ToolDefinitions.TOOL_MOVE_FILE -> {
+                val src = args.get("src")?.asString?.trim() ?: return null
+                val dst = args.get("dst")?.asString?.trim() ?: return null
+                if (src.isEmpty() || dst.isEmpty()) return null
+                AiAction.MoveFile(src, dst)
             }
             // endregion
             ToolDefinitions.TOOL_REPLACE_SELECTION -> {

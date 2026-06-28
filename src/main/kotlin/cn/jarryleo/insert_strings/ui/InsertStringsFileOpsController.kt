@@ -96,7 +96,8 @@ internal class InsertStringsFileOpsController(
         } catch (e: Exception) {
             return "[工具执行结果] 类型:edit_file 状态:失败 path:${action.path} 信息:${e.message ?: "unknown"}"
         }
-        // 通知 IDE 重新加载该文件(若有打开)
+        // 兜底通知 IDE(主流程已在 FileOpsService.writeAtomic 内部完成 VFS + Document +
+        // FileEditor + PSI + Daemon 五层重读,这里 idempotent 再补一次)
         SwingUtilities.invokeLater { refreshOpenFile(action.path) }
         val modeDesc = if (action.useRegex) {
             if (action.replaceAll) "regex 全文" else "regex(唯一)"
@@ -122,6 +123,10 @@ internal class InsertStringsFileOpsController(
             } else {
                 appendLine("未发生任何替换(occurrences=0)。")
             }
+            // 2026.x:告诉 AI 缓存已重读,避免它再调 read_file "验证"(浪费 round-trip)
+            appendLine()
+            append("提示:IDE 缓存已自动重读(编辑器/PSI/Daemon Code Analyzer)," +
+                "无需再调 read_file 验证,直接进入下一个动作。")
         }
     }
 
@@ -134,8 +139,14 @@ internal class InsertStringsFileOpsController(
         if (!created) {
             return "[工具执行结果] 类型:create_file 状态:成功 但未写入 原因:文件已存在,overwrite=false"
         }
+        // 兜底通知 IDE
+        SwingUtilities.invokeLater { refreshOpenFile(action.path) }
         return buildString {
-            append("[工具执行结果] 类型:create_file 状态:成功 path:${action.path} 字节:${action.content.toByteArray(Charsets.UTF_8).size}")
+            append("[工具执行结果] 类型:create_file 状态:成功 path:${action.path} " +
+                "字节:${action.content.toByteArray(Charsets.UTF_8).size}")
+            appendLine()
+            append("提示:IDE 缓存已自动重读(编辑器/PSI/Daemon Code Analyzer)," +
+                "无需再调 read_file 验证,直接进入下一个动作。")
         }
     }
 
@@ -236,8 +247,115 @@ internal class InsertStringsFileOpsController(
         }
     }
 
+    // region 2026.x 新增 4 个写代码工具
+
+    fun runFileInfo(action: AiAction.FileInfo): String {
+        val meta = try {
+            service.fileInfo(action.path)
+        } catch (e: Exception) {
+            return "[工具执行结果] 类型:file_info 状态:失败 信息:${e.message ?: "unknown"}"
+        }
+        if (!meta.exists) {
+            return "[工具执行结果] 类型:file_info 状态:成功 path:${action.path} " +
+                "exists:false(路径不存在或不在项目根内)"
+        }
+        val mtime = if (meta.lastModifiedMillis > 0) {
+            val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+            sdf.format(java.util.Date(meta.lastModifiedMillis))
+        } else "unknown"
+        return buildString {
+            append("[工具执行结果] 类型:file_info 状态:成功 path:${action.path}")
+            appendLine()
+            append("  fileName: ").append(meta.fileName)
+            append("  sizeBytes: ").append(meta.sizeBytes)
+            append("  lineCount: ").append(meta.lineCount)
+            append("  isDirectory: ").append(meta.isDirectory)
+            append("  isRegularFile: ").append(meta.isRegularFile)
+            append("  lastModified: ").append(mtime)
+        }
+    }
+
+    fun runReadFiles(action: AiAction.ReadFiles): String {
+        if (action.paths.isEmpty()) {
+            return "[工具执行结果] 类型:read_files 状态:失败 信息:paths 不能为空"
+        }
+        if (action.paths.size > FileOpsService.MAX_BATCH_READ_FILES) {
+            return "[工具执行结果] 类型:read_files 状态:失败 信息:paths 数量 ${action.paths.size} 超过上限 " +
+                "${FileOpsService.MAX_BATCH_READ_FILES},请拆批"
+        }
+        val maxLines = if (action.maxLines <= 0) FileOpsService.MAX_BATCH_READ_LINES
+        else action.maxLines.coerceAtMost(FileOpsService.MAX_BATCH_READ_LINES)
+        val results = try {
+            service.readFiles(action.paths, maxLines = maxLines)
+        } catch (e: Exception) {
+            return "[工具执行结果] 类型:read_files 状态:失败 信息:${e.message ?: "unknown"}"
+        }
+        return buildString {
+            append("[工具执行结果] 类型:read_files 状态:成功 文件数:").append(action.paths.size)
+            append(" 每文件 maxLines:").append(maxLines).appendLine()
+            results.forEachIndexed { idx, r ->
+                val path = action.paths[idx]
+                if (r.fileSize == 0L && r.content.startsWith("[失败]")) {
+                    appendLine()
+                    append("[文件 ${idx + 1}] $path 状态:失败")
+                    appendLine()
+                    append("  原因:").append(r.content.removePrefix("[失败]").trim())
+                    return@forEachIndexed
+                }
+                appendLine()
+                append("[文件 ${idx + 1}] $path 行 ${r.startLine + 1}-${r.endLine + 1}/" +
+                    "${r.totalLines} 字节:${r.fileSize}")
+                appendLine("--- begin content ---")
+                append(r.content)
+                if (!r.content.endsWith("\n")) append("\n")
+                append("--- end content ---")
+            }
+        }
+    }
+
+    fun runDeleteFile(action: AiAction.DeleteFile): String {
+        try {
+            service.deleteFile(action.path)
+        } catch (e: Exception) {
+            return "[工具执行结果] 类型:delete_file 状态:失败 path:${action.path} " +
+                "信息:${e.message ?: "unknown"}"
+        }
+        // 兜底通知 IDE(防止 IDE 缓存的虚拟文件未失效)
+        SwingUtilities.invokeLater { refreshOpenFile(action.path) }
+        return "[工具执行结果] 类型:delete_file 状态:成功 path:${action.path} " +
+            "提示:IDE 缓存已刷新,若该文件在编辑器中打开已自动关闭"
+    }
+
+    fun runMoveFile(action: AiAction.MoveFile): String {
+        try {
+            service.moveFile(action.src, action.dst)
+        } catch (e: Exception) {
+            return "[工具执行结果] 类型:move_file 状态:失败 src:${action.src} dst:${action.dst} " +
+                "信息:${e.message ?: "unknown"}"
+        }
+        // 兜底通知 IDE 两端
+        SwingUtilities.invokeLater {
+            refreshOpenFile(action.src)
+            refreshOpenFile(action.dst)
+        }
+        return "[工具执行结果] 类型:move_file 状态:成功 src:${action.src} → dst:${action.dst} " +
+            "提示:IDE 缓存已刷新,源文件 tab 已关闭,目标文件可在 Project 面板中重新打开"
+    }
+
+    // endregion
+
     /**
      * 写文件完成后,通知 IDE 重读(若该文件正在 IDE 中打开,刷新显示)。
+     *
+     * 修复历史(2026.x 强化):
+     * - 原版只调用 `vFile.refresh(false, false)`,VFS 知道文件改了,但 **编辑器里展示的
+     *   Document / PSI 缓存 / Daemon Code Analyzer 都还是旧内容** —— 这是用户报告的
+     *   "修改后 IDE 还是显示老内容" 的根本原因。
+     * - 现版在 [FileOpsService.writeAtomic] 内部已经一次性完成 VFS + Document +
+     *   FileEditor + PSI + DaemonCodeAnalyzer 五层重读(详见该方法注释),所以这里
+     *   只做兜底:对一些 FileOpsService 没覆盖到的写入路径(如 controller 直接用
+     *   Path 写盘的旧代码)再补一次 VFS + Document 强制重读。
+     *
      * 失败时静默忽略(文件可能没在 IDE 中打开,或已被删除)。
      */
     private fun refreshOpenFile(path: String) {
@@ -248,6 +366,18 @@ internal class InsertStringsFileOpsController(
             val vFile = com.intellij.openapi.vfs.LocalFileSystem.getInstance()
                 .findFileByIoFile(java.io.File(resolved)) ?: return@runCatching
             vFile.refresh(false, false)
+            // 兜底:强制重读编辑器 Document(若文件已打开)。
+            // 正常路径 [FileOpsService.writeAtomic] 已经处理过,这里只是 idempotent 兜底,
+            // 对绕过 writeAtomic 的旧写入路径仍然有效。
+            val docManager = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance()
+            docManager.getDocument(vFile)?.let { doc ->
+                runCatching { docManager.reloadFromDisk(doc) }
+            }
+            // 兜底:通知编辑器 tab 刷新图标/标题(清除 dirty 标记等)。
+            runCatching {
+                com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
+                    .updateFilePresentation(vFile)
+            }
         }
     }
 }

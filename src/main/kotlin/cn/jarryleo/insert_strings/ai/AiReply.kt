@@ -496,6 +496,67 @@ sealed class AiAction {
         val maxEntries: Int
     ) : AiAction()
 
+    /**
+     * 读取文件元信息(2026.x 新增):大小 / 行数 / 修改时间 / 是否存在,无需读全文。
+     * 用途:AI 想"先看看这文件长什么样、是否要读全文"时的零成本探查;
+     * 一次 read_file 至少 1KB,本工具对小文件元信息场景只回几十字节,极省 token。
+     *
+     * @param path 相对项目根路径或项目内绝对路径
+     */
+    data class FileInfo(
+        val path: String
+    ) : AiAction()
+
+    /**
+     * 批量读取多个文件(2026.x 新增)。一次工具调用最多读 10 个文件,合并返回,
+     * 节省 N-1 次 round-trip。比循环 N 次 read_file 显著省 token(避免重复的
+     * "--- begin content ---" / "--- end content ---" 框架)。
+     *
+     * - 路径同 [ReadFile](相对项目根或项目内绝对路径,必须落在项目根内)。
+     * - 每个文件独立应用 [ReadFile] 的字节/行数限制(单文件过大时该文件返回错误信息,
+     *   其它文件继续返回,不会因单文件失败而中断整批)。
+     * - 文件不存在/越界/二进制等异常,逐文件以 "[文件 N 失败] 原因:..." 形式回传。
+     *
+     * @param paths     要读取的文件路径列表(1-10 个)
+     * @param maxLines  每个文件单次最大返回行数(默认 300,比单文件 read_file 略低,
+     *                  防止多文件合并爆 token)
+     */
+    data class ReadFiles(
+        val paths: List<String>,
+        val maxLines: Int
+    ) : AiAction()
+
+    /**
+     * 删除项目内文件或空目录(2026.x 新增,破坏性操作)。
+     * - 仅当目标存在且符合以下条件之一才删除:
+     *   - 是文件 → 直接删除
+     *   - 是空目录 → 直接删除
+     *   - 是非空目录 → 拒绝(必须 AI 先递归清空子项)
+     * - 成功后 IDE 会自动让已打开的编辑器关闭该 tab 并清除相关缓存。
+     * - 不会跟随符号链接(防止误删项目外文件);越界路径被拒绝。
+     *
+     * @param path 要删除的文件或空目录路径(相对项目根或项目内绝对路径)
+     */
+    data class DeleteFile(
+        val path: String
+    ) : AiAction()
+
+    /**
+     * 移动/重命名文件或目录(2026.x 新增)。
+     * 行为:
+     * - 等价于 `mv <src> <dst>`(Kotlin 标准库实现,跨平台)。
+     * - 自动创建目标父目录(mkdirs)。
+     * - 目标已存在 → 拒绝(防误覆盖)。
+     * - 成功后 IDE 自动关闭 src 旧 tab、若目标已有打开的编辑器则重读。
+     *
+     * @param src 源路径(相对项目根或项目内绝对路径)
+     * @param dst 目标路径(相对项目根或项目内绝对路径)
+     */
+    data class MoveFile(
+        val src: String,
+        val dst: String
+    ) : AiAction()
+
     // endregion
 }
 
