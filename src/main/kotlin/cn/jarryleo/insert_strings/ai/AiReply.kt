@@ -325,11 +325,15 @@ sealed class AiAction {
      * @param matchType      匹配模式(默认 CONTAINS)
      * @param caseSensitive  是否区分大小写(默认 false)
      * @param limit          最大返回条数(默认 30)
+     *
+     * 2026.x 简化:去掉 [module] / [language] 参数,内部固定全模块 + 全语言目录搜索。
+     * 原因:原文查重的语义就是「跨模块 + 跨语言找重复 key」,限定范围会漏命中(用户选的
+     * 硬编码文本可能就是目标语言翻译,values/ 英文译文可能用词不同;模块判定也常常
+     * 错位)。让 AI 不能用参数「挑」范围反而是最安全的默认行为,贴近真实需求。
+     * 真要限定范围就改用 [QueryKeys] / [ReadString]。
      */
     data class FindKeysByText(
         val text: String,
-        val module: String?,
-        val language: String?,
         val matchType: TextMatchType,
         val caseSensitive: Boolean,
         val limit: Int

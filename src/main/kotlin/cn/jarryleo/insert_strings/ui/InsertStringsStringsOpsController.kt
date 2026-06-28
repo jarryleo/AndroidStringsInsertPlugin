@@ -256,6 +256,9 @@ internal class InsertStringsStringsOpsController(
      * 用 find_keys_by_text 同样的精确匹配能力,作为跨模块/跨语言去重的备选入口。
      * 供 AI 通过 find_keys_by_text 工具调用使用 — 这里仅暴露给 driver 内部,
      * 不参与 schema。
+     *
+     * 2026.x 简化:固定全模块 + 全语言目录搜索(不再接受 module / language 参数)。
+     * 查重场景下「跨语言 + 跨模块」是标准语义,让 AI 没法挑范围反而更安全。
      */
     fun runFindKeysByText(action: AiAction.FindKeysByText): String {
         val matchType = mapToServiceMatchType(action.matchType)
@@ -263,8 +266,8 @@ internal class InsertStringsStringsOpsController(
             StringsService.findKeysByText(
                 project = project,
                 text = action.text,
-                moduleName = action.module,
-                language = action.language,
+                moduleName = null,
+                language = null,
                 matchType = matchType,
                 caseSensitive = action.caseSensitive,
                 limit = action.limit
@@ -275,8 +278,6 @@ internal class InsertStringsStringsOpsController(
         if (results.isEmpty()) {
             val scope = buildString {
                 append("text:\"").append(action.text).append("\"")
-                if (action.module != null) append(" module:").append(action.module)
-                if (action.language != null) append(" language:").append(action.language)
                 append(" match:").append(action.matchType.name.lowercase())
             }
             return "[工具执行结果] 类型:find_keys_by_text 状态:成功 命中:0 范围:$scope 未找到匹配 key"

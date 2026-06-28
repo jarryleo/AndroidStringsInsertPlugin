@@ -184,7 +184,8 @@ object AITranslator {
 - 自动生成 key:snake_case,长度 ≤ 40 字符,查重后冲突则重新生成。
 
 ## 翻译查重(插入翻译前必做)
-1. **原文查重**(必做,主要依据):用 `find_keys_by_text` 扫描**用户消息中的原始文本**(布局/代码中的硬编码文本,或用户在消息中直接输入的待翻译文本)——**不传 language 参数**,`matchType=exact` 跑一次、再 `contains` 兜底;同时可跑 `query_keys(searchIn=text/both)` 跨多语种翻译文本搜索提高命中率。
+1. **原文查重**(必做,主要依据):用 `find_keys_by_text` 扫描**用户消息中的原始文本**(布局/代码中的硬编码文本,或用户在消息中直接输入的待翻译文本),`matchType=exact` 跑一次、再 `contains` 兜底;同时可跑 `query_keys(searchIn=text/both)` 跨多语种翻译文本搜索提高命中率。
+   - 2026.x:`find_keys_by_text` 已固定全模块 + 全语言目录搜索(不再接受 module / language 参数),语义对齐「跨模块 + 跨语言找重复」,无需 AI 自行挑范围。
    - 原因:用户选中的硬编码文本通常**就是目标语言翻译**(如中文「登录」),values/ 译文用词可能不同,按 AI 翻译后的英语查会漏命中。
 2. **Key 名查重**:生成 key 后用 `query_keys(searchIn=key)` 检查是否已存在。
 3. 任一命中 → 用一次 `ask_user` 列出全部命中项,`question` 中明确写出找到的现有 key 与所在模块,`options` 用统一格式(见公共规则)。
@@ -272,7 +273,8 @@ object AITranslator {
 - 「插入翻译」默认走 `recommendedDefaultModule`;用户消息里明确指定模块时按用户来。
 
 ## 翻译查重(插入翻译前必做)
-1. **原文查重**:用 `find_keys_by_text` 扫描**用户消息中的原始文本** —— **不传 language 参数**,`matchType=exact` 跑一次、再 `contains` 兜底;同时可跑 `query_keys(searchIn=text/both)` 跨多语种翻译文本搜索提高命中率。
+1. **原文查重**:用 `find_keys_by_text` 扫描**用户消息中的原始文本**,`matchType=exact` 跑一次、再 `contains` 兜底;同时可跑 `query_keys(searchIn=text/both)` 跨多语种翻译文本搜索提高命中率。
+   - 2026.x:`find_keys_by_text` 已固定全模块 + 全语言目录搜索(不再接受 module / language 参数)。
 2. **Key 名查重**:生成 key 后用 `query_keys(searchIn=key)` 检查。
 3. 任一命中 → 用一次 `ask_user` 列出全部命中项,`options` 用统一格式(见公共规则)。
 4. 用户选择后的处理:
@@ -343,9 +345,10 @@ object AITranslator {
             - 翻译内容中 XML 特殊字符需转义：&amp; &lt; &gt; &quot; &apos;。
             - **插入前的两道查重均由 AI 自助完成,系统不再自动跑**:
               1. **原文查重(必做,主要查重依据)**:用 find_keys_by_text 扫描**用户消息中的原始文本**
-                 (用户从布局/代码中选中的硬编码文本,或用户在消息中直接输入的待翻译文本)——
-                 **不传 language 参数**(跨所有语言目录搜,不限 values/),matchType=exact 跑一次、
-                 再 contains 兜底;看是否存在与该原文完全一致或高度相似的现有 key。
+                 (用户从布局/代码中选中的硬编码文本,或用户在消息中直接输入的待翻译文本),
+                 matchType=exact 跑一次、再 contains 兜底;看是否存在与该原文完全一致或高度相似的现有 key。
+                 2026.x:find_keys_by_text 固定全模块 + 全语言目录搜索(已去掉 module / language 参数),
+                 跨语言命中是默认行为,无需 AI 自行选择范围。
                  原因:用户选中的硬编码文本通常**就是目标语言翻译**(例如中文「登录」),
                  若仅用 AI 自己翻译后的 values 译文(英语)查重,会漏掉「原文已存在、但
                  values/ 英语译文用词不同」的场景。建议同时跑一次 query_keys(searchIn=text / both)
@@ -457,13 +460,12 @@ object AITranslator {
         """.trimIndent(),
 
         "find_keys_by_text" to """
-            ## find_keys_by_text 详细用法
+            ## find_keys_by_text 详细用法(2026.x 简化版)
             strings.xml 反查：通过翻译文本查找对应的 key。
+            **固定全模块 + 全语言目录搜索**(2026.x 去掉 module / language 参数;原文查重的
+            标准语义就是「跨模块 + 跨语言找重复」,让 AI 不能挑范围反而最贴近真实需求,避免漏命中)。
             字段：
             - text（必填）：要查找的翻译文本。
-            - module（可选）：限定 Android 模块名。省略时搜索项目中**所有模块**的所有 strings.xml。
-            - language（可选）：限定语言目录（如 values-zh-rTW）。**插入查重时务必省略**,
-              跨所有语言目录搜才能命中「原文已存在但 values/ 英语译文用词不同」的场景。
             - matchType（可选）：匹配模式，exact（完全相等）/ contains（子串，默认）/ regex（正则）。
             - caseSensitive（可选，默认 false）：是否区分大小写。
             - limit（可选）：最大返回条数，默认 30，最大 200。
@@ -472,14 +474,14 @@ object AITranslator {
             - 看到一段文字想反查是哪个 key。
             - 排查重复翻译、跨语言确认某文本对应哪个 key。
             - **insert_strings 前必跑(查重入口)**:用**用户消息中的原始文本**(用户从布局/代码中选中的
-              硬编码文本,或在消息中直接输入的待翻译文本)**不传 language 参数**、matchType=exact 跑一次,
+              硬编码文本,或在消息中直接输入的待翻译文本)、matchType=exact 跑一次,
               再用 matchType=contains 跑一次兜底,把命中的 key 放进 ask_user 询问用户。
               ⚠️ 不要用 AI 自己翻译后的 values 译文(英语)查重 —— 用户选中的硬编码文本通常
               **就是目标语言翻译**(如中文「登录」),values/ 译文用词可能与原文不一致,会漏命中。
             示例：
             {"type":"find_keys_by_text","text":"登录"}
             {"type":"find_keys_by_text","text":"登录","matchType":"contains"}
-            {"type":"find_keys_by_text","text":"^Hello.*$","module":"app","matchType":"regex"}
+            {"type":"find_keys_by_text","text":"^Hello.*$","matchType":"regex"}
         """.trimIndent(),
 
         "find_rows_by_text" to """
@@ -2565,12 +2567,12 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             ToolDefinitions.TOOL_FIND_KEYS_BY_TEXT -> {
                 val text = args.get("text")?.asString?.trim() ?: return null
                 if (text.isEmpty()) return null
-                val module = args.get("module")?.asString?.trim()?.takeIf { it.isNotEmpty() }
-                val language = args.get("language")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                // 2026.x 简化:固定全模块 + 全语言目录搜索,不再接受 module / language 参数。
+                // AI 即便传了也会被忽略(解析时不取),强制语义统一。
                 val matchType = parseMatchType(args.get("matchType")?.asString)
                 val caseSensitive = args.get("caseSensitive")?.let { runCatching { it.asBoolean }.getOrNull() } ?: false
                 val limit = args.get("limit")?.let { runCatching { it.asInt }.getOrNull() } ?: 30
-                AiAction.FindKeysByText(text, module, language, matchType, caseSensitive, limit)
+                AiAction.FindKeysByText(text, matchType, caseSensitive, limit)
             }
             ToolDefinitions.TOOL_FIND_ROWS_BY_TEXT -> {
                 val text = args.get("text")?.asString?.trim() ?: return null

@@ -137,8 +137,8 @@ object ToolDefinitions {
             "修改/删除前必先 read_string 确认。→ load_tool_doc(\"read_string\")。"
 
     private const val DESC_FIND_KEYS_BY_TEXT =
-        "strings.xml 反查:通过翻译文本找 key。exact/contains(默认)/regex。" +
-            "插入查重不传 language。→ load_tool_doc(\"find_keys_by_text\")。"
+        "strings.xml 反查:通过翻译文本找 key。固定全模块 + 全语言目录搜索(2026.x 简化)," +
+            "exact/contains(默认)/regex。 → load_tool_doc(\"find_keys_by_text\")。"
 
     private const val DESC_FIND_ROWS_BY_TEXT =
         "Google Sheets 反查:按文本搜行,返回行号+列名+整行。" +
@@ -522,20 +522,14 @@ object ToolDefinitions {
             add("contains")
             add("regex")
         }
+        // 2026.x 简化:去掉 module / language 参数。
+        // 本工具固定全模块 + 全语言目录搜索(原文查重的标准语义,见 [AiAction.FindKeysByText] 注释)。
         return obj {
             addProperty("type", "object")
             add("properties", obj {
                 add("text", obj {
                     addProperty("type", "string")
                     addProperty("description", "必填,翻译文本。")
-                })
-                add("module", obj {
-                    addProperty("type", "string")
-                    addProperty("description", "可选,取 modules[].moduleName;省略=搜索所有模块。")
-                })
-                add("language", obj {
-                    addProperty("type", "string")
-                    addProperty("description", "可选,限定语言目录。插入查重务必省略以跨语言命中。")
                 })
                 add("matchType", obj {
                     addProperty("type", "string")
