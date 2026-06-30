@@ -1660,6 +1660,13 @@ private fun targetFromArgs(toolName: String, args: JsonObject?): String? {
             }
         }
 
+        "web_search" -> {
+            // 显示 search: <query 截短> — 长 query 容易把卡片撑爆,截前 36 字符 + …
+            // 用户/AI 点开 ToolGroupBubble 详情后能看到完整 query 和结果列表。
+            val q = args.getString("query") ?: "?"
+            "search: ${truncateText(q, 36)}"
+        }
+
         else -> null
     }
 }

@@ -79,6 +79,7 @@ object ToolDefinitions {
         TOOL_RUN_SHELL,
         TOOL_READ_DIAGNOSTICS,
         TOOL_FETCH_URL,
+        TOOL_WEB_SEARCH,
         TOOL_TASK_COMPLETE,
     )
 
@@ -112,6 +113,7 @@ object ToolDefinitions {
     const val TOOL_RUN_SHELL = "run_shell"
     const val TOOL_READ_DIAGNOSTICS = "read_diagnostics"
     const val TOOL_FETCH_URL = "fetch_url"
+    const val TOOL_WEB_SEARCH = "web_search"
     const val TOOL_TASK_COMPLETE = "task_complete"
 
     // region 工具描述文案(主 prompt 引用,这里集中维护)
@@ -258,6 +260,12 @@ object ToolDefinitions {
             "敏感操作前用 ask_user。stripHtml=true 可压缩 HTML 页面只留可见文本(token 友好)。" +
             " → load_tool_doc(\"fetch_url\")。"
 
+    private const val DESC_WEB_SEARCH =
+        "用关键词搜互联网,返回前 N 条 title/url/snippet(默认 DuckDuckGo HTML,**无需 API key**)。" +
+            "结果中 url 是解析后的直链,可用 fetch_url 进一步拉详情。" +
+            "偶尔 CAPTCHA 失败,改 query 重试或换具体 URL 走 fetch_url。" +
+            " → load_tool_doc(\"web_search\")。"
+
     private const val DESC_LOAD_TOOL_DOC =
         "按需加载工具详细文档(枚举值/参数约束/示例)。" +
             "连续 load_tool_doc 有次数上限,一次最多 1-2 个,拿到后立即调实际工具。"
@@ -343,6 +351,7 @@ object ToolDefinitions {
             add(openAiTool(TOOL_RUN_SHELL, DESC_RUN_SHELL, openAiRunShellParams()))
             add(openAiTool(TOOL_READ_DIAGNOSTICS, DESC_READ_DIAGNOSTICS, openAiReadDiagnosticsParams()))
             add(openAiTool(TOOL_FETCH_URL, DESC_FETCH_URL, openAiFetchUrlParams()))
+            add(openAiTool(TOOL_WEB_SEARCH, DESC_WEB_SEARCH, openAiWebSearchParams()))
             add(openAiTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
         }
     }
@@ -392,6 +401,7 @@ object ToolDefinitions {
             add(anthropicTool(TOOL_RUN_SHELL, DESC_RUN_SHELL, openAiRunShellParams()))
             add(anthropicTool(TOOL_READ_DIAGNOSTICS, DESC_READ_DIAGNOSTICS, openAiReadDiagnosticsParams()))
             add(anthropicTool(TOOL_FETCH_URL, DESC_FETCH_URL, openAiFetchUrlParams()))
+            add(anthropicTool(TOOL_WEB_SEARCH, DESC_WEB_SEARCH, openAiWebSearchParams()))
             add(anthropicTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
         }
     }
@@ -1380,6 +1390,37 @@ object ToolDefinitions {
                 })
             })
             add("required", JsonArray().apply { add("url") })
+        }
+    }
+
+    private fun openAiWebSearchParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("query", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "必填,搜索关键词。空格 / 中文 / 特殊字符都自动 URL-encode。"
+                    )
+                })
+                add("limit", obj {
+                    addProperty("type", "integer")
+                    addProperty(
+                        "description",
+                        "可选,返回前 N 条,默认 10,范围 1..30。DDG HTML 一页 ~10 条," +
+                            "limit > 20 实际仍只返回 ~10-20 条。"
+                    )
+                })
+                add("timeoutMs", obj {
+                    addProperty("type", "integer")
+                    addProperty(
+                        "description",
+                        "可选,超时毫秒,默认 15000,范围 1000..60000。"
+                    )
+                })
+            })
+            add("required", JsonArray().apply { add("query") })
         }
     }
 

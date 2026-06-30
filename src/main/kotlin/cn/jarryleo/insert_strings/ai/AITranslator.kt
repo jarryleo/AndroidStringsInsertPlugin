@@ -178,6 +178,14 @@ object AITranslator {
 - POST / 其它方法暂不支持,需要时调 `run_shell curl`。
 - 返回 4xx/5xx 视作失败,body 仍会按 maxBodyChars 截断后返回,便于 AI 读错误消息。
 
+## 网络搜索规则(`web_search` 适用)
+- `web_search` 是**只读**网络工具,**无需 API key**,默认走 DuckDuckGo HTML 接口(`https://html.duckduckgo.com/html/?q=...`)。
+- 返回前 N 条 title / url / snippet(默认 10),结果是**直链**(已解码 DDG uddg 参数),可直接 `fetch_url` 进一步拉详情。
+- 失败 / 超时 / 偶发 CAPTCHA 返回明确状态,AI 自己决定下一步 — 改 query 重试 / 换关键词 / 改用 fetch_url 直查具体 URL。
+- 不要用 `web_search` 替代 `fetch_url` — 想要某个具体 URL 的内容仍用 fetch_url;web_search 是**找 URL** 用的。
+- 搜索结果按相关性排序(默认),AI 按需引用前几条,无需自己排序。
+- **不要**把 web_search 用在"读 GitHub issue / PR 评论 / changelog"等已知的稳定 URL 上 — 那些用 fetch_url 直查更稳定。
+
 ## 函数调用协议(严格)
 工具调用**必须**通过原生 function calling 协议发出:
 - OpenAI / OpenAI 兼容:`message.tool_calls` 数组;
@@ -1152,6 +1160,64 @@ object AITranslator {
             {"type":"fetch_url","url":"https://api.example.com/v1/data","headers":{"Authorization":"Bearer xxx"}}
         """.trimIndent(),
 
+        "web_search" to """
+            ## web_search 详细用法
+            用关键词搜互联网,返回前 N 条 title / url / snippet 列表。**无需 API key**,
+            默认走 DuckDuckGo HTML 接口(`https://html.duckduckgo.com/html/?q=...`)。
+            字段:
+            - query(必填):搜索关键词。空格 / 中文 / 特殊字符都自动 URL-encode。
+            - limit(可选):返回前 N 条,默认 10,范围 1..30。DDG HTML 一页 ~10 条,
+              limit > 20 实际仍只返回 ~10-20 条。
+            - timeoutMs(可选):超时毫秒,默认 15000,范围 1000..60000。
+
+            平台保证:
+            - **不需要** API key / OAuth / 注册。DuckDuckGo HTML 是公开接口。
+            - 工具会重写 DDG 相对链接(解码 `uddg` 参数)为绝对 URL,AI 拿到的是**直链**,
+              可直接 `fetch_url` 进一步拉详情。
+            - User-Agent 在 5 个常见浏览器 UA 之间**轮换**(Firefox / Chrome / Edge / Safari / Opera),
+              降低被 DDG 反爬 ban 的概率。
+
+            何时用:
+            - 用户问「Kotlin 协程怎么用」「Spring Boot 怎么配 X」 → 用本工具搜,看官方文档 / 博客 / SO 答案。
+            - AI 自己遇到不确定的 API / 库用法,先 web_search 再回答用户(比瞎猜稳)。
+            - 配合 `fetch_url`:`web_search` 找到 URL → `fetch_url` 拉详情页 → 综合回答。
+            - 找 issue / changelog / 公告(用具体关键词如 "Kotlin 2.1 release notes")。
+
+            何时不用:
+            - 已知具体 URL → 直接 `fetch_url`,本工具是多此一举。
+            - 查 GitHub issue / PR 评论 → 直接 `fetch_url https://api.github.com/repos/.../issues/N`。
+            - 查 GitHub / npm / maven 等**机器可读**的元信息 → 用对应 API(`fetch_url`)更稳定。
+            - 需要 POST / 鉴权 / 翻页 → 本工具**只**支持 GET 公开搜索,需要时用 `run_shell curl`。
+            - 涉及敏感内容搜索(医疗 / 政治 / 个人隐私等)→ 本工具无内容审计,AI 自己判断是否适合。
+
+            失败处理:
+            - DDG 偶尔返回 CAPTCHA 页面(< 1% 概率)→ 工具会检测到并返回「CAPTCHA,稍后重试」,
+              AI 应改 query 或换关键词重试,或转用 `fetch_url` 直查已知 URL。
+            - 网络超时 / 状态码 5xx → 返回明确错误,AI 应重试或换思路。
+            - 解析失败(0 条结果)→ 通常是 query 过于具体 / 拼写错,改 query 重试。
+
+            返回 tool_result 格式(以 [工具执行结果] 起头):
+            成功:
+            ```
+            [工具执行结果] 类型:web_search 状态:成功 query:"kotlin coroutine" 耗时:480ms 命中:10
+            1. Kotlin Coroutines: official guide
+               https://kotlinlang.org/docs/coroutines-guide.html
+               Coroutines basics, cancellation, exceptions, channels, flow, share state.
+            2. Structured Concurrency in Kotlin | by Roman Elizarov
+               https://medium.com/@elizarov/structured-concurrency-722d765aa952
+               ...
+            ```
+            失败:
+            ```
+            [工具执行结果] 类型:web_search 状态:失败 query:"..." 原因:<错误描述>
+            ```
+
+            示例:
+            {"type":"web_search","query":"kotlin coroutine cancellation exception handling"}
+            {"type":"web_search","query":"spring boot 3 configuration properties","limit":5}
+            {"type":"web_search","query":"intellij plugin sdk daemon code analyzer example"}
+        """.trimIndent(),
+
         "load_tool_doc" to """
             ## load_tool_doc 详细用法
             按需加载工具的详细使用文档（参数约束、枚举值、示例等）。主聊天 system prompt 只放工具清单，详细用法全部按需加载以节省 token。
@@ -1164,7 +1230,7 @@ object AITranslator {
               - get_editor_file、read_file、read_files、edit_file、create_file、delete_file、move_file
               - search_in_files、find_references、list_files、file_info
               - todo_list、todo_add、todo_update、todo_delete
-              - ask_user、load_tool_doc、replace_selection、run_shell、read_diagnostics、fetch_url、task_complete
+              - ask_user、load_tool_doc、replace_selection、run_shell、read_diagnostics、fetch_url、web_search、task_complete
             使用规则：
             - 写代码相关任务(用户说"改 X 文件""加 Y 功能""重构 Z")→ **优先** `load_tool_doc("code_ops")`
               一次拿到全部 11 个工具用法,避免反复调 11 次单工具文档,省 10+ round-trip + token。
@@ -3355,6 +3421,14 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val stripHtml = args.get("stripHtml")?.takeIf { !it.isJsonNull }?.asBoolean
                 val stripImages = args.get("stripImages")?.takeIf { !it.isJsonNull }?.asBoolean
                 AiAction.FetchUrl(url, headers, timeoutMs, maxBodyChars, responseType, stripHtml, stripImages)
+            }
+
+            ToolDefinitions.TOOL_WEB_SEARCH -> {
+                val query = args.get("query")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: return null
+                val limit = args.get("limit")?.asInt?.takeIf { it in 1..30 }
+                val timeoutMs = args.get("timeoutMs")?.asInt?.takeIf { it in 1_000..60_000 }
+                AiAction.WebSearch(query, limit, timeoutMs)
             }
 
             else -> null

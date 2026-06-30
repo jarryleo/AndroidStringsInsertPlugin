@@ -54,6 +54,12 @@ internal class InsertStringsChatDriver(
      */
     private val fetchUrlOps: InsertStringsFetchUrlController by lazy { InsertStringsFetchUrlController(state) }
 
+    /**
+     * 网络搜索域(web_search 工具)的运行时控制器。
+     * lazy 持有 — 多数对话不会触发,等真要用再实例化,省内存。
+     */
+    private val webSearchOps: InsertStringsWebSearchController by lazy { InsertStringsWebSearchController(state) }
+
     companion object {
         // 单次对话中 AI 调用工具的最大轮数。超过则强制结束,防止死循环。
         // 设 30 足以覆盖现实中的多步操作(检查+修正等),又能及时止损。
@@ -73,6 +79,24 @@ internal class InsertStringsChatDriver(
         // 真要时再调一次工具即可,接受这个折衷)。
         private const val TOOL_RESULT_COMPACTED_PLACEHOLDER = "[结果已压缩(节省 token);需要时重新调用工具]"
         const val DEFAULT_LANGUAGE = "values"
+
+        /**
+         * web_search / fetch_url / read_diagnostics 的默认硬超时(controller 内置
+         * 超时 + 1s 兜底)。即使 OkHttp 自身的 timeout 失效(SDK 死锁 / 极端网络环境),
+         * Future.get() 也会强制返回失败,避免 AI 等几分钟没反应。
+         */
+        private const val DEFAULT_TIMEOUT_MS = 15_000
+        private const val GRACE_MS = 1_000
+
+        /**
+         * 独立线程池用于 web_search / fetch_url 的硬超时兜底。不用
+         * ApplicationManager.executeOnPooledThread 是因为后者没有 Future 返回 —
+         * 我们需要 Future.get(timeout) 来实现硬超时。
+         */
+        private val HARD_TIMEOUT_EXECUTOR: java.util.concurrent.ExecutorService =
+            java.util.concurrent.Executors.newCachedThreadPool { runnable ->
+                Thread(runnable, "InsertStrings-HardTimeout").apply { isDaemon = true }
+            }
     }
 
     /**
@@ -979,6 +1003,17 @@ internal class InsertStringsChatDriver(
             return
         }
 
+        // Priority 6.9: web_search —— 关键词搜索(走 DuckDuckGo HTML,无需 API key)。
+        // 紧跟 fetch_url 之后(同属网络只读,常见组合:web_search 找 URL → fetch_url 拉详情);
+        // 默认 15s 超时,DDoS 风险低(单接口限流宽松)。
+        val searchEntries = unprocessed.filter { it.action is AiAction.WebSearch }
+        if (searchEntries.isNotEmpty()) {
+            unprocessed.removeAll(searchEntries)
+            executeWebSearch(searchEntries, context, iteration)
+            addSkippedToolResults(unprocessed, "因已执行 web_search 而跳过")
+            return
+        }
+
         // Priority 7: 文件操作域(get_editor_file / read_file / read_files / edit_file /
         //   create_file / delete_file / move_file / search_in_files / find_references /
         //   list_files / file_info)—— 2026.x 新增 4 个写代码工具(file_info / read_files /
@@ -1067,6 +1102,8 @@ internal class InsertStringsChatDriver(
                 is AiAction.ReadDiagnostics -> "read_diagnostics"
                 // 新增 fetch_url(URL 拉取)
                 is AiAction.FetchUrl -> "fetch_url"
+                // 新增 web_search(关键词搜索)
+                is AiAction.WebSearch -> "web_search"
             }
             state.chatMessages.add(
                 ChatMessage(
@@ -1757,6 +1794,120 @@ internal class InsertStringsChatDriver(
                 pendingResults.add(toolCallId to resultText)
             }
             SwingUtilities.invokeLater {
+                pendingResults.forEach { (toolCallId, content) ->
+                    state.chatMessages.add(
+                        ChatMessage(role = "tool", content = content, toolCallId = toolCallId)
+                    )
+                }
+                continueToolLoopInBackground(context, iteration + 1)
+            }
+        }
+    }
+
+    /**
+     * 执行 [AiAction.WebSearch] —— 用关键词搜互联网,返回 title/url/snippet 列表。
+     *
+     * 流程(2026.x 改进:加 streaming 占位 + 硬超时):
+     * 1. **在 EDT 上**立即 add 一条 `role=tool, streaming=true, protocolVisible=false` 的
+     *    占位消息(content = "搜索中:<query>")。这让 UI 端的 ToolGroupBubble 立刻渲染
+     *    —— 头部出现「工具调用 · 1 条 + 输出中…」+ 呼吸圆点。**没有这一步,用户看不到
+     *    任何进度反馈,会以为 AI 卡死**。
+     * 2. 跑在 pooled thread,同步阻塞到 controller 返回(OkHttp 自己有 timeout)。
+     * 3. **再用 `Future.get(hardTimeoutMs + 1s)` 兜底**——即使 OkHttp 卡死 / 抛了死锁 /
+     *    其它非 IOException,Future 也会强制返回失败(避免 AI 等几分钟没反应)。
+     * 4. controller 返回后(成功 / 失败 / 超时):在 EDT 上 add final result 消息
+     *    (`role=tool, protocolVisible=true`),并关掉占位消息的 streaming 标志。UI 把
+     *    两条消息按 toolCallId 折成 ToolGroupBubble,头部变「完成 / 失败」,详情区显示
+     *    「搜索中:…」+ 最终结果 / 错误。
+     *
+     * 停止语义:每个 web_search 之间检查 [state.stopRequested];但请求已经在路上
+     * 了,本方法不主动中断 OkHttp Call(它有 cancel() 但不确保立即生效),仅在下一次
+     * loop 时不再发起新搜索。
+     */
+    private fun executeWebSearch(
+        entries: List<ActionWithToolCall>,
+        context: String,
+        iteration: Int
+    ) {
+        // 1) 预占所有 streaming 占位,UI 立刻看到「工具调用 · N 条 + 输出中…」呼吸圆点。
+        //    processAiReply 本身是从 EDT 调用的(`finishWithReply` 之后在 EDT 上跑),
+        //    所以这里**不能**用 `invokeAndWait`(会死锁:「Cannot call invokeAndWait
+        //    from the event dispatcher thread」)。如果是 EDT 上直接 add;否则后台
+        //    线程上 invokeAndWait 等到落地。
+        val placeholders: List<Pair<String, String>> = entries
+            .filter { it.toolCallId.isNotEmpty() }
+            .map { (action, toolCallId) ->
+                val query = (action as? AiAction.WebSearch)?.query?.trim().orEmpty()
+                toolCallId to "[工具执行结果] 类型:web_search 状态:搜索中\nquery:\"${query}\"\n正在等待搜索引擎响应…"
+            }
+        val addPlaceholders: () -> Unit = {
+            placeholders.forEach { (toolCallId, content) ->
+                state.chatMessages.add(
+                    ChatMessage(
+                        role = "tool",
+                        content = content,
+                        toolCallId = toolCallId,
+                        streaming = true,
+                        protocolVisible = false,   // 占位不进入 AI 协议历史,只作 UI 反馈
+                    )
+                )
+            }
+        }
+        if (SwingUtilities.isEventDispatchThread()) {
+            addPlaceholders()
+        } else {
+            SwingUtilities.invokeAndWait(addPlaceholders)
+        }
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val pendingResults = mutableListOf<Pair<String, String>>()
+            entries.forEach { (action, toolCallId) ->
+                if (toolCallId.isEmpty()) return@forEach
+                if (state.stopRequested) {
+                    pendingResults.add(
+                        toolCallId to "[工具执行结果] 类型:web_search 状态:已取消 信息:用户停止"
+                    )
+                    return@forEach
+                }
+                val a = action as? AiAction.WebSearch
+                if (a == null) {
+                    pendingResults.add(toolCallId to "[工具执行异常] web_search 失败:action 类型不匹配")
+                    return@forEach
+                }
+                val hardTimeoutMs = (a.timeoutMs ?: DEFAULT_TIMEOUT_MS) + GRACE_MS
+                val resultText = try {
+                    // 用 ExecutorService.submit + Future.get(hardTimeoutMs) 硬兜底:
+                    // OkHttp 自己也有 timeout,但极端场景(JDK socket 死锁 / DNS 永久 hang /
+                    // OkHttp 自身 bug)下也要保证 driver 端能强制返回失败,而不是把整个
+                    // tool loop 拖死。Future.get() 阻塞但被硬超时管住,超时抛 TimeoutException
+                    // — 在 catch 里转成"硬超时"失败信息,UI 立刻收到 ToolGroupBubble。
+                    val future = HARD_TIMEOUT_EXECUTOR.submit<String> { webSearchOps.webSearch(a) }
+                    try {
+                        future.get(hardTimeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
+                    } catch (te: java.util.concurrent.TimeoutException) {
+                        future.cancel(true)   // 中断 OkHttp 线程(可能无效,但至少能避免持续占资源)
+                        "[工具执行结果] 类型:web_search 状态:失败 信息:硬超时 ${hardTimeoutMs}ms(已超过 OkHttp 内置超时,可能在 SDK 死锁)"
+                    } catch (ee: java.util.concurrent.ExecutionException) {
+                        val cause = ee.cause ?: ee
+                        "[工具执行结果] 类型:web_search 状态:失败 信息:${cause.javaClass.simpleName}:${cause.message ?: ""}"
+                    }
+                } catch (e: Exception) {
+                    "[工具执行结果] 类型:web_search 状态:失败 信息:${e.javaClass.simpleName}:${e.message ?: ""}"
+                }
+                pendingResults.add(toolCallId to resultText)
+            }
+            // 2) EDT:关掉占位消息的 streaming 标志 + add final result 消息
+            //    两条消息按 toolCallId 折成一张 ToolGroupBubble,头部变「完成 / 失败」,
+            //    详情区显示「搜索中…」+ 最终结果 / 错误。
+            SwingUtilities.invokeLater {
+                placeholders.forEach { (toolCallId, _) ->
+                    val idx = state.chatMessages.indexOfLast {
+                        it.toolCallId == toolCallId && it.streaming
+                    }
+                    if (idx >= 0) {
+                        state.chatMessages[idx] = state.chatMessages[idx].copy(streaming = false)
+                    }
+                }
                 pendingResults.forEach { (toolCallId, content) ->
                     state.chatMessages.add(
                         ChatMessage(role = "tool", content = content, toolCallId = toolCallId)

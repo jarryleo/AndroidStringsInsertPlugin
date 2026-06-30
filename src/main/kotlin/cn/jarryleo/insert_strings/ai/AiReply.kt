@@ -663,6 +663,34 @@ sealed class AiAction {
     ) : AiAction()
 
     // endregion
+
+    // region ============== 网络搜索域(2026 新增) ==============
+    //
+    // web_search 让 AI 能用关键词搜到 title/url/snippet 列表(无需 API key,
+    // 默认走 DuckDuckGo HTML 接口)。配合 fetch_url 形成"搜索找 URL → 拉详情"小闭环。
+    // 平台层做基础防御:不写盘、不发起副作用;DDG 反爬轻,失败/超时返回明确状态,
+    // 由 AI 自己决定下一步(改 query / 换关键词 / 改用 fetch_url 直查具体 URL)。
+    //
+
+    /**
+     * 关键词搜索,返回前 N 条 title/url/snippet 列表。
+     *
+     * 平台层保证:
+     * - 走 DuckDuckGo HTML 接口(`https://html.duckduckgo.com/html/?q=...`),**无需 API key**。
+     * - 工具会重写 DDG 相对链接为绝对 URL,AI 拿到的是直链,可直接 `fetch_url` 进一步拉详情。
+     * - 失败 / 超时 / CAPTCHA 返回明确状态,AI 自己决定下一步。
+     *
+     * @param query     必填,搜索关键词
+     * @param limit     可选,默认 10,范围 1..30
+     * @param timeoutMs 可选,默认 15000,范围 1000..60000
+     */
+    data class WebSearch(
+        val query: String,
+        val limit: Int? = null,
+        val timeoutMs: Int? = null,
+    ) : AiAction()
+
+    // endregion
 }
 
 data class AiReply(
