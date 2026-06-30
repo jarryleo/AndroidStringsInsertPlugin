@@ -144,7 +144,7 @@ class ImagePreviewDialog(
      * 标题栏 + 图片区。
      */
     private fun buildContent(): JPanel {
-        val borderColor = UIManager.getColor("Component.borderColor") ?: Color(0x5A5A5A)
+        val borderColor = UIManager.getColor("Component.borderColor") ?: Color(0x8A8A8A)
         val titleBg = UIManager.getColor("Panel.background") ?: Color(0x2D2D2D)
         val titleFg = UIManager.getColor("Label.foreground") ?: Color(0xE0E0E0)
 
