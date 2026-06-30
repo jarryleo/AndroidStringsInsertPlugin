@@ -264,7 +264,7 @@ internal class InsertStringsDiagnosticsController(
     private fun HighlightSeverity.toSeverity(): Severity = when (this) {
         HighlightSeverity.ERROR -> Severity.ERROR
         HighlightSeverity.WARNING -> Severity.WARNING
-        HighlightSeverity.WEAK_WARNING, HighlightSeverity.INFO -> Severity.WEAK_WARNING
+        HighlightSeverity.WEAK_WARNING, HighlightSeverity.INFORMATION -> Severity.WEAK_WARNING
         else -> Severity.INFO
     }
 

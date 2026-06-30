@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.ClickableText
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -14,12 +13,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -158,21 +160,10 @@ private fun renderBlock(
 
         is Paragraph -> {
             val annotated = buildInlineAnnotated(node, palette, openUri)
-            if (annotated.getStringAnnotations("URL", 0, annotated.length).isNotEmpty()) {
-                ClickableText(
-                    text = annotated,
-                    onClick = { offset ->
-                        annotated.getStringAnnotations("URL", offset, offset)
-                            .firstOrNull()?.let { openUri(it.item) }
-                    },
-                    style = compactTextStyle(palette.text),
-                )
-            } else {
-                Text(
-                    text = annotated,
-                    style = compactTextStyle(palette.text),
-                )
-            }
+            Text(
+                text = annotated,
+                style = compactTextStyle(palette.text),
+            )
         }
 
         is FencedCodeBlock, is IndentedCodeBlock -> {
@@ -212,7 +203,7 @@ private fun renderBlock(
 
         is OrderedList -> {
             var item = node.firstChild
-            var index = node.startNumber
+            var index = node.markerStartNumber ?: 1
             while (item != null) {
                 if (item is ListItem) {
                     renderListItem(item, palette, "$index.", openUri)
@@ -446,7 +437,7 @@ private fun buildInlineAnnotated(
     return buildAnnotatedString {
         var child = node.firstChild
         while (child != null) {
-            renderInlineNode(child, palette)
+            renderInlineNode(child, palette, openUri)
             child = child.next
         }
     }
@@ -455,6 +446,7 @@ private fun buildInlineAnnotated(
 private fun AnnotatedString.Builder.renderInlineNode(
     node: Node,
     palette: MarkdownPalette,
+    openUri: (String) -> Unit,
 ) {
     when (node) {
         is Text -> append(node.literal.orEmpty())
@@ -493,7 +485,7 @@ private fun AnnotatedString.Builder.renderInlineNode(
             withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
                 var child = node.firstChild
                 while (child != null) {
-                    renderInlineNode(child, palette)
+                    renderInlineNode(child, palette, openUri)
                     child = child.next
                 }
             }
@@ -503,7 +495,7 @@ private fun AnnotatedString.Builder.renderInlineNode(
             withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
                 var child = node.firstChild
                 while (child != null) {
-                    renderInlineNode(child, palette)
+                    renderInlineNode(child, palette, openUri)
                     child = child.next
                 }
             }
@@ -511,26 +503,30 @@ private fun AnnotatedString.Builder.renderInlineNode(
 
         is Link -> {
             val url = node.destination.orEmpty()
-            pushStringAnnotation(tag = "URL", annotation = url)
-            withStyle(
-                SpanStyle(
-                    color = palette.accent,
-                    textDecoration = TextDecoration.Underline,
+            withLink(
+                LinkAnnotation.Url(
+                    url = url,
+                    styles = TextLinkStyles(
+                        style = SpanStyle(
+                            color = palette.accent,
+                            textDecoration = TextDecoration.Underline,
+                        ),
+                    ),
+                    linkInteractionListener = { openUri(url) },
                 )
             ) {
                 var child = node.firstChild
                 while (child != null) {
-                    renderInlineNode(child, palette)
+                    renderInlineNode(child, palette, openUri)
                     child = child.next
                 }
             }
-            pop()
         }
 
         else -> {
             var child = node.firstChild
             while (child != null) {
-                renderInlineNode(child, palette)
+                renderInlineNode(child, palette, openUri)
                 child = child.next
             }
         }

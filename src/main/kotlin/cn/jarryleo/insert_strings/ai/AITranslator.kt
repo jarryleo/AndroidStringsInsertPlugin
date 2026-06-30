@@ -2928,7 +2928,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             }
             val rowNumber = obj.get("rowNumber")?.let {
                 runCatching { it.asInt }.getOrNull()
-            }?.takeIf { it != null && it > 0 }
+            }?.takeIf { it > 0 }
             val rowNumbersArray = obj.getAsJsonArray("rowNumbers")
             val rowNumbers = rowNumbersArray?.mapNotNull { el ->
                 if (el == null || el.isJsonNull) return@mapNotNull null
@@ -3173,7 +3173,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val key = args.get("key")?.asString?.trim()?.takeIf { it.isNotEmpty() }
                 val rowNumber = args.get("rowNumber")?.let {
                     runCatching { it.asInt }.getOrNull()
-                }?.takeIf { it != null && it > 0 }
+                }?.takeIf { it > 0 }
                 val rowsArray = args.getAsJsonArray("rows")
                 val rows = rowsArray?.mapNotNull { rowElement ->
                     if (!rowElement.isJsonArray) return@mapNotNull null
@@ -3181,7 +3181,7 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 }
                 val columnIndex = args.get("columnIndex")?.let {
                     runCatching { it.asInt }.getOrNull()
-                }?.takeIf { it != null && it > 0 }
+                }?.takeIf { it > 0 }
                 val columnHeader = args.get("columnHeader")?.asString?.trim()?.takeIf { it.isNotEmpty() }
                 val columnValuesArray = args.getAsJsonArray("columnValues")
                 val columnValues = columnValuesArray?.mapNotNull { el ->
@@ -3193,10 +3193,10 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 }
                 val freezeRowCount = args.get("freezeRowCount")?.let {
                     runCatching { it.asInt }.getOrNull()
-                }?.takeIf { it != null && it >= 0 }
+                }?.takeIf { it >= 0 }
                 val freezeColumnCount = args.get("freezeColumnCount")?.let {
                     runCatching { it.asInt }.getOrNull()
-                }?.takeIf { it != null && it >= 0 }
+                }?.takeIf { it >= 0 }
                 val color = args.get("color")?.asString?.trim()?.takeIf { it.isNotEmpty() }
                 val textColor = args.get("textColor")?.asString?.trim()?.takeIf { it.isNotEmpty() }
                 val rowTextColors = args.getAsJsonArray("rowTextColors")?.let { parseRowColorMatrix(it) }

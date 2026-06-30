@@ -844,13 +844,13 @@ internal class InsertStringsSheetsOpsController(
      */
     private fun confirmColumnOperation(title: String, message: String): Boolean {
         if (SwingUtilities.isEventDispatchThread()) {
-            return Messages.showOkCancelDialog(message, title, Messages.getWarningIcon()) == Messages.OK
+            return Messages.showYesNoCancelDialog(message, title, Messages.getWarningIcon()) == Messages.YES
         }
         val approved = booleanArrayOf(false)
         try {
             SwingUtilities.invokeAndWait {
                 approved[0] =
-                    Messages.showOkCancelDialog(message, title, Messages.getWarningIcon()) == Messages.OK
+                    Messages.showYesNoCancelDialog(message, title, Messages.getWarningIcon()) == Messages.YES
             }
         } catch (e: Exception) {
             approved[0] = false

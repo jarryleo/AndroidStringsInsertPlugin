@@ -61,6 +61,7 @@ enum class TodoRecurrence {
      * WEEKDAYS / WEEKLY 不返回显示名(若被读到说明数据迁移未完成,UI 应走 CUSTOM 分支)。
      */
     val displayName: String
+        @Suppress("DEPRECATION")
         get() = when (this) {
             NONE -> "一次性"
             DAILY -> "每日"
