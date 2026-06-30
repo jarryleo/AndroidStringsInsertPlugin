@@ -52,13 +52,21 @@ internal class InsertStringsShellOpsController(
         val workDir = resolveWorkDir(basePath, action.cwd)
             ?: return resultOf("失败", "工作目录不存在或越界: ${action.cwd ?: "<项目根>"}")
 
-        // 1) 构造命令(Windows:cmd.exe /c "command arg1 arg2";POSIX:[command, arg1, arg2])
+        // 1) 构造命令
+        //    Windows:把 command + args 当作 cmd.exe 的独立参数传入,**不**自己拼字符串。
+        //      GeneralCommandLine.withParameters 会按 Windows CommandLineToArgvW 规则
+        //      给每个含空格/引号的参数加双引号 — 比手写 quoteForCmd 更可靠。
+        //      `cmd.exe /c <prog> <arg1> <arg2>` 让 cmd 找到 git 并把后续 args 原样转发,
+        //      内部命令不经过 cmd 解析(只有 command 名解析一次,这一步是必要的,
+        //      因为 .bat / .cmd / 系统内置命令要靠 cmd 解析)。
+        //      上一版用 joinToString(quoteForCmd(...)) 自己拼出
+        //      `"cmd.exe" /c ""git" "log" "..."` 在 cmd 的引号配对规则下把 `"git"`
+        //      误识别为字面 token,导致 Windows 报"不是内部或外部命令"。
+        //    POSIX:`[command, arg1, arg2]` 直传 fork+exec,不经 shell。
         val cmd = if (SystemInfo.isWindows) {
-            val joined = buildString {
-                append(quoteForCmd(action.command))
-                action.args.forEach { append(' ').append(quoteForCmd(it)) }
-            }
-            GeneralCommandLine("cmd.exe", "/c", joined).withWorkDirectory(workDir)
+            val all = listOf(action.command) + action.args
+            GeneralCommandLine("cmd.exe", "/c", *all.toTypedArray())
+                .withWorkDirectory(workDir)
         } else {
             GeneralCommandLine(action.command, *action.args.toTypedArray())
                 .withWorkDirectory(workDir)
@@ -72,6 +80,14 @@ internal class InsertStringsShellOpsController(
 
         // 2) 预占一条 streaming tool 消息(在 EDT 上 add;driver 端的 ToolGroupBubble
         //    会把同一 toolCallId 的所有 role=tool 消息折成一个可折叠卡片)
+        //
+        //    关键:`protocolVisible = false` — 这条中间状态消息**只用于 UI 实时滚动展示**,
+        //    **不**发到 OpenAI/Anthropic 协议。DeepSeek / OpenAI 兼容要求每个 tool_call
+        //    对应**恰好 1 条** `role=tool` 消息作为 tool_result(有些 provider 还要求
+        //    1:1 严格配对);把不完整的 streaming 输出也发出去会被 DeepSeek 直接 400
+        //    "Messages with role 'tool' must be a response to a preceding message with
+        //    'tool_calls'"。driver 在 controller 返回后追加的 final result 消息才是
+        //    真正的 tool_result(`protocolVisible = true`),它会进下一轮 AI 的历史。
         val header = buildString {
             append("▸ ${action.command} ${action.args.joinToString(" ")}\n")
             append("  (cwd: ${workDir.absolutePath})\n")
@@ -84,6 +100,7 @@ internal class InsertStringsShellOpsController(
                     content = header,
                     toolCallId = toolCallId,
                     streaming = true,
+                    protocolVisible = false,
                 )
             )
         }
@@ -147,15 +164,6 @@ internal class InsertStringsShellOpsController(
         if (!target.exists() || !target.isDirectory) return null
         if (!target.absolutePath.startsWith(base.absolutePath)) return null
         return target
-    }
-
-    /**
-     * 把单个参数按 cmd.exe 规则加双引号包住:反斜杠 / 双引号需要做转义。
-     * POSIX 分支不走 shell,所以 args 数组原样透传,这里不调。
-     */
-    private fun quoteForCmd(arg: String): String {
-        val escaped = arg.replace("\\", "\\\\").replace("\"", "\\\"")
-        return "\"$escaped\""
     }
 
     /**
