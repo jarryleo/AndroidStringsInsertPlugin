@@ -104,13 +104,23 @@ class FileOpsService(private val project: Project) {
 
     /**
      * 一次编辑的结果。
-     * @param occurrences 命中次数(1 表示成功替换;0 表示 oldText/regex 未找到;>1 表示多匹配且未指定 replace_all,拒绝替换)
-     * @param replaced 实际替换次数
+     * @param applied    是否真的写入了磁盘(false 表示定位失败/越界/参数非法,文件未变)
+     * @param mode       实际执行的模式(insert_before / insert_after / replace_range)
+     * @param path       文件路径
+     * @param line       命中的行号(1-based;有 1-based↔0-based 转换时回显转换后的 1-based 行)
+     * @param column     命中的列号(1-based,替换模式时为结束列;插入模式时为锚点列)
+     * @param oldText    替换模式下被替换掉的原文(便于 AI 复查);插入模式为空
+     * @param newText    实际写入的文本(可能含自动换行归一化,等价于 AI 想插入的内容 + 一个 `\n`)
      * @param newContent 替换后文件全文(便于 AI 复查;文件过大时为 null)
      */
     data class EditResult(
-        val occurrences: Int,
-        val replaced: Int,
+        val applied: Boolean,
+        val mode: String,
+        val path: String,
+        val line: Int,
+        val column: Int,
+        val oldText: String,
+        val newText: String,
         val newContent: String?,
     )
 
@@ -293,30 +303,56 @@ class FileOpsService(private val project: Project) {
     }
 
     // ============================================================
-    // 3) 文件编辑:editFile(支持 unique 模式 + regex 模式)
+    // 3) 文件编辑:editFile(行/列定位 + 模式)
     // ============================================================
 
     /**
-     * 精准编辑文件(可正则 / 可全量替换)。
+     * 行/列定位的文件编辑(2026.x 重写,替代旧的 oldText/newText 字符串匹配)。
      *
-     * @param path        路径(相对项目根或绝对)
-     * @param oldText     唯一匹配文本(useRegex=false 时使用)
-     * @param newText     替换为的新文本
-     * @param useRegex    true 时把 oldText 视为正则
-     * @param replaceAll  true 时替换所有匹配;false 时要求 oldText(正则)只匹配 1 处,匹配 0/>1 处则失败
-     * @return 失败信息写在 [EditResult.newContent] 为 null 时返回的字符串中(异常路径)
+     * 位置语义:
+     * - `line`(必填,1-based):目标行号。`read_file` 返回的内容已经带 `1: ` 形式的行号,
+     *   AI 可以直接把那个数字传进来。1-based → 0-based 在函数内做转换。
+     * - `column`(可选,1-based,默认 1):目标行内的列号,作为「插入锚点」/「替换起止」基准。
+     *   1 表示行首;超过该行长度的值会被夹到「行尾列」(行末换行前)。
+     *
+     * 模式(互斥,必填其一):
+     * - **insert_before**:`text` 插入到 (line, column) 之前。光标不替换任何原文。
+     *   - `text` 以 `\n` 开头时,`text` 前的换行会被去掉,避免在普通行首插入多产生一个空行。
+     *   - 多行 `text` 的每一行(除首行外)会自动按「原行 column-1 的前导空白」缩进,
+     *     让插入后的视觉缩进与原代码一致。
+     * - **insert_after**:`text` 插入到 (line, column) 之后。光标不替换任何原文。
+     *   - `text` 以 `\n` 结尾时,尾随换行会被去掉,避免多产生一个空行。
+     *   - 多行 `text` 的每一行(除首行外)同样按 column-1 的前导空白缩进。
+     * - **replace_range**:`endLine` / `endColumn` 划定的范围被 `text` 替换。
+     *   - 起止使用 1-based 闭区间(包含)。单点替换:`endLine=line, endColumn=column+1`。
+     *   - 整行替换(`endColumn=1` 且覆盖到下一行行首)等常见 case 都直接支持。
+     *
+     * 边界 / 失败(抛 [IllegalArgumentException],controller 转成失败 tool_result):
+     * - 路径越界 / 文件不存在 / 不是 regular file
+     * - 文件 > [MAX_EDIT_BYTES]
+     * - `line < 1` 或 `line > 总行数`
+     * - `column < 1`(夹到 1)
+     * - replace_range 时 `endLine < line`,或 (endLine==line && endColumn <= column)
+     *
+     * @param path      路径(相对项目根或项目内绝对)
+     * @param line      1-based 行号
+     * @param column    1-based 列号,默认 1
+     * @param mode      insert_before / insert_after / replace_range
+     * @param text      要插入或替换的文本(支持多行)
+     * @param endLine   replace_range 专用,1-based 结束行(包含);其它模式忽略
+     * @param endColumn replace_range 专用,1-based 结束列(包含)
      */
     fun editFile(
         path: String,
-        oldText: String,
-        newText: String,
-        useRegex: Boolean,
-        replaceAll: Boolean,
+        line: Int,
+        column: Int = 1,
+        mode: String,
+        text: String,
+        endLine: Int = -1,
+        endColumn: Int = -1,
     ): EditResult {
         val resolved = resolveProjectPath(path)
-            ?: return EditResult(0, 0, null).also {
-                error("[拒绝] 路径解析失败:'$path' 不在项目根目录 ${project.basePath} 内。")
-            }
+            ?: error("[拒绝] 路径解析失败:'$path' 不在项目根目录 ${project.basePath} 内。")
         if (!resolved.exists() || !resolved.isRegularFile()) {
             error("[失败] 路径不存在或不是文件:'$path'")
         }
@@ -324,61 +360,106 @@ class FileOpsService(private val project: Project) {
         if (size > MAX_EDIT_BYTES) {
             error("[失败] 文件过大(${size} 字节,>${MAX_EDIT_BYTES} 字节),请拆分为多次小范围编辑。")
         }
+
+        // 1-based → 0-based;clamp column 到 [1, 行长度+1]
+        val line0 = (line - 1).coerceAtLeast(0)
         val original = Files.readString(resolved, StandardCharsets.UTF_8)
-
-        // 校验 oldText / regex
-        if (oldText.isEmpty()) {
-            error("[失败] oldText / pattern 不能为空字符串。")
+        val lines = original.split('\n')
+        val totalLines = lines.size
+        if (line < 1 || line > totalLines) {
+            error("[失败] line=$line 越界(1..$totalLines)。")
         }
+        val lineText = lines[line0]
+        // column 上限 = 该行字符数 + 1(允许在行末换行符前插入)。+1 之后仍包含行末列。
+        val colClamped = column.coerceIn(1, lineText.length + 1)
 
-        if (!useRegex) {
-            val occurrences = countOccurrences(original, oldText)
-            if (occurrences == 0) {
-                return EditResult(0, 0, null).also {
-                    error("[失败] 未在文件中找到 oldText。请用 read_file 重新确认内容(注意空格/换行/转义)。")
+        // 把 (line0, col0-based) 转换成字符 offset
+        val lineStartOffset = lines.subList(0, line0).sumOf { it.length + 1 } // +1 for '\n'
+        val anchorOffset = lineStartOffset + (colClamped - 1)
+
+        val normalizedMode = mode.lowercase()
+        val finalText: String
+        val targetStart: Int
+        val targetEnd: Int
+        var oldTextSnapshot = ""
+
+        when (normalizedMode) {
+            "insert_before" -> {
+                finalText = normalizeInsertText(text, indentBase = lineText, anchorColumn = colClamped, side = InsertSide.BEFORE)
+                targetStart = anchorOffset
+                targetEnd = anchorOffset
+            }
+            "insert_after" -> {
+                finalText = normalizeInsertText(text, indentBase = lineText, anchorColumn = colClamped, side = InsertSide.AFTER)
+                targetStart = anchorOffset
+                targetEnd = anchorOffset
+            }
+            "replace_range" -> {
+                val eLine0 = (endLine - 1).coerceAtLeast(0)
+                if (endLine < 1 || eLine0 >= totalLines) {
+                    error("[失败] endLine=$endLine 越界(1..$totalLines)。")
                 }
-            }
-            if (occurrences > 1 && !replaceAll) {
-                return EditResult(occurrences, 0, null).also {
-                    error("[失败] oldText 在文件中出现 $occurrences 次(非唯一),请用 read_file 确认上下文后把 oldText 扩展到唯一,或把 replaceAll 设为 true。")
+                val endLineText = lines[eLine0]
+                val eColClamped = endColumn.coerceIn(1, endLineText.length + 1)
+                val endLineStartOffset = lines.subList(0, eLine0).sumOf { it.length + 1 }
+                val endOffset = endLineStartOffset + (eColClamped - 1)
+                if (endOffset < anchorOffset) {
+                    error("[失败] 结束位置(endLine=$endLine, endColumn=$endColumn)在起始位置(line=$line, column=$column)之前。")
                 }
+                oldTextSnapshot = original.substring(anchorOffset, endOffset)
+                finalText = text
+                targetStart = anchorOffset
+                targetEnd = endOffset
             }
-            val replaced: Int
-            val updated: String = if (replaceAll) {
-                replaced = occurrences
-                original.replace(oldText, newText)
-            } else {
-                replaced = 1
-                original.replaceFirst(oldText, newText)
-            }
-            writeAtomic(resolved, updated)
-            return EditResult(occurrences, replaced, updated)
+            else -> error("[失败] mode='$mode' 非法,只支持 insert_before / insert_after / replace_range。")
         }
 
-        // regex 模式
-        val regex = try {
-            Regex(oldText, if (replaceAll) RegexOption.MULTILINE else RegexOption.MULTILINE)
-        } catch (e: PatternSyntaxException) {
-            error("[失败] 正则语法错误:${e.description ?: e.message}")
-        }
-        val matches = regex.findAll(original).toList()
-        if (matches.isEmpty()) {
-            return EditResult(0, 0, null).also {
-                error("[失败] 正则未在文件中匹配到任何位置。")
-            }
-        }
-        if (matches.size > 1 && !replaceAll) {
-            return EditResult(matches.size, 0, null).also {
-                error("[失败] 正则匹配 ${matches.size} 处(非唯一),请收紧 pattern 或把 replaceAll 设为 true。")
-            }
-        }
-        val updated = if (replaceAll) {
-            regex.replace(original, newText)
-        } else {
-            original.replaceRange(matches[0].range, newText)
-        }
+        val updated = original.replaceRange(targetStart, targetEnd, finalText)
         writeAtomic(resolved, updated)
-        return EditResult(matches.size, matches.size, updated)
+
+        return EditResult(
+            applied = true,
+            mode = normalizedMode,
+            path = path,
+            line = line,
+            column = colClamped,
+            oldText = oldTextSnapshot,
+            newText = finalText,
+            newContent = updated,
+        )
+    }
+
+    /** 内部枚举:用于 [editFile] 的缩进归一化分支。 */
+    private enum class InsertSide { BEFORE, AFTER }
+
+    /**
+     * 对插入文本做边界归一化(去掉多余首/尾换行) + 多行缩进(让插入后视觉与原行缩进一致)。
+     *
+     * 规则:
+     * 1. before 模式:`text` 以 `\n` 开头时去掉前导换行(避免空行);
+     *    after 模式:`text` 以 `\n` 结尾时去掉尾随换行(避免空行)。
+     * 2. 多行插入(以 `\n` 切分后 >= 2 段)时,从第 2 行起每行追加
+     *    `indentBase.substring(0, (anchorColumn-1).coerceAtMost(indentBase.length))`
+     *    的前导空白。
+     * 3. 不修改首行;首行紧贴锚点列(根据 side 决定是列前/列后),让用户保留对缩进的完全控制。
+     */
+    private fun normalizeInsertText(
+        text: String,
+        indentBase: String,
+        anchorColumn: Int,
+        side: InsertSide,
+    ): String {
+        var t = text
+        if (side == InsertSide.BEFORE && t.startsWith("\n")) t = t.removePrefix("\n")
+        if (side == InsertSide.AFTER && t.endsWith("\n")) t = t.removeSuffix("\n")
+        if (!t.contains('\n')) return t
+        val indentLen = (anchorColumn - 1).coerceAtMost(indentBase.length)
+        val indent = indentBase.substring(0, indentLen)
+        if (indent.isEmpty()) return t
+        // 仅对「不是首行」的行加 indent;空行保留空(避免给空行也加空白)
+        return t.split('\n').mapIndexed { idx, segment ->
+            if (idx == 0) segment else if (segment.isEmpty()) segment else indent + segment
+        }.joinToString("\n")
     }
 
     /**
@@ -466,19 +547,6 @@ class FileOpsService(private val project: Project) {
                 VirtualFileManager.getInstance().findFileByUrl(url)
             }
         }.getOrNull()
-    }
-
-    private fun countOccurrences(haystack: String, needle: String): Int {
-        if (needle.isEmpty()) return 0
-        var idx = 0
-        var count = 0
-        while (true) {
-            val found = haystack.indexOf(needle, idx)
-            if (found < 0) break
-            count++
-            idx = found + needle.length
-        }
-        return count
     }
 
     // ============================================================

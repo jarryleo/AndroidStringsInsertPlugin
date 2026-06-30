@@ -88,21 +88,26 @@ internal class InsertStringsFileOpsController(
         val result = try {
             service.editFile(
                 path = action.path,
-                oldText = action.oldText,
-                newText = action.newText,
-                useRegex = action.useRegex,
-                replaceAll = action.replaceAll,
+                line = action.line,
+                column = action.column,
+                mode = action.mode,
+                text = action.text,
+                endLine = action.endLine,
+                endColumn = action.endColumn,
             )
         } catch (e: Exception) {
-            return "[工具执行结果] 类型:edit_file 状态:失败 path:${action.path} 信息:${e.message ?: "unknown"}"
+            return "[工具执行结果] 类型:edit_file 状态:失败 path:${action.path} " +
+                "line:${action.line} col:${action.column} mode:${action.mode} " +
+                "信息:${e.message ?: "unknown"}"
         }
         // 兜底通知 IDE(主流程已在 FileOpsService.writeAtomic 内部完成 VFS + Document +
         // FileEditor + PSI + Daemon 五层重读,这里 idempotent 再补一次)
         SwingUtilities.invokeLater { refreshOpenFile(action.path) }
-        val modeDesc = if (action.useRegex) {
-            if (action.replaceAll) "regex 全文" else "regex(唯一)"
+        val rangeDesc = if (result.mode == "replace_range" && result.oldText.isNotEmpty()) {
+            " 范围:line ${action.line}:${action.column} .. line ${action.endLine}:${action.endColumn} " +
+                "原文:${result.oldText.length}字符"
         } else {
-            if (action.replaceAll) "文本全文" else "文本(唯一)"
+            " 锚点:line ${result.line}:${result.column}"
         }
         val preview = result.newContent?.let { newContent ->
             if (newContent.length > 800) {
@@ -112,16 +117,15 @@ internal class InsertStringsFileOpsController(
             }
         } ?: "(过大未返回)"
         return buildString {
-            append("[工具执行结果] 类型:edit_file 状态:成功 模式:$modeDesc ")
-            append("path:${action.path} 命中:${result.occurrences} 实际替换:${result.replaced}")
+            append("[工具执行结果] 类型:edit_file 状态:成功 模式:${result.mode}")
+            append(rangeDesc)
+            append(" path:${action.path} 写入:${result.newText.length}字符")
             appendLine()
-            if (result.replaced > 0) {
+            if (result.applied) {
                 appendLine("--- 替换后内容(预览) ---")
                 append(preview)
                 if (!preview.endsWith("\n")) append("\n")
                 append("--- end ---")
-            } else {
-                appendLine("未发生任何替换(occurrences=0)。")
             }
             // 2026.x:告诉 AI 缓存已重读,避免它再调 read_file "验证"(浪费 round-trip)
             appendLine()

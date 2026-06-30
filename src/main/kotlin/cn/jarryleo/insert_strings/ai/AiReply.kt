@@ -424,20 +424,33 @@ sealed class AiAction {
     ) : AiAction()
 
     /**
-     * 精准编辑文件(同时支持 unique 模式 + regex 模式)。
+     * 行/列定位的文件编辑(2026.x 重写,替代旧的 oldText/newText 字符串匹配)。
      *
-     * @param path        文件路径(相对项目根或项目内绝对路径)
-     * @param oldText     唯一匹配文本(useRegex=false)或正则 pattern
-     * @param newText     替换为的新文本
-     * @param useRegex    true 时把 oldText 视为正则
-     * @param replaceAll  true 时替换所有匹配;false 时要求唯一匹配(0/>1 处会失败)
+     * 位置语义与 [cn.jarryleo.insert_strings.file.FileOpsService.editFile] 完全一致:
+     * - [line] / [column] 1-based;`read_file` 返回的 `N: ` 前缀就是可以直接传的 [line] 值
+     * - [mode] 三选一:
+     *   - **insert_before**:`text` 插入到 (line, column) 之前
+     *   - **insert_after**:`text` 插入到 (line, column) 之后
+     *   - **replace_range**:用 [endLine] / [endColumn] 圈定 1-based 闭区间,用 [text] 替换
+     * - 多行 `text` 自动按原行 column-1 的前导空白缩进(除首行)
+     * - `text` 以 `\n` 开头/结尾时(before/after 模式)会被自动剥掉,避免产生空行
+     *
+     * @param path      文件路径(相对项目根或项目内绝对路径)
+     * @param line      1-based 行号
+     * @param column    1-based 列号,默认 1(行首)
+     * @param mode      insert_before / insert_after / replace_range
+     * @param text      要插入或替换的文本(支持多行)
+     * @param endLine   replace_range 专用,1-based 结束行(包含);其它模式忽略
+     * @param endColumn replace_range 专用,1-based 结束列(包含);其它模式忽略
      */
     data class EditFile(
         val path: String,
-        val oldText: String,
-        val newText: String,
-        val useRegex: Boolean,
-        val replaceAll: Boolean
+        val line: Int,
+        val column: Int,
+        val mode: String,
+        val text: String,
+        val endLine: Int,
+        val endColumn: Int
     ) : AiAction()
 
     /**

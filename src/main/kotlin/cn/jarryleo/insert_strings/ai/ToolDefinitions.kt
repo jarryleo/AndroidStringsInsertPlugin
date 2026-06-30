@@ -192,7 +192,8 @@ object ToolDefinitions {
             " → load_tool_doc(\"read_files\")。"
 
     private const val DESC_EDIT_FILE =
-        "精准修改项目内文件。useRegex=false 时 oldText 全文精确唯一匹配;true 时按 Kotlin 正则。" +
+        "按行/列定位修改项目内文件:insert_before / insert_after(光标处插入)或" +
+            "replace_range(范围替换)。行/列 1-based,read_file 返回的 N: 前的数字即可直传。" +
             "> 3MB 拒绝。原子写。IDE 缓存已自动重读。" +
             " → load_tool_doc(\"edit_file\")。"
 
@@ -1088,6 +1089,11 @@ object ToolDefinitions {
     }
 
     private fun openAiEditFileParams(): JsonObject {
+        val modeEnum = JsonArray().apply {
+            add("insert_before")
+            add("insert_after")
+            add("replace_range")
+        }
         return obj {
             addProperty("type", "object")
             add("properties", obj {
@@ -1095,27 +1101,37 @@ object ToolDefinitions {
                     addProperty("type", "string")
                     addProperty("description", "必填,文件路径(相对项目根或项目内绝对路径)。")
                 })
-                add("oldText", obj {
+                add("line", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "必填,1-based 行号;read_file 返回的 N: 前的 N 即可直传。")
+                })
+                add("column", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "可选,1-based 列号(锚点),默认 1(行首)。insert_before/after 用作插入基准列;replace_range 用作范围起点列。")
+                })
+                add("mode", obj {
                     addProperty("type", "string")
-                    addProperty("description", "必填,匹配文本(useRegex=false)或正则 pattern(useRegex=true)。")
+                    add("enum", modeEnum)
+                    addProperty("description", "必填,三选一:insert_before / insert_after / replace_range。")
                 })
-                add("newText", obj {
+                add("text", obj {
                     addProperty("type", "string")
-                    addProperty("description", "必填,替换为的新文本。")
+                    addProperty("description", "必填,要插入或替换的文本(支持多行,自动按原行 column-1 的前导空白给后续行加缩进)。空串=在锚点处插入空内容(等价 no-op)。")
                 })
-                add("useRegex", obj {
-                    addProperty("type", "boolean")
-                    addProperty("description", "可选,true 时把 oldText 视为 Kotlin 正则,默认 false(纯文本匹配)。")
+                add("endLine", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "replace_range 专用,1-based 结束行(包含);其它模式忽略。")
                 })
-                add("replaceAll", obj {
-                    addProperty("type", "boolean")
-                    addProperty("description", "可选,true 时替换所有匹配;false 时要求唯一匹配(0/>1 处会失败,让 AI 调整),默认 false。")
+                add("endColumn", obj {
+                    addProperty("type", "integer")
+                    addProperty("description", "replace_range 专用,1-based 结束列(包含);其它模式忽略。")
                 })
             })
             add("required", JsonArray().apply {
                 add("path")
-                add("oldText")
-                add("newText")
+                add("line")
+                add("mode")
+                add("text")
             })
         }
     }
