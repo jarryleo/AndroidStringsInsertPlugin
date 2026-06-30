@@ -623,6 +623,46 @@ sealed class AiAction {
     ) : AiAction()
 
     // endregion
+
+    // region ============== URL 拉取域(2026 新增) ==============
+    //
+    // fetch_url 让 AI 能 HTTP GET 任意 URL(只读,GET only),返回响应体 + 状态码
+    // + Content-Type。平台层只做协议校验(只允许 http/https)+ 响应体大小截断,
+    // **不做** host 黑名单 / SSRF 防御(用户选择,任何 host 都能访问,含 localhost / 内网)。
+    // 配合 read_diagnostics / run_shell,形成"读本地错 → 抓线上文档 → 改"的小闭环。
+    //
+
+    /**
+     * HTTP GET 一个 URL,返回响应体。
+     *
+     * 平台层保证:
+     * - 协议只允许 `http://` / `https://`,其它(`file://` / `ftp://` / `data:`)会被拒绝。
+     * - **不**做 host 黑名单 / SSRF 防御 — 任何 host 都能访问,含 localhost / 内网 / 公网。
+     *   涉及敏感操作(读内网服务、抓私有数据)由 AI 自己在调前 `ask_user` 描述意图。
+     * - 响应体按 [maxBodyChars] 截断(防 OOM + token 爆)。
+     *
+     * @param url          必填,http/https URL
+     * @param headers      可选,自定义请求头(键值对都是字符串)。能覆盖 User-Agent。
+     * @param timeoutMs    可选,默认 10000,范围 1000..120000(connect + read 总超时)
+     * @param maxBodyChars 可选,默认 100000(100KB),范围 1..2_000_000(2MB)
+     * @param responseType 可选,默认 text / json(json 时尝试 pretty-print,失败回退 raw)
+     * @param stripHtml    可选,默认 false。text/html|xhtml 时移除 script/style/noscript 块、
+     *                     HTML 注释、on* 事件属性、`<img>`(若 stripImages=true)、所有标签,
+     *                     只留可见文本(token 友好)。其它 Content-Type 此参数被忽略。
+     * @param stripImages  可选,默认 false。stripHtml=true 时生效,把 `<img>` 标签也移除
+     *                     (默认保留 alt 文字作为占位)。
+     */
+    data class FetchUrl(
+        val url: String,
+        val headers: Map<String, String> = emptyMap(),
+        val timeoutMs: Int? = null,
+        val maxBodyChars: Int? = null,
+        val responseType: String? = null,
+        val stripHtml: Boolean? = null,
+        val stripImages: Boolean? = null,
+    ) : AiAction()
+
+    // endregion
 }
 
 data class AiReply(

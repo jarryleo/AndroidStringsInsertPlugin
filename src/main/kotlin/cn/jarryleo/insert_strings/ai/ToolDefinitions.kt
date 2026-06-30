@@ -78,6 +78,7 @@ object ToolDefinitions {
         TOOL_REPLACE_SELECTION,
         TOOL_RUN_SHELL,
         TOOL_READ_DIAGNOSTICS,
+        TOOL_FETCH_URL,
         TOOL_TASK_COMPLETE,
     )
 
@@ -110,6 +111,7 @@ object ToolDefinitions {
     const val TOOL_LOAD_TOOL_DOC = "load_tool_doc"
     const val TOOL_RUN_SHELL = "run_shell"
     const val TOOL_READ_DIAGNOSTICS = "read_diagnostics"
+    const val TOOL_FETCH_URL = "fetch_url"
     const val TOOL_TASK_COMPLETE = "task_complete"
 
     // region 工具描述文案(主 prompt 引用,这里集中维护)
@@ -250,6 +252,12 @@ object ToolDefinitions {
             "写完文件 daemon 异步刷(~500ms),改后立刻读可能拿到旧结果。" +
             " → load_tool_doc(\"read_diagnostics\")。"
 
+    private const val DESC_FETCH_URL =
+        "HTTP GET 一个 URL,返回响应体(只读,GET only)。" +
+            "**只允许 http/https**(file/ftp/data 等被拒);**不做 host 黑名单** — 任何 host 都能访问(含 localhost/内网)," +
+            "敏感操作前用 ask_user。stripHtml=true 可压缩 HTML 页面只留可见文本(token 友好)。" +
+            " → load_tool_doc(\"fetch_url\")。"
+
     private const val DESC_LOAD_TOOL_DOC =
         "按需加载工具详细文档(枚举值/参数约束/示例)。" +
             "连续 load_tool_doc 有次数上限,一次最多 1-2 个,拿到后立即调实际工具。"
@@ -334,6 +342,7 @@ object ToolDefinitions {
             add(openAiTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
             add(openAiTool(TOOL_RUN_SHELL, DESC_RUN_SHELL, openAiRunShellParams()))
             add(openAiTool(TOOL_READ_DIAGNOSTICS, DESC_READ_DIAGNOSTICS, openAiReadDiagnosticsParams()))
+            add(openAiTool(TOOL_FETCH_URL, DESC_FETCH_URL, openAiFetchUrlParams()))
             add(openAiTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
         }
     }
@@ -382,6 +391,7 @@ object ToolDefinitions {
             add(anthropicTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
             add(anthropicTool(TOOL_RUN_SHELL, DESC_RUN_SHELL, openAiRunShellParams()))
             add(anthropicTool(TOOL_READ_DIAGNOSTICS, DESC_READ_DIAGNOSTICS, openAiReadDiagnosticsParams()))
+            add(anthropicTool(TOOL_FETCH_URL, DESC_FETCH_URL, openAiFetchUrlParams()))
             add(anthropicTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
         }
     }
@@ -1301,6 +1311,75 @@ object ToolDefinitions {
                     )
                 })
             })
+        }
+    }
+
+    private fun openAiFetchUrlParams(): JsonObject {
+        val responseTypeEnum = JsonArray().apply {
+            add("text")
+            add("json")
+        }
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("url", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "必填,http/https URL(其它协议被拒)。" +
+                            "**不做** host 黑名单 — 任何 host 都能访问(含 localhost/内网)," +
+                            "敏感操作前用 ask_user 描述意图。"
+                    )
+                })
+                add("headers", obj {
+                    addProperty("type", "object")
+                    addProperty(
+                        "description",
+                        "可选,自定义请求头,键值对都是字符串。能覆盖 User-Agent。"
+                    )
+                })
+                add("timeoutMs", obj {
+                    addProperty("type", "integer")
+                    addProperty(
+                        "description",
+                        "可选,超时毫秒,默认 10000,范围 1000..120000(connect + read 总超时)。"
+                    )
+                })
+                add("maxBodyChars", obj {
+                    addProperty("type", "integer")
+                    addProperty(
+                        "description",
+                        "可选,响应体最大字符数,默认 100000(100KB),范围 1..2_000_000(2MB)。" +
+                            "超过截断并标注原长度。"
+                    )
+                })
+                add("responseType", obj {
+                    addProperty("type", "string")
+                    add("enum", responseTypeEnum)
+                    addProperty(
+                        "description",
+                        "可选,默认 text。json 时尝试 pretty-print,失败回退 raw text。"
+                    )
+                })
+                add("stripHtml", obj {
+                    addProperty("type", "boolean")
+                    addProperty(
+                        "description",
+                        "可选,默认 false。text/html|xhtml 时移除 script/style/noscript 块、" +
+                            "HTML 注释、on* 事件属性、所有标签,只留可见文本(token 友好)。" +
+                            "其它 Content-Type 此参数被忽略。"
+                    )
+                })
+                add("stripImages", obj {
+                    addProperty("type", "boolean")
+                    addProperty(
+                        "description",
+                        "可选,默认 false。stripHtml=true 时把 `<img>` 标签也移除" +
+                            "(默认保留 alt 文字作为占位)。"
+                    )
+                })
+            })
+            add("required", JsonArray().apply { add("url") })
         }
     }
 

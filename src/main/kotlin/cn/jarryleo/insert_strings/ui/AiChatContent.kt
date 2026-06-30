@@ -1638,9 +1638,32 @@ private fun targetFromArgs(toolName: String, args: JsonObject?): String? {
             if (sev.isNullOrBlank()) "LSP: all severities" else "LSP: $sev+"
         }
 
+        "fetch_url" -> {
+            val url = args.getString("url") ?: "?"
+            // 显示 fetch: <scheme>://<host>[:<port>](不含 path)— 路径太长容易把卡片撑爆,
+            // 用户/AI 点开 ToolGroupBubble 详情后能看到完整 URL。
+            // java.net.URI 没有 getDefaultPort() 方法(它在 java.net.URL 才有),所以这里
+            // 简化:port > 0 就显式展示。80/443 等常见端口会被显示出来 — 可读性 > 简洁性。
+            val parsed = runCatching { java.net.URI(url) }.getOrNull()
+            if (parsed == null) {
+                "fetch: $url"
+            } else {
+                val host = parsed.host
+                val port = parsed.port
+                val scheme = parsed.scheme?.lowercase()
+                when {
+                    host.isNullOrBlank() -> "fetch: $url"
+                    port > 0 && scheme != null -> "fetch: $scheme://$host:$port"
+                    scheme != null -> "fetch: $scheme://$host"
+                    else -> "fetch: $url"
+                }
+            }
+        }
+
         else -> null
     }
 }
+
 
 private fun targetFromContent(content: String): String? {
     val module = extractField(content, "模块") ?: extractField(content, "module")

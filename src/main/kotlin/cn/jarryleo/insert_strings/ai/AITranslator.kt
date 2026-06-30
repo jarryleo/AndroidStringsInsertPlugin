@@ -169,6 +169,15 @@ object AITranslator {
 - 改完一个文件后建议「`read_diagnostics` → 修 → 再 `read_diagnostics`」,直到 `diagnosticCount: 0` 或只剩弱警告。
 - 不要因为 `read_diagnostics` 返回 0 就断言「代码没问题」 — 也可能是 dumb mode / 刚 sync 完 daemon 还没跑完。tool_result 末尾的 `note` 字段会标识这种情况。
 
+## URL 获取规则(`fetch_url` 适用)
+- `fetch_url` 是网络**只读**工具,默认 GET,支持自定义 headers / 超时 / 响应体截断。
+- **stripHtml** 用于压缩 HTML 页面(text/html|xhtml 才生效):默认 false,显式传 true 时自动移除 script/style/noscript 块、HTML 注释、on* 事件属性、所有标签(及可选的 `<img>`),只留可见文本,token 友好。`stripImages=true` 进一步移除 `<img>`。
+- **maxBodyChars** 默认 100KB(100000 字符)。遇到 readme / changelog / 长文档页面,先开 `stripHtml=true` 减少 token 消耗。
+- 协议只允许 `http://` / `https://`,其它(`file://` / `ftp://` / `data:`)会被拒绝 — 防止读本地任意文件。
+- 平台层**不做** host 黑名单 / SSRF 防御 — 任何 host 都能访问(含 localhost / 内网 / 公网)。**敏感操作(读内网服务、抓私有数据)前先用 `ask_user` 描述意图**。
+- POST / 其它方法暂不支持,需要时调 `run_shell curl`。
+- 返回 4xx/5xx 视作失败,body 仍会按 maxBodyChars 截断后返回,便于 AI 读错误消息。
+
 ## 函数调用协议(严格)
 工具调用**必须**通过原生 function calling 协议发出:
 - OpenAI / OpenAI 兼容:`message.tool_calls` 数组;
@@ -1078,6 +1087,71 @@ object AITranslator {
             {"type":"read_diagnostics","minSeverity":"ERROR"}
         """.trimIndent(),
 
+        "fetch_url" to """
+            ## fetch_url 详细用法
+            HTTP GET 一个 URL,返回响应体(只读,GET only)。**不**对应到 `run_shell curl`,
+            走平台自带 `java.net.http.HttpClient`,无 shell 解析、无外部依赖、token 友好。
+            字段:
+            - url(必填):http/https URL。**只允许 http/https**;`file://` / `ftp://` / `data:`
+              会被拒绝(防止读本地任意文件)。**不做** host 黑名单 — 任何 host 都能访问,
+              含 localhost / 内网 / 公网。
+            - headers(可选):自定义请求头,键值对都是字符串。能覆盖 User-Agent(默认
+              `InsertStringsPlugin/<version>`)。
+            - timeoutMs(可选):超时毫秒,默认 10000,范围 1000..120000(connect + read 总超时)。
+            - maxBodyChars(可选):响应体最大字符数,默认 100000(100KB),范围 1..2_000_000(2MB)。
+              超过截断并标注原长度,防 OOM + token 爆。
+            - responseType(可选):`text`(默认)/ `json`。`json` 时尝试 pretty-print,
+              失败回退 raw text。
+            - stripHtml(可选):默认 false。**仅** Content-Type 是 `text/html` 或
+              `application/xhtml+xml` 时生效 — 移除 script/style/noscript 块、HTML 注释、
+              on* 事件属性、所有标签,只留可见文本(token 友好)。其它 Content-Type 忽略此参数。
+            - stripImages(可选):默认 false。`stripHtml=true` 时把 `<img>` 标签也移除
+              (默认保留 alt 文字作为占位)。
+
+            平台保证:
+            - **不做** host 黑名单 / SSRF 防御 — 任何 host 都能访问。**敏感操作**(读内网服务、
+              抓私有数据)前先用 `ask_user` 描述意图。
+            - 跟随重定向 1 次(`HttpClient.Redirect.NORMAL`);不会无限跟随(防 DNS rebinding
+              跳到内网)。
+            - 不带 Cookie,不带任何自动鉴权 — 纯无状态 GET。
+
+            何时用:
+            - 用户给了一个文档 URL(README / changelog / 官方文档)→ 用本工具读。
+            - 调外部 REST API 查数据(GitHub API / npm registry / maven 仓库元信息)→ 用本工具。
+            - AI 需要"看一眼"某个网页的实际内容,比如 Stack Overflow 答案 / issue 内容。
+            - 配合 `read_diagnostics` 看到外部 API 错(404 / 500),用本工具读具体错误消息。
+            - 配合 `run_shell gradle` 看到依赖解析问题,用本工具看 maven 仓库里有没有该版本。
+
+            何时不用:
+            - 需要 POST / PUT / DELETE → 用 `run_shell curl`。
+            - 需要 Cookie / 会话状态 / 鉴权头 → 用 `run_shell curl`(可以管理 cookie jar)。
+            - 已知内容很长(> 100KB),且不打算用 stripHtml → 先开 `stripHtml=true` 或调
+              `maxBodyChars` 调小,避免 token 爆。
+
+            返回 tool_result 格式(以 [工具执行结果] 起头):
+            成功:
+            ```
+            [工具执行结果] 类型:fetch_url 状态:成功 url:<url>
+            状态码:200 Content-Type:text/html 耗时:340ms 大小:5.6KB
+            [stripHtml=true] 已移除 script/style/noscript 块、HTML 注释、on* 事件属性、所有标签
+            ---BEGIN BODY---
+            <响应体或纯文本,最多 maxBodyChars 字符>
+            ---END BODY---
+            ```
+            失败:
+            ```
+            [工具执行结果] 类型:fetch_url 状态:失败 url:<url> 原因:<错误描述>
+            ```
+            - 失败原因可能是:URL 解析失败 / 协议非 http/https / 超时 / 状态码 4xx/5xx /
+              网络异常。
+            - 状态码 4xx/5xx 仍会附带 body(按 maxBodyChars 截断),便于 AI 读错误消息。
+
+            示例:
+            {"type":"fetch_url","url":"https://api.github.com/repos/jetbrains/kotlin","responseType":"json"}
+            {"type":"fetch_url","url":"https://example.com/article","stripHtml":true}
+            {"type":"fetch_url","url":"https://api.example.com/v1/data","headers":{"Authorization":"Bearer xxx"}}
+        """.trimIndent(),
+
         "load_tool_doc" to """
             ## load_tool_doc 详细用法
             按需加载工具的详细使用文档（参数约束、枚举值、示例等）。主聊天 system prompt 只放工具清单，详细用法全部按需加载以节省 token。
@@ -1090,7 +1164,7 @@ object AITranslator {
               - get_editor_file、read_file、read_files、edit_file、create_file、delete_file、move_file
               - search_in_files、find_references、list_files、file_info
               - todo_list、todo_add、todo_update、todo_delete
-              - ask_user、load_tool_doc、replace_selection、run_shell、read_diagnostics、task_complete
+              - ask_user、load_tool_doc、replace_selection、run_shell、read_diagnostics、fetch_url、task_complete
             使用规则：
             - 写代码相关任务(用户说"改 X 文件""加 Y 功能""重构 Z")→ **优先** `load_tool_doc("code_ops")`
               一次拿到全部 11 个工具用法,避免反复调 11 次单工具文档,省 10+ round-trip + token。
@@ -3264,6 +3338,23 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val minSeverity = args.get("minSeverity")?.asString?.trim()
                     ?.takeIf { it.isNotEmpty() && it in setOf("ERROR", "WARNING", "WEAK_WARNING") }
                 AiAction.ReadDiagnostics(minSeverity)
+            }
+
+            ToolDefinitions.TOOL_FETCH_URL -> {
+                val url = args.get("url")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: return null
+                val headersObj = args.getAsJsonObject("headers")
+                val headers: Map<String, String> = headersObj?.entrySet()?.mapNotNull { (k, v) ->
+                    if (v.isJsonNull) null
+                    else runCatching { v.asString }.getOrNull()?.let { k to it }
+                }?.toMap() ?: emptyMap()
+                val timeoutMs = args.get("timeoutMs")?.asInt?.takeIf { it in 1_000..120_000 }
+                val maxBodyChars = args.get("maxBodyChars")?.asInt?.takeIf { it in 1..2_000_000 }
+                val responseType = args.get("responseType")?.asString?.trim()
+                    ?.takeIf { it in setOf("text", "json") }
+                val stripHtml = args.get("stripHtml")?.takeIf { !it.isJsonNull }?.asBoolean
+                val stripImages = args.get("stripImages")?.takeIf { !it.isJsonNull }?.asBoolean
+                AiAction.FetchUrl(url, headers, timeoutMs, maxBodyChars, responseType, stripHtml, stripImages)
             }
 
             else -> null

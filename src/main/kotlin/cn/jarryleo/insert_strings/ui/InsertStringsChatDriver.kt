@@ -48,6 +48,12 @@ internal class InsertStringsChatDriver(
      */
     private val diagnosticsOps: InsertStringsDiagnosticsController by lazy { InsertStringsDiagnosticsController(state) }
 
+    /**
+     * URL 拉取域(fetch_url 工具)的运行时控制器。
+     * lazy 持有 — 多数对话不会触发,等真要用再实例化,省内存。
+     */
+    private val fetchUrlOps: InsertStringsFetchUrlController by lazy { InsertStringsFetchUrlController(state) }
+
     companion object {
         // 单次对话中 AI 调用工具的最大轮数。超过则强制结束,防止死循环。
         // 设 30 足以覆盖现实中的多步操作(检查+修正等),又能及时止损。
@@ -962,6 +968,17 @@ internal class InsertStringsChatDriver(
             return
         }
 
+        // Priority 6.8: fetch_url —— 拉取远程 URL 内容(只读 GET)。
+        // 紧跟 read_diagnostics 之后(常见组合:看 build 失败原因 → fetch_url 读官方文档/issue 找方案);
+        // 同步阻塞(几百 ms 到几秒),由 controller 内置超时(默认 10s)兜底,不卡死 tool loop。
+        val fetchUrlEntries = unprocessed.filter { it.action is AiAction.FetchUrl }
+        if (fetchUrlEntries.isNotEmpty()) {
+            unprocessed.removeAll(fetchUrlEntries)
+            executeFetchUrl(fetchUrlEntries, context, iteration)
+            addSkippedToolResults(unprocessed, "因已执行 fetch_url 而跳过")
+            return
+        }
+
         // Priority 7: 文件操作域(get_editor_file / read_file / read_files / edit_file /
         //   create_file / delete_file / move_file / search_in_files / find_references /
         //   list_files / file_info)—— 2026.x 新增 4 个写代码工具(file_info / read_files /
@@ -1048,6 +1065,8 @@ internal class InsertStringsChatDriver(
                 is AiAction.RunShell -> "run_shell"
                 // 新增 read_diagnostics(编辑器级 LSP 诊断)
                 is AiAction.ReadDiagnostics -> "read_diagnostics"
+                // 新增 fetch_url(URL 拉取)
+                is AiAction.FetchUrl -> "fetch_url"
             }
             state.chatMessages.add(
                 ChatMessage(
@@ -1685,6 +1704,55 @@ internal class InsertStringsChatDriver(
                         ?: "[工具执行异常] run_shell 失败:action 类型不匹配"
                 } catch (e: Exception) {
                     "[工具执行异常] run_shell 失败:${e.message ?: e.javaClass.simpleName}"
+                }
+                pendingResults.add(toolCallId to resultText)
+            }
+            SwingUtilities.invokeLater {
+                pendingResults.forEach { (toolCallId, content) ->
+                    state.chatMessages.add(
+                        ChatMessage(role = "tool", content = content, toolCallId = toolCallId)
+                    )
+                }
+                continueToolLoopInBackground(context, iteration + 1)
+            }
+        }
+    }
+
+    /**
+     * 执行 [AiAction.FetchUrl] —— HTTP GET 远程 URL 并返回响应体。
+     *
+     * 流程:
+     * 1. 跑在 pooled thread,同步阻塞到 controller 返回(超时由 controller 内部兜底,
+     *    默认 10s);driver 不再做二次 wait。
+     * 2. controller 把响应转成 `[工具执行结果] 类型:fetch_url ...` 字符串(含状态码、
+     *    Content-Type、耗时、原始大小、`---BEGIN BODY---` 包住的可读响应体)。
+     * 3. driver 直接把字符串作为 `role=tool` 消息推回 — 不会在 tool loop 中制造
+     *    长时间悬挂的占位。
+     *
+     * 停止语义:每个 fetch_url 之间检查 [state.stopRequested];但 HTTP 请求已经在路上
+     * 了,本方法不主动中断(JDK HttpClient 不支持中途 cancel),仅在下一次 loop 时不再
+     * 发起新请求。
+     */
+    private fun executeFetchUrl(
+        entries: List<ActionWithToolCall>,
+        context: String,
+        iteration: Int
+    ) {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val pendingResults = mutableListOf<Pair<String, String>>()
+            entries.forEach { (action, toolCallId) ->
+                if (toolCallId.isEmpty()) return@forEach
+                if (state.stopRequested) {
+                    pendingResults.add(
+                        toolCallId to "[工具执行结果] 类型:fetch_url 状态:已取消 信息:用户停止"
+                    )
+                    return@forEach
+                }
+                val resultText = try {
+                    (action as? AiAction.FetchUrl)?.let { fetchUrlOps.fetchUrl(it) }
+                        ?: "[工具执行异常] fetch_url 失败:action 类型不匹配"
+                } catch (e: Exception) {
+                    "[工具执行异常] fetch_url 失败:${e.message ?: e.javaClass.simpleName}"
                 }
                 pendingResults.add(toolCallId to resultText)
             }
