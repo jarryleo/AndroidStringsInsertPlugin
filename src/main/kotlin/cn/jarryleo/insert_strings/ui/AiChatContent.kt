@@ -1282,7 +1282,12 @@ private fun ToolGroupBubble(
     }
     val failedCount = summaries.count { it.success == false }
     val skippedCount = summaries.count { it.success == null }
+    // run_shell 在进程运行期间会用 streaming=true 的 tool 消息持续追加输出,
+    // 此时在卡片头部加一个呼吸圆点 + "输出中" 文案,告诉用户工具还没跑完。
+    // 视觉与 assistant 消息的 ThinkingPulseDot 一致(单色 8dp 圆点 + 1.2s 呼吸 alpha)。
+    val anyStreaming = messages.any { it.streaming }
     val headerStatus = when {
+        anyStreaming -> "输出中…"
         failedCount > 0 -> "$failedCount 失败"
         skippedCount > 0 -> "$skippedCount 跳过"
         else -> "完成"
@@ -1330,6 +1335,10 @@ private fun ToolGroupBubble(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
+                if (anyStreaming) {
+                    ThinkingPulseDot(colors)
+                    Spacer(modifier = Modifier.width(4.dp))
+                }
                 Text(
                     text = headerStatus,
                     color = colors.secondaryText,
@@ -1614,6 +1623,15 @@ private fun targetFromArgs(toolName: String, args: JsonObject?): String? {
 
         "ask_user" ->
             args.getString("question")?.let { "question:${truncateText(it, 36)}" }
+
+        "run_shell" -> {
+            val cmd = args.getString("command") ?: "?"
+            val firstArg = args.getAsJsonArray("args")?.takeIf { it.size() > 0 }
+                ?.get(0)?.takeIf { !it.isJsonNull }
+                ?.let { runCatching { it.asString }.getOrNull() }
+            val cwd = args.getString("cwd")?.let { " @ $it" }.orEmpty()
+            "shell: $cmd $firstArg$cwd".trim()
+        }
 
         else -> null
     }

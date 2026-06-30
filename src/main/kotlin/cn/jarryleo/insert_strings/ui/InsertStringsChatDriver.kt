@@ -36,6 +36,12 @@ internal class InsertStringsChatDriver(
 
     private val project: Project get() = state.project
 
+    /**
+     * Shell 执行域(run_shell 工具)的运行时控制器。
+     * lazy 持有 — 多数对话不会触发,等真要用再实例化,省内存。
+     */
+    private val shellOps: InsertStringsShellOpsController by lazy { InsertStringsShellOpsController(state) }
+
     companion object {
         // 单次对话中 AI 调用工具的最大轮数。超过则强制结束,防止死循环。
         // 设 30 足以覆盖现实中的多步操作(检查+修正等),又能及时止损。
@@ -928,6 +934,17 @@ internal class InsertStringsChatDriver(
             return
         }
 
+        // Priority 6.6: run_shell —— 在项目根执行 shell 命令并流式回灌输出。
+        // 放在文件操作之前,语义上更独立(可单独一组,不像 file ops 那样会成批),
+        // 也不太可能与文件操作同时出现(AI 要么调 read_file 看文件,要么调 run_shell 跑命令)。
+        val shellEntries = unprocessed.filter { it.action is AiAction.RunShell }
+        if (shellEntries.isNotEmpty()) {
+            unprocessed.removeAll(shellEntries)
+            executeShellActions(shellEntries, context, iteration)
+            addSkippedToolResults(unprocessed, "因已执行 run_shell 而跳过")
+            return
+        }
+
         // Priority 7: 文件操作域(get_editor_file / read_file / read_files / edit_file /
         //   create_file / delete_file / move_file / search_in_files / find_references /
         //   list_files / file_info)—— 2026.x 新增 4 个写代码工具(file_info / read_files /
@@ -1005,11 +1022,13 @@ internal class InsertStringsChatDriver(
                 is AiAction.TodoUpdate -> "todo_update"
                 is AiAction.TodoDelete -> "todo_delete"
                 is AiAction.CurrentTime -> "current_time"
-                // 2026.x 新增 4 个写代码工具
+                // 新增 4 个写代码工具
                 is AiAction.FileInfo -> "file_info"
                 is AiAction.ReadFiles -> "read_files"
                 is AiAction.DeleteFile -> "delete_file"
                 is AiAction.MoveFile -> "move_file"
+                // 新增 run_shell(命令流式执行)
+                is AiAction.RunShell -> "run_shell"
             }
             state.chatMessages.add(
                 ChatMessage(
@@ -1596,6 +1615,57 @@ internal class InsertStringsChatDriver(
                     "[工具执行异常] $typeLabel 失败:${e.message ?: "unknown"}".also {
                         if (firstError == null) firstError = e.message ?: "unknown"
                     }
+                }
+                pendingResults.add(toolCallId to resultText)
+            }
+            SwingUtilities.invokeLater {
+                pendingResults.forEach { (toolCallId, content) ->
+                    state.chatMessages.add(
+                        ChatMessage(role = "tool", content = content, toolCallId = toolCallId)
+                    )
+                }
+                continueToolLoopInBackground(context, iteration + 1)
+            }
+        }
+    }
+
+    /**
+     * 执行 [AiAction.RunShell] —— 在项目根目录跑一条 shell 命令,流式追加到 tool 消息。
+     *
+     * 流程:
+     * 1. 跑在 pooled thread,串行处理同一轮内的多个 run_shell(同一回合极少见,但语义上正确);
+     * 2. controller 内部预占一条 `streaming = true` 的 tool 消息(在 EDT 上 add),
+     *    ProcessHandler 的 `onTextAvailable` 把每段 stdout/stderr 增量追加到该消息 ——
+     *    用户能实时看到 gradle / git 之类的运行进度;
+     * 3. 进程结束 / 超时后,controller 关掉 streaming 标志 + 返回最终 tool_result 字符串;
+     * 4. driver 把这条 final result 作为另一条 `role = "tool"` 消息推回去 —
+     *    UI 端的 `ToolGroupBubble` 会按 toolCallId 把这两条 tool 消息折成一张可折叠卡片,
+     *    头部显示命令 + 状态,详情显示流式输出 + 最终汇总。
+     *
+     * 停止语义:每个 run_shell 之间检查 [state.stopRequested];IDE 顶栏「停止」按下时
+     * 已经 in-flight 的进程由 controller 的 `destroyProcess()` 在超时路径里处理,
+     * 后续 run_shell 不会再启动。
+     */
+    private fun executeShellActions(
+        entries: List<ActionWithToolCall>,
+        context: String,
+        iteration: Int
+    ) {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val pendingResults = mutableListOf<Pair<String, String>>()
+            entries.forEach { (action, toolCallId) ->
+                if (toolCallId.isEmpty()) return@forEach
+                if (state.stopRequested) {
+                    pendingResults.add(
+                        toolCallId to "[工具执行结果] 类型:run_shell 状态:已取消 信息:用户停止"
+                    )
+                    return@forEach
+                }
+                val resultText = try {
+                    (action as? AiAction.RunShell)?.let { shellOps.runShell(toolCallId, it) }
+                        ?: "[工具执行异常] run_shell 失败:action 类型不匹配"
+                } catch (e: Exception) {
+                    "[工具执行异常] run_shell 失败:${e.message ?: e.javaClass.simpleName}"
                 }
                 pendingResults.add(toolCallId to resultText)
             }

@@ -76,6 +76,7 @@ object ToolDefinitions {
         TOOL_ASK_USER,
         TOOL_LOAD_TOOL_DOC,
         TOOL_REPLACE_SELECTION,
+        TOOL_RUN_SHELL,
         TOOL_TASK_COMPLETE,
     )
 
@@ -106,6 +107,7 @@ object ToolDefinitions {
     const val TOOL_REPLACE_SELECTION = "replace_selection"
     const val TOOL_ASK_USER = "ask_user"
     const val TOOL_LOAD_TOOL_DOC = "load_tool_doc"
+    const val TOOL_RUN_SHELL = "run_shell"
     const val TOOL_TASK_COMPLETE = "task_complete"
 
     // region 工具描述文案(主 prompt 引用,这里集中维护)
@@ -235,6 +237,11 @@ object ToolDefinitions {
             "chatEntry=askAi/extractStrings 时「使用现有 key:」后**必须**先调本工具。" +
             " → load_tool_doc(\"replace_selection\")。"
 
+    private const val DESC_RUN_SHELL =
+        "在项目根目录执行 shell 命令并流式返回输出。args 数组逐项传入(避免注入)," +
+            "cwd 相对项目根。删除/推送/部署前用 ask_user 描述意图。Windows 走 cmd.exe /c。" +
+            " → load_tool_doc(\"run_shell\")。"
+
     private const val DESC_LOAD_TOOL_DOC =
         "按需加载工具详细文档(枚举值/参数约束/示例)。" +
             "连续 load_tool_doc 有次数上限,一次最多 1-2 个,拿到后立即调实际工具。"
@@ -317,6 +324,7 @@ object ToolDefinitions {
             add(openAiTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(openAiTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(openAiTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
+            add(openAiTool(TOOL_RUN_SHELL, DESC_RUN_SHELL, openAiRunShellParams()))
             add(openAiTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
         }
     }
@@ -363,6 +371,7 @@ object ToolDefinitions {
             add(anthropicTool(TOOL_ASK_USER, DESC_ASK_USER, openAiAskUserParams()))
             add(anthropicTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(anthropicTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
+            add(anthropicTool(TOOL_RUN_SHELL, DESC_RUN_SHELL, openAiRunShellParams()))
             add(anthropicTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
         }
     }
@@ -1221,6 +1230,45 @@ object ToolDefinitions {
                 })
             })
             add("required", JsonArray().apply { add("path") })
+        }
+    }
+
+    private fun openAiRunShellParams(): JsonObject {
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("command", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "必填,可执行文件名(如 git/gradle/ls/cat/node/npm)。**不要**把参数塞到 command 里。"
+                    )
+                })
+                add("args", obj {
+                    addProperty("type", "array")
+                    add("items", obj { addProperty("type", "string") })
+                    addProperty(
+                        "description",
+                        "可选,参数列表(逐项传入,平台层不走 shell,避免注入)。" +
+                            "例:[\"status\", \"--short\"] / [\"-C\", \"app\", \"assembleDebug\"]。"
+                    )
+                })
+                add("cwd", obj {
+                    addProperty("type", "string")
+                    addProperty(
+                        "description",
+                        "可选,相对项目根的子目录(如 \"app\"),null/空 = 项目根。越界(用 .. 跳出)会被拒绝。"
+                    )
+                })
+                add("timeoutMs", obj {
+                    addProperty("type", "integer")
+                    addProperty(
+                        "description",
+                        "可选,超时毫秒,默认 60000,范围 1000..600000。超时后进程被强制终止。"
+                    )
+                })
+            })
+            add("required", JsonArray().apply { add("command") })
         }
     }
 

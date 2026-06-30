@@ -153,6 +153,14 @@ object AITranslator {
 - 同一 AI 回合内的所有 `insert_strings` / `update_string` / `delete_string` 写入必须在同一模块(全部省略 module,或全部显式指定同一 module),**不要**用项目名当 module;系统会兜底拦截并把错误回传给你。
 - `delete_string` 是破坏性操作,执行前先 `read_string` 确认目标 key 与翻译,不确定时用 `ask_user` 与用户确认。
 
+## Shell 执行规则(`run_shell` 安全约束)
+- `run_shell` 是**特权工具**:进程在项目根目录真实执行,默认走 `cmd.exe`(Windows)或 `execvp`(POSIX),可能有副作用(写文件、起进程、改 git 状态…)。
+- 平台层**不**做危险命令白名单/黑名单 — 由你自己判断。**删除/重置/推送/部署/清理缓存/格式化**等破坏性操作前,先 `ask_user` 描述意图(将做什么 / 目标 / 影响范围),等用户回复再调 `run_shell`。
+- 参数一律走 `args` 数组(如 `["status","--short"]`),**不要**塞到 `command` 里。平台层 `CreateProcessW`/`execvp` 不会经过 shell 解析,即使 args 含空格、管道符、引号也不会被误解析。
+- `cwd` 必须是相对项目根的子目录,系统会校验不越界;不要依赖 run_shell 修改项目根外的文件。
+- 不要用 `run_shell` 写 `strings.xml`、调 `git commit` / `git push` / 跑 `gradle assemble*` 这类有专用工具的操作;优先用专用工具(insert_strings / replace_selection / file_ops)。
+- 返回的 `tool_result` 写明 成功 / 失败(exit=N) / 超时(<ms>ms) / 已取消,不要自己再 ask_user 重复同一问题,直接用自然语言转告用户即可。
+
 ## 函数调用协议(严格)
 工具调用**必须**通过原生 function calling 协议发出:
 - OpenAI / OpenAI 兼容:`message.tool_calls` 数组;
@@ -965,6 +973,47 @@ object AITranslator {
             {"type":"task_complete","summary":"Google Sheets 未配置,无法执行。","status":"failed","notes":"请先在设置中配置 spreadsheetId 与 defaultSheetName"}
         """.trimIndent(),
 
+        "run_shell" to """
+            ## run_shell 详细用法
+            在**项目根目录**执行一条 shell 命令,把 stdout/stderr **逐行流式**回灌到聊天 UI(用户能实时看到输出)。
+            字段：
+            - command（必填）：单个可执行文件名(git / gradle / ls / cat / node / npm / adb / 自定义脚本…)。**不要**把参数塞到 command 里。
+            - args（数组,可选）：参数列表,逐项传给平台层(Windows `CreateProcessW` / POSIX `execvp`),
+              **不**走 shell 解析 — 即使 args 含空格、管道符、引号也不会被误解析,从根本上避免注入。
+            - cwd（可选,字符串）：相对项目根的子目录(如 "app"),null/空 = 项目根。越界(用 .. 跳出项目根)会被系统直接拒绝。
+            - timeoutMs（可选,整数）：超时毫秒,默认 60000,范围 1000..600000。超时后进程被强制 kill。
+
+            平台差异:
+            - Windows:统一走 `cmd.exe /c "<command> <arg1> <arg2>"`(command 与 args 拼好后整串加双引号传入 cmd)。
+              支持调用 .bat、命令内置(dir / cd / echo)、系统 PATH 下的可执行文件。
+            - POSIX:`[command, arg1, arg2]` 直传 fork+exec,不走 /bin/sh。
+              如果 AI 需要 shell 特性(管道/重定向/通配符),**自己**在 command 里写 `/bin/sh`(并把整段脚本放进 args 数组的单元素里)。
+              例: `{"command":"/bin/sh","args":["-c","ls -la | grep foo"]}`。
+
+            何时用:
+            - read_file / search_in_files 不够用时(查 git 状态、看 gradle 任务列表、抓 adb logcat、跑自定义脚本…)。
+            - 配合 replace_selection 完成后跑一次 `./gradlew assembleDebug` 看是否通过。
+            - 写 strings.xml 类的操作**不要**用 run_shell(有专用 insert_strings 工具),用专用工具更安全(模块一致性兜底)。
+
+            何时不用 / 应当先问:
+            - 删除/重置/推送/部署/清理缓存等破坏性操作(`rm`/`git push`/`gradle clean`/`adb uninstall`/`shutdown`…):
+              **先用 `ask_user`** 描述意图(将做什么 / 目标 / 影响范围),等用户回复再执行。
+            - 不确定命令作用时先用 `ask_user` 或用 `read_file`/`list_files` 探查。
+            - 已经写好的 strings.xml 编辑 / 文件编辑 / 翻译查重 → 用专用工具。
+
+            返回 tool_result 格式(以 [工具执行结果] 起头):
+            - 成功:`[工具执行结果] 类型:run_shell 状态:成功 命令:<command> <args> 工作目录:<abs path> 输出:\n<stdout+stderr>`
+            - 失败:`... 状态:失败(exit=<n>) ...`
+            - 超时:`... 状态:超时(<ms>ms) ...`(进程已 kill)
+            - 用户取消:本工具**不会**主动弹窗,如果你想拦截应自己在调用前 ask_user;
+              若用户在 tool loop 中按了 IDE 停止按钮,会收到 `状态:已取消 信息:用户停止`。
+
+            示例:
+            {"type":"run_shell","command":"git","args":["status","--short"]}
+            {"type":"run_shell","command":"gradle","args":["-p","app","tasks","--all"],"timeoutMs":120000}
+            {"type":"run_shell","command":"node","args":["scripts/check-i18n.js"],"cwd":"tools"}
+        """.trimIndent(),
+
         "load_tool_doc" to """
             ## load_tool_doc 详细用法
             按需加载工具的详细使用文档（参数约束、枚举值、示例等）。主聊天 system prompt 只放工具清单，详细用法全部按需加载以节省 token。
@@ -977,7 +1026,7 @@ object AITranslator {
               - get_editor_file、read_file、read_files、edit_file、create_file、delete_file、move_file
               - search_in_files、find_references、list_files、file_info
               - todo_list、todo_add、todo_update、todo_delete
-              - ask_user、load_tool_doc、replace_selection、task_complete
+              - ask_user、load_tool_doc、replace_selection、run_shell、task_complete
             使用规则：
             - 写代码相关任务(用户说"改 X 文件""加 Y 功能""重构 Z")→ **优先** `load_tool_doc("code_ops")`
               一次拿到全部 11 个工具用法,避免反复调 11 次单工具文档,省 10+ round-trip + token。
@@ -3133,6 +3182,18 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 if (oldText.isEmpty()) return null
                 val newText = args.get("newText")?.asString ?: return null
                 AiAction.ReplaceSelection(oldText, newText)
+            }
+
+            ToolDefinitions.TOOL_RUN_SHELL -> {
+                val command = args.get("command")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: return null
+                val argsArr = args.getAsJsonArray("args")
+                val argList = argsArr?.mapNotNull {
+                    if (it.isJsonNull) null else runCatching { it.asString }.getOrNull()
+                } ?: emptyList()
+                val cwd = args.get("cwd")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+                val timeoutMs = args.get("timeoutMs")?.asInt?.takeIf { it in 1000..600_000 }
+                AiAction.RunShell(command, argList, cwd, timeoutMs)
             }
 
             else -> null

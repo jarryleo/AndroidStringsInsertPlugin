@@ -567,6 +567,35 @@ sealed class AiAction {
     ) : AiAction()
 
     // endregion
+
+    // region ============== Shell 执行域(2026 新增) ==============
+    //
+    // run_shell 让 AI 能在项目根目录里跑任意命令(默认走 cmd.exe / /bin/sh),
+    // 配合 read_file / search_in_files 构成「先看文件再问构建」的闭环。
+    // 安全策略:不在工具层校验危险命令,而是把"该问就问"写进系统提示词,
+    // 由 AI 在不确定时先调 ask_user 描述意图 — 用户拒绝/取消时 tool_result
+    // 已写明原因,AI 直接转告用户即可,不再二次询问。
+    //
+
+    /**
+     * 在项目根目录执行一条命令,流式返回 stdout/stderr 到聊天 UI。
+     *
+     * 参数一律走 [args] 数组(平台层 `CreateProcessW` / `execvp`,**不会**经过
+     * shell 解析),避免 AI 拼字符串时引入注入。`command` 是单个可执行文件名。
+     *
+     * @param command   可执行文件名(在 PATH 或工作目录查找)
+     * @param args      参数列表,默认空 — 永远不要把整条命令塞进 [command]
+     * @param cwd       可选,相对项目根的子目录;null = 项目根
+     * @param timeoutMs 可选,默认 60000,范围 1000..600000
+     */
+    data class RunShell(
+        val command: String,
+        val args: List<String> = emptyList(),
+        val cwd: String? = null,
+        val timeoutMs: Int? = null,
+    ) : AiAction()
+
+    // endregion
 }
 
 data class AiReply(
