@@ -207,6 +207,29 @@ internal fun InsertStringsContent(
      * 主面板 / 弹框都需要,统一透传。
      */
     onCopyQuote: ((String) -> Unit)? = null,
+    // ===== 多模态图片(2026.x 新增)=====
+    /**
+     * 待发送图片附件(粘贴/选择/拖拽进来的图)。在 chat 输入框上方以横向滚动缩略图条呈现,
+     * 每张图右上角 × 删除;只在聊天视图使用,其它 tab 忽略。
+     */
+    pendingImages: List<cn.jarryleo.insert_strings.ai.ChatAttachment> = emptyList(),
+    /**
+     * 「📎」按钮回调(2026.x 多模态):弹文件选择器 / 把选中的图加入 [pendingImages]。
+     */
+    onPickImage: () -> Unit = {},
+    /**
+     * 单张图 × 删除回调(2026.x 多模态)。参数是 [cn.jarryleo.insert_strings.ai.ChatAttachment.id]。
+     */
+    onRemoveImage: (String) -> Unit = {},
+    /**
+     * 拖拽文件到聊天输入框时回调(2026.x 多模态)。由 caller 检查 Transferable,识别图片并加入 [pendingImages]。
+     */
+    onImageDropped: (java.awt.datatransfer.Transferable) -> Unit = {},
+    /**
+     * Ctrl+V / Cmd+V 拦截回调(2026.x 多模态):caller 自己读剪贴板,
+     * 剪贴板是图片则加入 [pendingImages],否则按需走文字粘贴或 toast。
+     */
+    onPasteFromClipboard: () -> Unit = {},
 ) {
     val colors = rememberIdeColors()
 
@@ -277,6 +300,12 @@ internal fun InsertStringsContent(
                         // 顶级 tab 模式下不再渲染 Chat 顶部的 "Back" 按钮(切 tab 由外层 tab 栏承担);
                         // "New Topic" / "Context" 仍保留。
                         showHeader = true,
+                        // ===== 多模态图片(2026.x 新增)=====
+                        pendingImages = pendingImages,
+                        onPickImage = onPickImage,
+                        onRemoveImage = onRemoveImage,
+                        onImageDropped = onImageDropped,
+                        onPasteFromClipboard = onPasteFromClipboard,
                     )
                     MainTab.TODOS -> TodosContent(
                         // 按当前过滤模式筛选展示,保持 controller 排序(active 在上 / completed 在下)。

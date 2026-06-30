@@ -19,6 +19,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -45,28 +47,45 @@ fun CompactTextField(
      * 适用于聊天输入框等"回车即发"场景;其它纯文本输入框保持默认行为,不需要传此参数。
      */
     onSend: (() -> Unit)? = null,
+    /**
+     * 可选:按下 Ctrl+V / Cmd+V 时触发的回调(2026.x 多模态新增)。
+     * - 设置后:粘贴组合键被本回调**截断**;由 caller 自己决定如何处理(读剪贴板 / 弹 toast / 还原默认粘贴)。
+     *   这是「Ctrl+V 粘贴图片」的核心入口 —— 当剪贴板里是图片时由 caller 把图片加入 pendingImages;
+     *   不是图片时 caller 应自行还原默认粘贴行为(或 toast 提示)。
+     * - 不设置:保持原行为(由 BasicTextField 自己处理粘贴,贴入文字)。
+     *
+     * 用 isCtrlPressed / isMetaPressed 兼容 Windows / Linux(Ctrl)与 macOS(Cmd)双平台。
+     */
+    onPaste: (() -> Unit)? = null,
 ) {
-    val sendModifier = if (onSend != null) {
-        Modifier.onPreviewKeyEvent { event ->
-            if (event.type == KeyEventType.KeyDown &&
-                event.key == Key.Enter &&
-                !event.isAltPressed &&
-                !event.isShiftPressed
-            ) {
-                onSend.invoke()
-                true
-            } else {
-                false
-            }
+    val keyModifier = Modifier.onPreviewKeyEvent { event ->
+        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+        // Enter 发送
+        if (onSend != null &&
+            event.key == Key.Enter &&
+            !event.isAltPressed &&
+            !event.isShiftPressed
+        ) {
+            onSend.invoke()
+            return@onPreviewKeyEvent true
         }
-    } else {
-        Modifier
+        // Ctrl+V / Cmd+V 拦截(粘贴图片用)
+        if (onPaste != null &&
+            event.key == Key.V &&
+            (event.isCtrlPressed || event.isMetaPressed) &&
+            !event.isAltPressed &&
+            !event.isShiftPressed
+        ) {
+            onPaste.invoke()
+            return@onPreviewKeyEvent true
+        }
+        false
     }
     BasicTextField(
         value = value,
         onValueChange = onValueChange,
         modifier = modifier
-            .then(sendModifier)
+            .then(keyModifier)
             .heightIn(min = 26.dp)
             .background(colors.fieldBackground, RoundedCornerShape(3.dp))
             .border(BorderStroke(1.dp, colors.fieldBorder), RoundedCornerShape(3.dp))

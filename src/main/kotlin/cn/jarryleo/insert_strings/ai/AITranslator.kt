@@ -41,6 +41,14 @@ data class ToolCall(
  * - [options]    UI 层 AskUser 按钮选项,与 AI 协议无关。
  * - [askQuestion] AskUser 工具调用携带的「询问文字」,与 [content] 分开保存,避免与
  *   AI 同时返回的「正文/前言」混淆;UI 端会把它渲染为独立的"❓ Question"区块。
+ *
+ * 多模附件(2026.x 新增):
+ * - [attachments] 用户消息携带的图片附件列表(粘贴 / 选择 / 拖拽得到的图)。
+ *   协议层 [toOpenAiMessage] / [toAnthropicMessage] 会把 content 拆成
+ *   `[{type:text,text:...}, {type:image_url,...}]` 或
+ *   `[{type:text,...}, {type:image,source:{type:base64,...}}]` 数组。
+ *   非空时,UI 端在气泡下方显示一行缩略图列表(数量 + 视觉锚)。
+ *   assistant / tool 消息此字段始终为空(模型不产图)。
  */
 data class ChatMessage(
     val role: String,
@@ -48,6 +56,14 @@ data class ChatMessage(
     val options: List<String> = emptyList(),
     val toolCalls: List<ToolCall> = emptyList(),
     val toolCallId: String? = null,
+    /**
+     * 用户消息携带的图片附件(2026.x 多模态功能)。
+     * 序列化时参与 OpenAI / Anthropic 多模态协议;
+     * UI 端在用户气泡下方按顺序展示缩略图(可与 AI 交流「第 1 / 2 张图」),
+     * assistant / tool 消息此字段保持 emptyList。
+     * 不参与 [protocolVisible] 过滤判断(过滤时连同消息一起丢)。
+     */
+    val attachments: List<ChatAttachment> = emptyList(),
     /**
      * 是否参与 AI 协议历史。重试提示/本地状态气泡只用于 UI 展示,
      * 不能发回模型,否则会插进 assistant(tool_calls) 与 tool_result 之间。
@@ -2493,6 +2509,33 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             }
             return obj
         }
+        // 多模态 user 消息(2026.x):content 拆成 text + image_url 数组。
+        // 顺序约定:先 text(若 content 非空)后图片,让 AI 看到「文字+图」的自然语序。
+        // 仅在 user 消息且 attachments 非空时走这条路径;空 attachments 不影响形态(仍是 string)。
+        if (role == "user" && attachments.isNotEmpty()) {
+            return JsonObject().apply {
+                addProperty("role", "user")
+                add("content", JsonArray().apply {
+                    if (rawContent.isNotEmpty()) {
+                        add(JsonObject().apply {
+                            addProperty("type", "text")
+                            addProperty("text", rawContent)
+                        })
+                    }
+                    attachments.forEach { att ->
+                        add(JsonObject().apply {
+                            addProperty("type", "image_url")
+                            add("image_url", JsonObject().apply {
+                                addProperty(
+                                    "url",
+                                    "data:${att.mimeType};base64,${att.data}"
+                                )
+                            })
+                        })
+                    }
+                })
+            }
+        }
         // plain text message
         return JsonObject().apply {
             addProperty("role", role)
@@ -2688,6 +2731,32 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             return JsonObject().apply {
                 addProperty("role", "assistant")
                 addProperty("content", protocolText)
+            }
+        }
+        // 多模态 user 消息(2026.x):content 拆成 text + image 块数组。
+        // Anthropic 图片格式:`{"type":"image","source":{"type":"base64","media_type":"...","data":"..."}}`。
+        // 仅在 user 消息且 attachments 非空时走这条路径;空 attachments 时仍走单字符串简化路径。
+        if (role == "user" && attachments.isNotEmpty()) {
+            return JsonObject().apply {
+                addProperty("role", "user")
+                add("content", JsonArray().apply {
+                    if (protocolText.isNotEmpty()) {
+                        add(JsonObject().apply {
+                            addProperty("type", "text")
+                            addProperty("text", protocolText)
+                        })
+                    }
+                    attachments.forEach { att ->
+                        add(JsonObject().apply {
+                            addProperty("type", "image")
+                            add("source", JsonObject().apply {
+                                addProperty("type", "base64")
+                                addProperty("media_type", att.mimeType)
+                                addProperty("data", att.data)
+                            })
+                        })
+                    }
+                })
             }
         }
         return JsonObject().apply {

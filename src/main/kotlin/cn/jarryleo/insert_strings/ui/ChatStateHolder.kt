@@ -2,6 +2,7 @@ package cn.jarryleo.insert_strings.ui
 
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import cn.jarryleo.insert_strings.InsertStringsManager
+import cn.jarryleo.insert_strings.ai.ChatAttachment
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.sheets.SheetsManager
 import cn.jarryleo.insert_strings.xml.KeyedStringsInfo
@@ -105,6 +106,22 @@ internal interface ChatStateHolder {
      * 实现必须保证跨线程(后台 tool loop vs EDT)访问的内存可见性(Java volatile 语义)。
      */
     var editorReplacementTriggered: Boolean
+
+    // ===== 图片附件(2026.x 多模态) =====
+    /**
+     * 待发送的图片附件列表(粘贴 / 选择 / 拖拽进来的图,尚未随下一条 user 消息发出去)。
+     *
+     * 行为:
+     *  - 用户点击「📎」选图 / Ctrl+V 粘贴 / 拖拽 → driver 写入本列表;
+     *  - 用户消息发送时(见 [cn.jarryleo.insert_strings.ui.InsertStringsChatDriver.sendChat]),
+     *    driver 把本列表的当前内容作为 attachments 字段挂到即将发出的 user 消息上,
+     *    并清空本列表(下一次发送重新累计);
+     *  - UI 端在聊天输入框上方以横向滚动的缩略图列表呈现,每张图右上角有 × 删除按钮;
+     *  - 「New Topic」时由 driver 清空(避免污染下一会话)。
+     *
+     * 用 [SnapshotStateList] 是为了在 Compose 重组时自动通知缩略图 UI 变化。
+     */
+    val pendingImages: SnapshotStateList<ChatAttachment>
 
     // ===== 表格状态(由 controllers 读写) =====
     /**

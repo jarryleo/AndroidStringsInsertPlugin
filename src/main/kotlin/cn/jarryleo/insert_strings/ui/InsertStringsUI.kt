@@ -11,6 +11,8 @@ import cn.jarryleo.insert_strings.InsertStringsManager
 import cn.jarryleo.insert_strings.UiCallback
 import cn.jarryleo.insert_strings.ai.AiProvider
 import cn.jarryleo.insert_strings.ai.AiRole
+import cn.jarryleo.insert_strings.ai.ChatAttachment
+import cn.jarryleo.insert_strings.ai.ChatAttachmentLoadResult
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.ai.TodoAiResponder
 import cn.jarryleo.insert_strings.ai.TodoItem
@@ -24,6 +26,7 @@ import cn.jarryleo.insert_strings.xml.KeyedStringsInfo
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
+import java.awt.datatransfer.Transferable
 import javax.swing.JComponent
 import javax.swing.SwingUtilities
 import javax.swing.Timer
@@ -190,6 +193,10 @@ class InsertStringsUI(
     // 主面板聊天视图无引用内容(无编辑器上下文),始终为 null。
     override var quoteContent: String? = null
 
+    // 待发送的图片附件(2026.x 多模态):用户在聊天输入区粘贴/选择/拖拽进来的图,
+    // 发送前显示为缩略图横排,可单张删除;发送时随本条 user 消息一起发出,然后清空。
+    override val pendingImages = mutableStateListOf<ChatAttachment>()
+
     /**
      * 「重复 key 插入」二次确认时持有的状态。
      * 拆出去会让 ChatDriver 反向依赖过多,保留在 UI 上更直接。
@@ -335,6 +342,12 @@ class InsertStringsUI(
                     // canClear:无选中内容时按钮置灰,避免误点。
                     onClearSelected = actionsController::clearSelected,
                     canClearSelected = keyEntries.isNotEmpty() || rows.isNotEmpty(),
+                    // ===== 多模态图片(2026.x 新增)=====
+                    pendingImages = pendingImages,
+                    onPickImage = ::onPickImageClicked,
+                    onRemoveImage = { id -> pendingImages.removeAll { it.id == id } },
+                    onImageDropped = { t -> onImageDroppedOrPasted(t) },
+                    onPasteFromClipboard = ::onPasteFromClipboard,
                 )
             }
         }
@@ -428,4 +441,78 @@ class InsertStringsUI(
      * 重构后主页 Chat 已是 tab 之一,关闭语义变为"切回默认的翻译表 tab")。
      */
     override fun closeChatView() { mainTab = MainTab.TRANSLATIONS }
+
+    // ============== 多模态图片(2026.x 新增)==============
+    /**
+     * 「📎」按钮回调:弹 IntelliJ 文件选择器,把选中的图片(单/多张)逐个加入 [pendingImages]。
+     * 选择器本身在 EDT 线程跑(Compose onClick);后台 [ChatAttachment.loadFromFile] 内部
+     * 是同步 IO,可能略卡(读 4K 大图 100ms 量级),符合用户对"选完图要等一下"的预期。
+     */
+    private fun onPickImageClicked() {
+        try {
+            val picked = ChatImagePicker.pickImageFiles(project)
+            picked.forEach { att ->
+                if (pendingImages.none { it.id == att.id }) {
+                    pendingImages.add(att)
+                }
+            }
+        } catch (t: Throwable) {
+            // 选图抛错(IDE 异常 / I/O 错)不阻塞 chat,toast 一行提示即可。
+            showToast("选图失败: ${t.message}")
+        }
+    }
+
+    /**
+     * 拖拽文件到聊天输入框时回调:从 Transferable 中识别图片并加入 [pendingImages]。
+     * 不支持的拖拽内容(如纯文本拖拽)会被忽略(无 toast,避免误报)。
+     */
+    private fun onImageDroppedOrPasted(transferable: Transferable) {
+        when (val r = ChatImagePicker.addFromTransferable(transferable)) {
+            is ChatAttachmentLoadResult.Ok -> {
+                if (pendingImages.none { it.id == r.attachment.id }) {
+                    pendingImages.add(r.attachment)
+                }
+            }
+            is ChatAttachmentLoadResult.Error -> showToast(r.message)
+            ChatAttachmentLoadResult.Unavailable -> { /* 静默忽略 */ }
+        }
+    }
+
+    /**
+     * Ctrl+V / Cmd+V 拦截回调(2026.x 多模态):
+     *  - 剪贴板是图片 → 加入 [pendingImages];
+     *  - 剪贴板是文字 → 等同原生粘贴(把文字追加到 chatInput);
+     *  - 剪贴板是其它(如文件 URI)→ toast 提示,不打扰用户;
+     *  - 空 → toast「剪贴板为空」。
+     *
+     * 用 [ChatImagePicker.addFromClipboard] 嗅探,失败兜底为「文字粘贴」行为。
+     */
+    private fun onPasteFromClipboard() {
+        when (val r = ChatImagePicker.addFromClipboard()) {
+            is ChatAttachmentLoadResult.Ok -> {
+                if (pendingImages.none { it.id == r.attachment.id }) {
+                    pendingImages.add(r.attachment)
+                }
+                return
+            }
+            is ChatAttachmentLoadResult.Error -> {
+                showToast(r.message)
+                return
+            }
+            ChatAttachmentLoadResult.Unavailable -> { /* 继续走文字粘贴兜底 */ }
+        }
+        // 兜底:从剪贴板读文本并追加到 chatInput(等同原生 Ctrl+V 行为)
+        runCatching {
+            val text = java.awt.Toolkit.getDefaultToolkit().systemClipboard
+                .getContents(null)
+                ?.takeIf { it.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.stringFlavor) }
+                ?.let { it.getTransferData(java.awt.datatransfer.DataFlavor.stringFlavor) as? String }
+            if (!text.isNullOrEmpty()) {
+                chatInput = chatInput + text
+            } else {
+                showToast("剪贴板为空")
+            }
+        }.onFailure { showToast("粘贴失败: ${it.message}") }
+    }
 }
+

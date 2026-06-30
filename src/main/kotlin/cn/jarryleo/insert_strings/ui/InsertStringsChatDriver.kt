@@ -3,6 +3,7 @@ package cn.jarryleo.insert_strings.ui
 import cn.jarryleo.insert_strings.ai.AITranslator
 import cn.jarryleo.insert_strings.ai.AiAction
 import cn.jarryleo.insert_strings.ai.AiReply
+import cn.jarryleo.insert_strings.ai.ChatAttachment
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.ai.RetrySupport
 import cn.jarryleo.insert_strings.ai.ToolCall
@@ -90,17 +91,34 @@ internal class InsertStringsChatDriver(
 
     fun sendChat() {
         val text = state.chatInput.trim()
-        if (text.isEmpty() || state.chatSending) return
+        val images = state.pendingImages.toList()
+        // 发送条件:有文字 OR 有图片,缺一不可 —— 仅按图片发送(没有文字描述)对 AI 体验差,
+        // 但用户能明确表达"就这张图自己看"或"对比第 1 / 2 张",所以允许只发图片。
+        if ((text.isEmpty() && images.isEmpty()) || state.chatSending) return
         state.chatInput = ""
-        sendChatMessage(text)
+        // 取出当前快照后立刻清空 pendingImages,避免 UI 显示与服务端重复。
+        if (images.isNotEmpty()) {
+            state.pendingImages.clear()
+        }
+        sendChatMessage(text, images)
     }
 
     fun quickSend(text: String) {
         if (text.isBlank() || state.chatSending) return
-        sendChatMessage(text.trim())
+        sendChatMessage(text.trim(), emptyList())
     }
 
-    fun sendChatMessage(text: String) {
+    /**
+     * 发送一条消息给 AI。
+     *
+     * @param text        文本内容(已 trim)
+     * @param attachments 用户随本条消息附带的图片附件(2026.x 多模态);
+     *                    由 [sendChat] 把 [state.pendingImages] 的当前快照传入,发送后清空。
+     *
+     * 当文本对应 ask_user 的回复(无 options 场景)时,text 作为 tool_result 回传,attachments 被忽略
+     * —— tool_result 本身不参与多模态协议(且 ask_user 回复不需要传图)。
+     */
+    fun sendChatMessage(text: String, attachments: List<ChatAttachment> = emptyList()) {
         val askToolCallId = state.pendingAskUserToolCallId
         if (askToolCallId != null) {
             // 这是对 ask_user(无 options 场景)的回复,作为 tool_result 回传给 AI,
@@ -108,7 +126,9 @@ internal class InsertStringsChatDriver(
             state.pendingAskUserToolCallId = null
             state.chatMessages.add(ChatMessage(role = "tool", content = text, toolCallId = askToolCallId))
         } else {
-            state.chatMessages.add(ChatMessage(role = "user", content = text))
+            state.chatMessages.add(
+                ChatMessage(role = "user", content = text, attachments = attachments)
+            )
         }
         state.toolDocLoadCount = 0
         state.askUserCallCount = 0
@@ -310,6 +330,9 @@ internal class InsertStringsChatDriver(
         // 引用内容是一次性的入口上下文,新会话不应继续展示旧引用 —— 避免「New Topic」之后
         // 旧编辑器选区还挂在聊天列表顶部,造成新对话中用户/AI 误把旧内容当作上下文。
         state.quoteContent = null
+        // 清空待发送图片附件,避免「New Topic」之后旧图出现在新会话中。
+        // 图片涉及内存中的 BufferedImage 缩略图引用,大列表不清空会持续占用内存。
+        state.pendingImages.clear()
     }
 
     /**

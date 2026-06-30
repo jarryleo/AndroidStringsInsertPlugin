@@ -14,6 +14,7 @@ import androidx.compose.ui.awt.ComposePanel
 import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.ai.AiAction
 import cn.jarryleo.insert_strings.ai.AiSettingsService
+import cn.jarryleo.insert_strings.ai.ChatAttachment
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.ClipboardManager
 import cn.jarryleo.insert_strings.sheets.SheetsManager
@@ -32,6 +33,7 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
 import java.awt.*
+import java.awt.datatransfer.Transferable
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.awt.event.MouseAdapter
@@ -271,6 +273,12 @@ class ExtractStringsAction : AnAction() {
                         ClipboardManager.setSysClipboardText(text)
                         state.showToast("已复制到剪贴板")
                     },
+                    // ===== 多模态图片(2026.x 新增)=====
+                    pendingImages = state.pendingImages,
+                    onPickImage = { onPickImageClicked(state) },
+                    onRemoveImage = { id -> state.pendingImages.removeAll { it.id == id } },
+                    onImageDropped = { t -> onImageDroppedOrPasted(state, t) },
+                    onPasteFromClipboard = { onPasteFromClipboard(state) },
                 )
             }
         }
@@ -455,6 +463,9 @@ private class ExtractStringsChatHolder(
     // 替代旧版「自动以首条 user 消息发出『解释选中代码』」这种隐式行为。
     override var quoteContent: String? = null
 
+    // 待发送的图片附件(2026.x 多模态):粘贴/选择/拖拽进来的图。
+    override val pendingImages: SnapshotStateList<ChatAttachment> = mutableStateListOf()
+
     @Volatile
     override var stopRequested: Boolean = false
     override var pendingAskUserToolCallId: String? = null
@@ -541,3 +552,4 @@ private class ExtractStringsChatHolder(
         }
     }
 }
+

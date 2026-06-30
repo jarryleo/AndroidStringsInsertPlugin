@@ -3,6 +3,7 @@ package cn.jarryleo.insert_strings.ui
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -15,13 +16,20 @@ import androidx.compose.material.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.awtTransferable
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import cn.jarryleo.insert_strings.ai.ChatAttachment
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.ai.ToolCall
 import cn.jarryleo.insert_strings.phrases.QuickPhrase
@@ -30,6 +38,8 @@ import com.google.gson.JsonParser
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import java.awt.Window
+import java.awt.datatransfer.Transferable
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -105,6 +115,37 @@ fun AiChatContent(
      */
     onClearSelected: (() -> Unit)? = null,
     canClear: Boolean = true,
+    // ===== 图片附件(2026.x 多模态功能) =====
+    /**
+     * 待发送的图片附件列表(粘贴/选择/拖拽进来的图,未随下一条 user 消息发出)。
+     * 在聊天输入框上方以横向滚动的缩略图列表展示,每张图右上角有 × 删除按钮。
+     * 非空时才渲染整条缩略图条(避免空 UI 占用空间)。
+     */
+    pendingImages: List<ChatAttachment> = emptyList(),
+    /**
+     * 「📎」按钮点击回调:由 caller 弹文件选择器 / 处理完成把图加入 [pendingImages]。
+     * 不传则不渲染「📎」按钮(向后兼容旧调用方)。
+     */
+    onPickImage: (() -> Unit)? = null,
+    /**
+     * 缩略图右上角 × 删除按钮回调(2026.x 多模态)。参数是 [ChatAttachment.id]。
+     * 仅在 [pendingImages] 非空时回调;不传则 × 按钮不渲染。
+     */
+    onRemoveImage: ((String) -> Unit)? = null,
+    /**
+     * 拖拽文件到聊天输入框时触发的回调(2026.x 多模态)。
+     * 由 caller 检查 [Transferable] 内是否包含图片,选择后加入 [pendingImages]。
+     * 不传则输入框不响应拖拽。
+     */
+    onImageDropped: ((Transferable) -> Unit)? = null,
+    /**
+     * Ctrl+V / Cmd+V 拦截后的处理回调(2026.x 多模态)。
+     * 由 caller 自行读系统剪贴板:是图片 → 加入 pendingImages;
+     * 是文字 → 把文字追加到 [chatInput](等同原生粘贴);
+     * 空 → toast「剪贴板为空」。
+     * 不传则 Ctrl+V 走原生粘贴(只贴文字)。
+     */
+    onPasteFromClipboard: (() -> Unit)? = null,
 ) {
     Box(modifier = modifier) {
         AiChatBody(
@@ -131,6 +172,11 @@ fun AiChatContent(
             onCopyQuote = onCopyQuote,
             onClearSelected = onClearSelected,
             canClear = canClear,
+            pendingImages = pendingImages,
+            onPickImage = onPickImage,
+            onRemoveImage = onRemoveImage,
+            onImageDropped = onImageDropped,
+            onPasteFromClipboard = onPasteFromClipboard,
         )
         if (showContextPopup) {
             ContextPopupOverlay(
@@ -142,6 +188,7 @@ fun AiChatContent(
     }
 }
 
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 private fun AiChatBody(
     chatMessages: List<ChatMessage>,
@@ -167,6 +214,11 @@ private fun AiChatBody(
     onCopyQuote: ((String) -> Unit)? = null,
     onClearSelected: (() -> Unit)? = null,
     canClear: Boolean = true,
+    pendingImages: List<ChatAttachment> = emptyList(),
+    onPickImage: (() -> Unit)? = null,
+    onRemoveImage: ((String) -> Unit)? = null,
+    onImageDropped: ((Transferable) -> Unit)? = null,
+    onPasteFromClipboard: (() -> Unit)? = null,
 ) {
     val quotedContentState = remember { mutableStateOf(quoteContent) }
     val listState = rememberLazyListState()
@@ -423,6 +475,16 @@ private fun AiChatBody(
             }
         }
         Spacer(Modifier.height(8.dp))
+        // ===== 待发送图片缩略图条(2026.x 多模态) =====
+        // 位置:快捷短语与输入框之间 —— 用户填文字描述时,上方能看到「这几张图会一起发出去」。
+        // 仅在有图时渲染,空时不占空间;整条 horizontalScroll,图多时横向滚。
+        if (pendingImages.isNotEmpty()) {
+            PendingImageStrip(
+                images = pendingImages,
+                onRemove = onRemoveImage,
+                colors = colors,
+            )
+        }
         if (showQuickPhrases && quickPhrases.isNotEmpty()) {
             // 快捷短语以按钮形式展示,点击即把 phrase.text 作为用户消息发送。
             // 颜色从 phrase.color 解析,失败/null 沿用 IDE 主题色。
@@ -444,7 +506,28 @@ private fun AiChatBody(
         }
 
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                // 拖拽支持(2026.x 多模态):拖图到聊天输入框时识别为图片并加入 [pendingImages]。
+                // 仅在 [onImageDropped] 非 null 时挂载 dragAndDropTarget,其它场景无副作用。
+                .then(
+                    if (onImageDropped != null) {
+                        Modifier.dragAndDropTarget(
+                            shouldStartDragAndDrop = { true },
+                            target = remember(onImageDropped) {
+                                object : DragAndDropTarget {
+                                    override fun onStarted(event: DragAndDropEvent) {}
+                                    override fun onEnded(event: DragAndDropEvent) {}
+                                    override fun onDrop(event: DragAndDropEvent): Boolean {
+                                        val t = event.awtTransferable
+                                        onImageDropped?.invoke(t)
+                                        return true
+                                    }
+                                }
+                            }
+                        )
+                    } else Modifier
+                ),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
@@ -457,7 +540,22 @@ private fun AiChatBody(
                 colors = colors,
                 // 回车发送,Alt+回车 / Shift+回车 换行
                 onSend = onSendChat,
+                // Ctrl/Cmd+V 拦截(2026.x 多模态):设置后,粘贴组合键被本回调截断。
+                // 实际行为在 caller 端实现:剪贴板是图片 → 加入 pendingImages;
+                // 剪贴板是文字 → 调 onChatInputChange 追加文字(保持原生粘贴行为)。
+                onPaste = { onPasteFromClipboard?.invoke() },
             )
+            // 📎 选图按钮(2026.x 多模态):位于 Send 按钮左侧,与 Send 按钮等高(26dp),
+            // 点击调 [onPickImage] 让 caller 弹文件选择器。仅在 [onPickImage] 非 null 时渲染。
+            if (onPickImage != null) {
+                CompactButton(
+                    text = "📎",
+                    onClick = onPickImage,
+                    modifier = Modifier.width(32.dp),
+                    colors = colors,
+                    enabled = !chatSending,
+                )
+            }
             if (chatSending) {
                 CompactButton(
                     text = "Stop",
@@ -627,6 +725,237 @@ private fun SelectedKeysPanel(
  *      * AI 正在生成(chatSending=true)时所有按钮禁用,避免触发竞态。
  *      * 复制按钮不传 [onCopy] 时不渲染(例如主面板没接剪贴板回调的场景)。
  */
+
+/**
+ * 待发送图片缩略图条(2026.x 多模态)。
+ *
+ * 位置:聊天输入框正上方。
+ * 布局:`LazyRow` 横向滚动的卡片列表,每张卡 = 缩略图 + 序号 + 右上角 × 按钮。
+ * 整体高度固定 ≈ 86dp(80dp 图 + 4dp 上下 padding + 序号文字),不会撑高聊天区。
+ * 图特别多时(几十张)横向滚动;每张图右上角的 × 调用 [onRemove](id) 由 caller 从 pendingImages 删除。
+ *
+ * 视觉:
+ *  - 缩略图用 [ChatAttachment.thumbnail] 的 BufferedImage 渲染(降采样到 80~96dp,见 [ChatAttachment.loadFromBytes])。
+ *  - × 按钮是 18dp 圆形黑底白字,叠在缩略图右上角,点击 hover 时会变色。
+ *  - 卡片底色用 fieldBackground,边框用 grid,跟消息区保持一致。
+ */
+@Composable
+private fun PendingImageStrip(
+    images: List<ChatAttachment>,
+    onRemove: ((String) -> Unit)?,
+    colors: IdeColors,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(BorderStroke(1.dp, colors.border), RoundedCornerShape(4.dp))
+            .background(colors.tableBackground, RoundedCornerShape(4.dp))
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        // 左侧:「待发送(N)」标签
+        Text(
+            text = "待发送(${images.size})",
+            color = colors.secondaryText,
+            style = compactTextStyle(colors.secondaryText).copy(fontWeight = FontWeight.SemiBold),
+            modifier = Modifier.padding(end = 2.dp),
+        )
+        // 右侧:横向滚动的缩略图列表
+        LazyRow(
+            modifier = Modifier.weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            contentPadding = PaddingValues(vertical = 2.dp),
+        ) {
+            itemsIndexed(images, key = { _, img -> img.id }) { index, img ->
+                PendingImageThumb(
+                    index = index,
+                    image = img,
+                    onRemove = onRemove?.let { { onRemove(img.id) } },
+                    colors = colors,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 单张图片缩略图卡片(2026.x 多模态)。
+ *
+ * 布局:
+ *  - 80×80 dp 缩略图(`ContentScale.Crop` 居中裁切,保证条带高度统一);
+ *  - 左下角序号(用户引用「第 1 / 2 张图」时 AI 可对应);
+ *  - 右上角 × 删除按钮(18dp 圆形黑底白字)。
+ *
+ * 若 [image.thumbnail] 为 null(理论上 [ChatAttachment.loadFromBytes] 总会渲染,做兜底),
+ * 用 [colors.fieldBackground] 占位,避免 NPE。
+ */
+@Composable
+private fun PendingImageThumb(
+    index: Int,
+    image: ChatAttachment,
+    onRemove: (() -> Unit)?,
+    colors: IdeColors,
+) {
+    Box(
+        modifier = Modifier
+            .size(width = 80.dp, height = 86.dp)
+            .border(BorderStroke(1.dp, colors.grid), RoundedCornerShape(4.dp))
+            .background(colors.fieldBackground, RoundedCornerShape(4.dp))
+            .padding(2.dp),
+    ) {
+        val thumb = image.thumbnail
+        if (thumb != null) {
+            // BufferedImage → Compose ImageBitmap:走 Desktop 平台提供的 `toComposeImageBitmap` 扩展
+            // (在 `androidx.compose.ui.graphics.DesktopImageConverters_desktopKt` 中,
+            //  对应 Compose Desktop 的 Skia 后端)。用 `toComposeImageBitmap` 而不是 `asImageBitmap`,
+            //  后者只对 `androidx.compose.ui.graphics.Image` / `Bitmap` 生效,不覆盖 java.awt.Image。
+            Image(
+                bitmap = thumb.toComposeImageBitmap(),
+                contentDescription = image.fileName,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(colors.fieldBackground, RoundedCornerShape(3.dp)),
+                contentScale = ContentScale.Crop,
+            )
+        }
+        // 序号:左下角小圆角背景 + 文字,方便用户对 AI 说"看第 1 / 2 张"。
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(2.dp)
+                .background(Color(0xCC000000), RoundedCornerShape(2.dp))
+                .padding(horizontal = 4.dp, vertical = 1.dp),
+        ) {
+            Text(
+                text = "${index + 1}",
+                color = Color.White,
+                style = compactTextStyle(Color.White).copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
+            )
+        }
+        // × 删除按钮:右上角圆形黑底白字,18dp,点击调 [onRemove]。
+        if (onRemove != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .size(18.dp)
+                    .background(Color(0xCC000000), CircleShape)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { onRemove() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "×",
+                    color = Color.White,
+                    style = compactTextStyle(Color.White).copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 用户消息气泡内的图片附件(2026.x 多模态)。
+ *
+ * 与 [PendingImageStrip] 的差别:
+ *  - 位置不同:本组件在 **气泡内**(用户已发送的图,与气泡一起成为对话历史一部分),
+ *    [PendingImageStrip] 在 **输入框上方**(还没发送的图)。
+ *  - 视觉不同:本组件用大一些的缩略图(最大边 160dp,`ContentScale.Fit` 保留原图比例),
+ *    让用户在聊天气泡里能看清图。`Fit` 而不是 `Crop` 是因为截图 / 设计图比例多样,
+ *    `Crop` 会切掉关键信息(如全屏截图的上半部被切掉)。
+ *  - 交互不同:不显示序号(发出去时 AI 已能看到 attachments 顺序,用户回看时也有时间戳);
+ *    不显示「全清」按钮(已发消息不能编辑);
+ *    **点击缩略图** → 弹 [ImagePreviewDialog] 显示大图(2026.x 增强)。
+ *  - 数量很多(≥4)时:横向 `FlowRow` 自动换行,而不是 `LazyRow` 横向滚动。
+ *    理由:气泡内的图片是历史记录,用户回看时希望「一眼看到全貌」,横向滚动会让图藏起来
+ *    看不见;气泡本身可换行展示更适合回看场景。
+ *
+ * 颜色:用户气泡底色是品牌色(蓝),缩略图边框用 [colors.grid],在深底上仍能看清;
+ * 缩略图自身用原始 BufferedImage 渲染,不染色。
+ */
+@Composable
+private fun UserMessageAttachments(
+    modifier: Modifier = Modifier,
+    attachments: List<ChatAttachment>,
+    colors: IdeColors,
+) {
+    if (attachments.isEmpty()) return
+    FlowRow(
+        modifier = modifier.sizeIn(minWidth = 120.dp, minHeight = 80.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        attachments.forEach { att ->
+            UserMessageAttachmentThumb(
+                attachment = att,
+                colors = colors,
+            )
+        }
+    }
+}
+
+/**
+ * 单张已发送图片缩略图(在用户气泡内,2026.x 多模态)。
+ *
+ * 与 [PendingImageThumb] 的差别:
+ *  - 尺寸:最大边 80dp(用户回看时希望看清图,而不是输入区那种紧凑预览)。
+ *  - 不显示序号 / × 按钮(已发送,不能编辑 / 删除)。
+ *  - 背景:`colors.grid`(更深的描边让图与品牌色底区分开;图片自己的 BufferedImage 仍是原色)。
+ *  - 图加载失败(thumbnail=null)时:用 colors.fieldBackground 占位 + 「图片」文字,避免 NPE。
+ *  - **点击缩略图**(2026.x):弹 [ImagePreviewDialog] 显示原图等比缩放,Esc / × / resize 都可关闭。
+ */
+@Composable
+private fun UserMessageAttachmentThumb(
+    attachment: ChatAttachment,
+    colors: IdeColors,
+) {
+    val maxEdge = 80.dp
+    val thumb = attachment.thumbnail
+    // 2026.x:把「当前活动窗口」从 Composable scope 提出来,避免在 clickable lambda 里调 remember。
+    val parentWindow: Window? = remember { ComposeWindowLocator.findActiveWindow() }
+    Box(
+        modifier = Modifier
+            .size(maxEdge)
+            .border(
+                BorderStroke(1.dp, colors.grid),
+                RoundedCornerShape(6.dp),
+            )
+            .background(colors.fieldBackground, RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(6.dp))
+            // 2026.x:点击缩略图弹大图预览。
+            // 兼容「thumbnail 缺失」场景(理论上 [ChatAttachment.loadFromBytes] 总生成,
+            // 兜底也能弹 —— dialog 内部会用 attachment.decodeBytes() 重新解码)。
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) {
+                ImagePreviewDialog.show(attachment, parentWindow)
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (thumb != null) {
+            // Fit 而非 Crop:保留原图比例,不让重要内容被切;宽高比不一时会留白。
+            Image(
+                bitmap = thumb.toComposeImageBitmap(),
+                contentDescription = attachment.fileName,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+            )
+        } else {
+            // 兜底:无缩略图时显示文件名(截断 12 字符)以提示「这里有图」
+            Text(
+                text = attachment.fileName.take(12),
+                color = colors.secondaryText,
+                style = compactTextStyle(colors.secondaryText).copy(fontSize = 10.sp),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
 @Composable
 private fun QuoteBubble(
     text: String,
@@ -856,7 +1185,11 @@ private fun ChatBubble(
     val showReply = !isUser && message.content.isNotBlank()
     val showAskQuestion = !isUser && !message.askQuestion.isNullOrBlank()
     val showUserContent = isUser && message.content.isNotBlank()
-    val hasAnyContent = showUserContent || showThinkingHeader || showReply || showAskQuestion
+    // 2026.x 多模态:用户消息携带的图片附件(粘贴/选择/拖拽得到的图)。
+    // 仅在 user 角色时考虑;assistant / tool 不带 attachments。
+    // 仅 attachments 也算「有内容」(2026.x 用户可能只发图不写字)。
+    val showUserAttachments = isUser && message.attachments.isNotEmpty()
+    val hasAnyContent = showUserContent || showThinkingHeader || showReply || showAskQuestion || showUserAttachments
     val showTimestamp = isTool || hasAnyContent
     val timestampText = formatMessageTimestamp(message.timestamp)
     Column(
@@ -927,6 +1260,16 @@ private fun ChatBubble(
                         .padding(horizontal = 10.dp, vertical = 6.dp),
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        // 2026.x 多模态:用户消息的图片附件,先渲染在文本/思考之上。
+                        // - 用 [UserMessageAttachments] 组件(横向卡片,可点击放大)。
+                        // - 助手 / 工具消息不渲染此块(它们不带 attachments)。
+                        if (showUserAttachments) {
+                            UserMessageAttachments(
+                                modifier = Modifier.wrapContentHeight().wrapContentWidth(unbounded = true),
+                                attachments = message.attachments,
+                                colors = colors,
+                            )
+                        }
                         if (showThinkingHeader) {
                             ThinkingSection(
                                 thinking = message.thinking,

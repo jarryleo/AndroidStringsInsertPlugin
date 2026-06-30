@@ -14,6 +14,8 @@ import androidx.compose.ui.awt.ComposePanel
 import androidx.compose.ui.unit.dp
 import cn.jarryleo.insert_strings.ai.AiAction
 import cn.jarryleo.insert_strings.ai.AiSettingsService
+import cn.jarryleo.insert_strings.ai.ChatAttachment
+import cn.jarryleo.insert_strings.ai.ChatAttachmentLoadResult
 import cn.jarryleo.insert_strings.ai.ChatMessage
 import cn.jarryleo.insert_strings.sheets.SheetsManager
 import cn.jarryleo.insert_strings.ui.*
@@ -28,6 +30,7 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
 import java.awt.*
+import java.awt.datatransfer.Transferable
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.awt.event.MouseAdapter
@@ -245,6 +248,12 @@ class AskAiAction : AnAction() {
                         ClipboardManager.setSysClipboardText(text)
                         state.showToast("已复制到剪贴板")
                     },
+                    // ===== 多模态图片(2026.x 新增)=====
+                    pendingImages = state.pendingImages,
+                    onPickImage = { onPickImageClicked(state) },
+                    onRemoveImage = { id -> state.pendingImages.removeAll { it.id == id } },
+                    onImageDropped = { t -> onImageDroppedOrPasted(state, t) },
+                    onPasteFromClipboard = { onPasteFromClipboard(state) },
                 )
             }
         }
@@ -400,6 +409,74 @@ class AskAiAction : AnAction() {
     }
 }
 
+// ============== 多模态图片相关工具(2026.x 新增)==============
+// 三个聊天入口(主面板 / AskAi / ExtractStrings)复用同一套实现,放在顶层函数里共享。
+// 入参是 [ChatStateHolder] 即可。
+
+/**
+ * 「📎」按钮回调:弹文件选择器,选中的图片加入 [ChatStateHolder.pendingImages]。
+ */
+internal fun onPickImageClicked(state: ChatStateHolder) {
+    try {
+        val picked = ChatImagePicker.pickImageFiles(state.project)
+        picked.forEach { att ->
+            if (state.pendingImages.none { it.id == att.id }) {
+                state.pendingImages.add(att)
+            }
+        }
+    } catch (t: Throwable) {
+        state.showToast("选图失败: ${t.message}")
+    }
+}
+
+/**
+ * 拖拽图片到聊天输入框时的回调:从 Transferable 读图并加入 [ChatStateHolder.pendingImages]。
+ */
+internal fun onImageDroppedOrPasted(state: ChatStateHolder, transferable: Transferable) {
+    when (val r = ChatImagePicker.addFromTransferable(transferable)) {
+        is ChatAttachmentLoadResult.Ok -> {
+            if (state.pendingImages.none { it.id == r.attachment.id }) {
+                state.pendingImages.add(r.attachment)
+            }
+        }
+        is ChatAttachmentLoadResult.Error -> state.showToast(r.message)
+        ChatAttachmentLoadResult.Unavailable -> { /* 静默忽略 */ }
+    }
+}
+
+/**
+ * Ctrl+V / Cmd+V 拦截(2026.x 多模态):
+ *  - 剪贴板是图片 → 加入 [ChatStateHolder.pendingImages];
+ *  - 剪贴板是文字 → 追加到 [ChatStateHolder.chatInput](等同原生粘贴);
+ *  - 空 / 其它 → toast 提示。
+ */
+internal fun onPasteFromClipboard(state: ChatStateHolder) {
+    when (val r = ChatImagePicker.addFromClipboard()) {
+        is ChatAttachmentLoadResult.Ok -> {
+            if (state.pendingImages.none { it.id == r.attachment.id }) {
+                state.pendingImages.add(r.attachment)
+            }
+            return
+        }
+        is ChatAttachmentLoadResult.Error -> {
+            state.showToast(r.message)
+            return
+        }
+        ChatAttachmentLoadResult.Unavailable -> { /* 走文字兜底 */ }
+    }
+    runCatching {
+        val text = java.awt.Toolkit.getDefaultToolkit().systemClipboard
+            .getContents(null)
+            ?.takeIf { it.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.stringFlavor) }
+            ?.let { it.getTransferData(java.awt.datatransfer.DataFlavor.stringFlavor) as? String }
+        if (!text.isNullOrEmpty()) {
+            state.chatInput = state.chatInput + text
+        } else {
+            state.showToast("剪贴板为空")
+        }
+    }.onFailure { state.showToast("粘贴失败: ${it.message}") }
+}
+
 /**
  * AskAi 弹框使用的 [ChatStateHolder] 轻量实现。
  *
@@ -427,6 +504,10 @@ private class AskAiChatHolder(
     // 入口打开时携带的「引用内容」:编辑器选中的文本会作为引用气泡展示在 chat 顶部
     // (不再自动以首条 user 消息发出"解释选中代码"这种隐式 prompt)。
     override var quoteContent: String? = null
+
+    // 待发送的图片附件(2026.x 多模态):粘贴/选择/拖拽进来的图,
+    // 发送时随本条 user 消息发出,发送后清空。
+    override val pendingImages: SnapshotStateList<ChatAttachment> = mutableStateListOf()
 
     @Volatile
     override var stopRequested: Boolean = false
@@ -516,3 +597,4 @@ private class AskAiChatHolder(
         }
     }
 }
+
