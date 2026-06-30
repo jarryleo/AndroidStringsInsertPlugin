@@ -77,6 +77,7 @@ object ToolDefinitions {
         TOOL_LOAD_TOOL_DOC,
         TOOL_REPLACE_SELECTION,
         TOOL_RUN_SHELL,
+        TOOL_READ_DIAGNOSTICS,
         TOOL_TASK_COMPLETE,
     )
 
@@ -108,6 +109,7 @@ object ToolDefinitions {
     const val TOOL_ASK_USER = "ask_user"
     const val TOOL_LOAD_TOOL_DOC = "load_tool_doc"
     const val TOOL_RUN_SHELL = "run_shell"
+    const val TOOL_READ_DIAGNOSTICS = "read_diagnostics"
     const val TOOL_TASK_COMPLETE = "task_complete"
 
     // region 工具描述文案(主 prompt 引用,这里集中维护)
@@ -242,6 +244,12 @@ object ToolDefinitions {
             "cwd 相对项目根。删除/推送/部署前用 ask_user 描述意图。Windows 走 cmd.exe /c。" +
             " → load_tool_doc(\"run_shell\")。"
 
+    private const val DESC_READ_DIAGNOSTICS =
+        "读编辑器级 LSP/静态分析诊断:打开文件中的 ERROR/WARNING(Java/Kotlin 一视同仁)。" +
+            "**只覆盖当前打开的文件**,不包含 build-time 错(资源 ID/kapt/lint 用 run_shell 跑 gradlew)。" +
+            "写完文件 daemon 异步刷(~500ms),改后立刻读可能拿到旧结果。" +
+            " → load_tool_doc(\"read_diagnostics\")。"
+
     private const val DESC_LOAD_TOOL_DOC =
         "按需加载工具详细文档(枚举值/参数约束/示例)。" +
             "连续 load_tool_doc 有次数上限,一次最多 1-2 个,拿到后立即调实际工具。"
@@ -325,6 +333,7 @@ object ToolDefinitions {
             add(openAiTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(openAiTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
             add(openAiTool(TOOL_RUN_SHELL, DESC_RUN_SHELL, openAiRunShellParams()))
+            add(openAiTool(TOOL_READ_DIAGNOSTICS, DESC_READ_DIAGNOSTICS, openAiReadDiagnosticsParams()))
             add(openAiTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
         }
     }
@@ -372,6 +381,7 @@ object ToolDefinitions {
             add(anthropicTool(TOOL_LOAD_TOOL_DOC, DESC_LOAD_TOOL_DOC, openAiLoadToolDocParams()))
             add(anthropicTool(TOOL_REPLACE_SELECTION, DESC_REPLACE_SELECTION, openAiReplaceSelectionParams()))
             add(anthropicTool(TOOL_RUN_SHELL, DESC_RUN_SHELL, openAiRunShellParams()))
+            add(anthropicTool(TOOL_READ_DIAGNOSTICS, DESC_READ_DIAGNOSTICS, openAiReadDiagnosticsParams()))
             add(anthropicTool(TOOL_TASK_COMPLETE, DESC_TASK_COMPLETE, openAiTaskCompleteParams()))
         }
     }
@@ -1269,6 +1279,28 @@ object ToolDefinitions {
                 })
             })
             add("required", JsonArray().apply { add("command") })
+        }
+    }
+
+    private fun openAiReadDiagnosticsParams(): JsonObject {
+        val severityEnum = JsonArray().apply {
+            add("ERROR")
+            add("WARNING")
+            add("WEAK_WARNING")
+        }
+        return obj {
+            addProperty("type", "object")
+            add("properties", obj {
+                add("minSeverity", obj {
+                    addProperty("type", "string")
+                    add("enum", severityEnum)
+                    addProperty(
+                        "description",
+                        "可选,过滤级别。WEAK_WARNING(默认,收齐 3 种级别)/ WARNING / ERROR。" +
+                            "传 WEAK_WARNING 一次拿全,AI 按需筛选。"
+                    )
+                })
+            })
         }
     }
 

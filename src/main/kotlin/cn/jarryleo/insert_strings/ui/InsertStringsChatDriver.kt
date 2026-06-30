@@ -42,6 +42,12 @@ internal class InsertStringsChatDriver(
      */
     private val shellOps: InsertStringsShellOpsController by lazy { InsertStringsShellOpsController(state) }
 
+    /**
+     * 编辑器诊断域(read_diagnostics 工具)的运行时控制器。
+     * lazy 持有 — 多数对话不会触发,等真要用再实例化,省内存。
+     */
+    private val diagnosticsOps: InsertStringsDiagnosticsController by lazy { InsertStringsDiagnosticsController(state) }
+
     companion object {
         // 单次对话中 AI 调用工具的最大轮数。超过则强制结束,防止死循环。
         // 设 30 足以覆盖现实中的多步操作(检查+修正等),又能及时止损。
@@ -945,6 +951,17 @@ internal class InsertStringsChatDriver(
             return
         }
 
+        // Priority 6.7: read_diagnostics —— 读编辑器级 LSP/静态分析诊断。
+        // 紧跟 run_shell 之后(常配合:跑 build 失败后,用 read_diagnostics 精准定位编辑器里打开的文件的错);
+        // 纯本地 daemon 缓存读取,毫秒级返回,不会拖累并发。
+        val diagEntries = unprocessed.filter { it.action is AiAction.ReadDiagnostics }
+        if (diagEntries.isNotEmpty()) {
+            unprocessed.removeAll(diagEntries)
+            executeReadDiagnostics(diagEntries, context, iteration)
+            addSkippedToolResults(unprocessed, "因已执行 read_diagnostics 而跳过")
+            return
+        }
+
         // Priority 7: 文件操作域(get_editor_file / read_file / read_files / edit_file /
         //   create_file / delete_file / move_file / search_in_files / find_references /
         //   list_files / file_info)—— 2026.x 新增 4 个写代码工具(file_info / read_files /
@@ -1029,6 +1046,8 @@ internal class InsertStringsChatDriver(
                 is AiAction.MoveFile -> "move_file"
                 // 新增 run_shell(命令流式执行)
                 is AiAction.RunShell -> "run_shell"
+                // 新增 read_diagnostics(编辑器级 LSP 诊断)
+                is AiAction.ReadDiagnostics -> "read_diagnostics"
             }
             state.chatMessages.add(
                 ChatMessage(
@@ -1666,6 +1685,59 @@ internal class InsertStringsChatDriver(
                         ?: "[工具执行异常] run_shell 失败:action 类型不匹配"
                 } catch (e: Exception) {
                     "[工具执行异常] run_shell 失败:${e.message ?: e.javaClass.simpleName}"
+                }
+                pendingResults.add(toolCallId to resultText)
+            }
+            SwingUtilities.invokeLater {
+                pendingResults.forEach { (toolCallId, content) ->
+                    state.chatMessages.add(
+                        ChatMessage(role = "tool", content = content, toolCallId = toolCallId)
+                    )
+                }
+                continueToolLoopInBackground(context, iteration + 1)
+            }
+        }
+    }
+
+    /**
+     * 执行 [AiAction.ReadDiagnostics] — 读当前打开文件的编辑器级诊断。
+     *
+     * 流程:
+     * 1. 跑在 pooled thread;controller 内部枚举打开文件(EDT 上)+ 读 highlights(ReadAction),
+     *    同步完成,毫秒级返回。
+     * 2. controller 把结果序列化为 `JsonObject` 字符串(`[工具执行结果] 类型:read_diagnostics ...` 起头),
+     *    driver 直接作为 tool_result 消息推回去。
+     * 3. 一次调用只读一次 daemon 缓存;如果 AI 想"读完错 → 改 → 再读"循环,会触发
+     *    多轮 tool loop,每轮重新读缓存(daemon 异步跑通常 100-500ms 追上)。
+     *
+     * 停止语义:如果 `state.stopRequested` 为 true,直接返回"已取消"信息,不调 daemon。
+     */
+    private fun executeReadDiagnostics(
+        entries: List<ActionWithToolCall>,
+        context: String,
+        iteration: Int
+    ) {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val pendingResults = mutableListOf<Pair<String, String>>()
+            entries.forEach { (action, toolCallId) ->
+                if (toolCallId.isEmpty()) return@forEach
+                if (state.stopRequested) {
+                    pendingResults.add(
+                        toolCallId to "[工具执行结果] 类型:read_diagnostics 状态:已取消 信息:用户停止"
+                    )
+                    return@forEach
+                }
+                val resultText = try {
+                    val a = action as? AiAction.ReadDiagnostics
+                    if (a == null) {
+                        "[工具执行异常] read_diagnostics 失败:action 类型不匹配"
+                    } else {
+                        val severity = diagnosticsOps.parseSeverity(a.minSeverity)
+                        val result = diagnosticsOps.collectOpenFileDiagnostics(severity)
+                        diagnosticsOps.formatToolResult(result, state.project.basePath)
+                    }
+                } catch (e: Exception) {
+                    "[工具执行异常] read_diagnostics 失败:${e.message ?: e.javaClass.simpleName}"
                 }
                 pendingResults.add(toolCallId to resultText)
             }

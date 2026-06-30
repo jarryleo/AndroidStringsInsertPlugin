@@ -1633,6 +1633,11 @@ private fun targetFromArgs(toolName: String, args: JsonObject?): String? {
             "shell: $cmd $firstArg$cwd".trim()
         }
 
+        "read_diagnostics" -> {
+            val sev = args.getString("minSeverity")
+            if (sev.isNullOrBlank()) "LSP: all severities" else "LSP: $sev+"
+        }
+
         else -> null
     }
 }

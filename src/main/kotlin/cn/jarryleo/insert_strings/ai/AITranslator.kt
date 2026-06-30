@@ -161,6 +161,14 @@ object AITranslator {
 - 不要用 `run_shell` 写 `strings.xml`、调 `git commit` / `git push` / 跑 `gradle assemble*` 这类有专用工具的操作;优先用专用工具(insert_strings / replace_selection / file_ops)。
 - 返回的 `tool_result` 写明 成功 / 失败(exit=N) / 超时(<ms>ms) / 已取消,不要自己再 ask_user 重复同一问题,直接用自然语言转告用户即可。
 
+## 编辑器诊断规则(`read_diagnostics` 适用场景)
+- `read_diagnostics` 读的是 **daemon 缓存**(异步,通常 100-500ms 后追上),`edit_file` 写完代码**立刻**调本工具可能拿到旧结果 — 先调一个小工具(read_file 之类)让一拍过去,或显式等待。
+- 本工具**只覆盖**当前在编辑器打开的文件(未打开的 daemon 不会跑,结果是空)。要看未打开文件用 `run_shell` 跑 `gradlew compileDebugKotlin` / `mvn compile`。
+- 本工具**不**包含 build-time 错误:kapt、AGP 资源 ID 找不到、lint、K2 FIR 编译错都不在范围 — 这些用 `run_shell` 跑构建命令拿全量。
+- Java / Kotlin 一视同仁,所有 `TextEditorHighlightingPass` 的输出都收齐。
+- 改完一个文件后建议「`read_diagnostics` → 修 → 再 `read_diagnostics`」,直到 `diagnosticCount: 0` 或只剩弱警告。
+- 不要因为 `read_diagnostics` 返回 0 就断言「代码没问题」 — 也可能是 dumb mode / 刚 sync 完 daemon 还没跑完。tool_result 末尾的 `note` 字段会标识这种情况。
+
 ## 函数调用协议(严格)
 工具调用**必须**通过原生 function calling 协议发出:
 - OpenAI / OpenAI 兼容:`message.tool_calls` 数组;
@@ -984,7 +992,8 @@ object AITranslator {
             - timeoutMs（可选,整数）：超时毫秒,默认 60000,范围 1000..600000。超时后进程被强制 kill。
 
             平台差异:
-            - Windows:统一走 `cmd.exe /c "<command> <arg1> <arg2>"`(command 与 args 拼好后整串加双引号传入 cmd)。
+            - Windows:command + args 全部作为 cmd.exe 的独立参数传入(`cmd.exe /c "git" "log" "--oneline" "-10"`),
+              由 `GeneralCommandLine.withParameters` 按 Windows `CommandLineToArgvW` 规则自动加引号。
               支持调用 .bat、命令内置(dir / cd / echo)、系统 PATH 下的可执行文件。
             - POSIX:`[command, arg1, arg2]` 直传 fork+exec,不走 /bin/sh。
               如果 AI 需要 shell 特性(管道/重定向/通配符),**自己**在 command 里写 `/bin/sh`(并把整段脚本放进 args 数组的单元素里)。
@@ -1014,6 +1023,61 @@ object AITranslator {
             {"type":"run_shell","command":"node","args":["scripts/check-i18n.js"],"cwd":"tools"}
         """.trimIndent(),
 
+        "read_diagnostics" to """
+            ## read_diagnostics 详细用法
+            读取**当前在 IDE 编辑器中打开**的所有文件的"编辑器级"诊断
+            (Java / Kotlin 编译错、未解析引用、import 缺失、inspection 警告等),
+            转成扁平 JSON 列表返回。配合 `read_file` / `edit_file` 形成"读诊断 → 改代码 → 再读诊断"小闭环。
+            字段:
+            - minSeverity(可选):过滤级别。WEAK_WARNING(默认,收齐 3 种级别)/ WARNING / ERROR。
+              想要只关注 ERROR 时显式传,否则一次性拿全再由 AI 自行筛选。
+
+            范围与限制(必须读):
+            1. **只覆盖打开的文件**:`FileEditorManager.getOpenFiles()` 决定范围。未打开的文件
+               daemon 不会跑,结果一定是 0 条 — **不要**据此断言"项目没问题"。
+               想知道未打开文件有没有错 → `run_shell gradlew compileDebugKotlin`。
+            2. **读到的是 daemon 缓存,不是实时**:文件刚被 `edit_file` 写过,
+               daemon 异步重跑(通常 100-500ms,大文件或 dirty 队列长时可达 1-2s)。
+               写完文件立刻调本工具**可能拿到旧结果**。建议先调一个轻量工具让一拍过去
+               (read_file 读一行 / current_time / ask_user 问下一步),或显式 sleep。
+            3. **不包含 build-time 错误**:kapt 报错、Android 资源 ID 找不到、lint 警告、
+               K2 FIR 编译器内部错误都不在范围 — 这些用 `run_shell` 跑构建命令。
+            4. **Java + Kotlin 一起**:`processHighlights` 走 `TextEditorHighlightingPass`
+               全集,Kotlin 的 `KotlinHighlightingPass` 也是同一机制,不需要分别调。
+            5. **dumb mode 处理**:项目刚 sync 完、indexing 中,daemon 暂停,tool_result
+               末尾的 `note` 字段会写"dumb mode 或 daemon 未完成" — 这种情况**不要**断言
+               "代码无错",可以补跑一次构建确认。
+
+            返回 tool_result 格式(以 [工具执行结果] 起头,主体是 JSON):
+            ```
+            [工具执行结果] 类型:read_diagnostics 状态:成功 项目根:<path>
+            {
+              "diagnosticCount": 3,
+              "summary": { "ERROR": 1, "WARNING": 2, "WEAK_WARNING": 0 },
+              "openFileCount": 4,
+              "files": [
+                {
+                  "path": "app/src/main/java/com/example/Hello.kt",
+                  "errors": [
+                    { "line": 12, "column": 5, "severity": "ERROR",
+                      "message": "Unresolved reference: foo", "symbol": "foo" }
+                  ]
+                }
+              ],
+              "note": "(可选)dumb mode 或 daemon 未完成,结果可能滞后"
+            }
+            ```
+            - `line` / `column` 0-based。
+            - `symbol` 在 unresolved-ref 错误时是编译期看到的标识符文本(可能是 FQN 片段),
+              其它错误退化为 highlighter 范围内的源码片段(取前 120 字符)。
+            - `diagnosticCount = 0` 不代表"代码无错",可能是 dumb mode / 未打开文件
+              / 还没人触发过 daemon。
+
+            示例:
+            {"type":"read_diagnostics"}
+            {"type":"read_diagnostics","minSeverity":"ERROR"}
+        """.trimIndent(),
+
         "load_tool_doc" to """
             ## load_tool_doc 详细用法
             按需加载工具的详细使用文档（参数约束、枚举值、示例等）。主聊天 system prompt 只放工具清单，详细用法全部按需加载以节省 token。
@@ -1026,7 +1090,7 @@ object AITranslator {
               - get_editor_file、read_file、read_files、edit_file、create_file、delete_file、move_file
               - search_in_files、find_references、list_files、file_info
               - todo_list、todo_add、todo_update、todo_delete
-              - ask_user、load_tool_doc、replace_selection、run_shell、task_complete
+              - ask_user、load_tool_doc、replace_selection、run_shell、read_diagnostics、task_complete
             使用规则：
             - 写代码相关任务(用户说"改 X 文件""加 Y 功能""重构 Z")→ **优先** `load_tool_doc("code_ops")`
               一次拿到全部 11 个工具用法,避免反复调 11 次单工具文档,省 10+ round-trip + token。
@@ -3194,6 +3258,12 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val cwd = args.get("cwd")?.asString?.trim()?.takeIf { it.isNotEmpty() }
                 val timeoutMs = args.get("timeoutMs")?.asInt?.takeIf { it in 1000..600_000 }
                 AiAction.RunShell(command, argList, cwd, timeoutMs)
+            }
+
+            ToolDefinitions.TOOL_READ_DIAGNOSTICS -> {
+                val minSeverity = args.get("minSeverity")?.asString?.trim()
+                    ?.takeIf { it.isNotEmpty() && it in setOf("ERROR", "WARNING", "WEAK_WARNING") }
+                AiAction.ReadDiagnostics(minSeverity)
             }
 
             else -> null

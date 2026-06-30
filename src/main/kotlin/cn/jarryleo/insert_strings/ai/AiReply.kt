@@ -596,6 +596,33 @@ sealed class AiAction {
     ) : AiAction()
 
     // endregion
+
+    // region ============== 编辑器级诊断域(2026 新增) ==============
+    //
+    // read_diagnostics 让 AI 能读取当前 IDE 编辑器中"打开着"的文件
+    // 走 DaemonCodeAnalyzer 抓出来的 ERROR / WARNING 级 highlight —
+    // 编辑器级 LSP 视角,Java / Kotlin 一视同仁,无需 schema 配置。
+    // 配合 read_file / edit_file 形成"读诊断 → 改代码 → 再读诊断"的小闭环;
+    // 涉及 kapt / 资源 ID / K2 FIR 等 build-time 错误仍需 run_shell 跑 gradle。
+    //
+
+    /**
+     * 读取当前打开在编辑器中的所有文件的"编辑器级"诊断
+     * (Java/Kotlin 编译错、未解析引用、import 缺失、inspection 警告等)。
+     *
+     * 设计约束(详见 InsertStringsDiagnosticsController KDoc):
+     * - 只覆盖打开的文件,未打开文件 daemon 不会跑,结果是空。
+     * - 读到的是 daemon 缓存,不是实时(写完文件后等几百 ms 再读)。
+     * - 不包含 build-time 错误(kapt / 资源 ID / lint / K2 FIR 编译错)。
+     *
+     * @param minSeverity 过滤级别 — "ERROR" / "WARNING" / "WEAK_WARNING"(默认)。
+     *                    传 WEAK_WARNING 一次性收齐所有级别,AI 自行按需取舍。
+     */
+    data class ReadDiagnostics(
+        val minSeverity: String? = null,
+    ) : AiAction()
+
+    // endregion
 }
 
 data class AiReply(
