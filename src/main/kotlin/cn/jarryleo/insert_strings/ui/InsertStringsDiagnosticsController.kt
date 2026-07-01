@@ -153,8 +153,10 @@ internal class InsertStringsDiagnosticsController(
                         add("errors", JsonArray().apply {
                             errors.forEach { d ->
                                 add(JsonObject().apply {
-                                    addProperty("line", d.line)
-                                    addProperty("column", d.column)
+                                    // 2026.x 起 read_diagnostics 行/列 1-based(与 read_file / edit_file 一致),
+                                    // 内部仍是 0-based,这里 +1 后再输出,AI 拿到 line N 可直接喂给 edit_file.line。
+                                    addProperty("line", d.line + 1)
+                                    addProperty("column", d.column + 1)
                                     addProperty("severity", d.severity.name)
                                     addProperty("message", d.message)
                                     if (d.symbolName != null) addProperty("symbol", d.symbolName)
@@ -295,12 +297,16 @@ enum class Severity { ERROR, WARNING, WEAK_WARNING, INFO }
  * 给 AI 看的「一行一个错误」的扁平数据。刻意做成 data class + 普通字段,
  * 不要在内部引用 PsiElement / HighlightInfo — 这些对象跨线程 / 跨 daemon
  * 周期都不安全(daemon 重建 markup 时旧 highlighter 会被 dispose)。
+ *
+ * 行/列内部口径 **0-based**(沿用 IntelliJ HighlightInfo 原始口径,转换成本最低);
+ * 对外 JSON 输出由 controller 在序列化时 **+1 转为 1-based**,与 read_file / edit_file
+ * 的 1-based 完全对齐,AI 拿到 `line: N` 可直接喂给 `edit_file.line`。
  */
 data class FileDiagnostic(
     val virtualFile: VirtualFile,
     val relativePath: String?,
-    val line: Int,          // 0-based
-    val column: Int,        // 0-based
+    val line: Int,          // 0-based(internal),JSON 输出 +1
+    val column: Int,        // 0-based(internal),JSON 输出 +1
     val severity: Severity, // ERROR / WARNING / WEAK_WARNING / INFO
     val message: String,    // highlight description
     val symbolName: String?,// 失败符号的 FQN(unresolved-ref 错误)或源码片段

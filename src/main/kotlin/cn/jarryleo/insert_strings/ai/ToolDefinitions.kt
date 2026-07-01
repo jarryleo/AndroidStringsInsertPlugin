@@ -254,6 +254,8 @@ object ToolDefinitions {
         "读编辑器级 LSP/静态分析诊断:打开文件中的 ERROR/WARNING(Java/Kotlin 一视同仁)。" +
             "**只覆盖当前打开的文件**,不包含 build-time 错(资源 ID/kapt/lint 用 run_shell 跑 gradlew)。" +
             "写完文件 daemon 异步刷(~500ms),改后立刻读可能拿到旧结果。" +
+            "**写代码工作流**:对同一文件的一组 edit_file **全部跑完之后**调本工具检错;**不要**在每" +
+            "次 edit_file 后都调(浪费 round-trip,daemon 还没追上)。**优先修 ERROR**,WEAK_WARNING 可暂不修。" +
             " → load_tool_doc(\"read_diagnostics\")。"
 
     private const val DESC_FETCH_URL =

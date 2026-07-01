@@ -257,11 +257,16 @@ object AITranslator {
    这比逐个 load 11 次单工具文档节省 10+ round-trip + 大量 token。
 
 ## 写代码工作流(2026.x 新增,详见 `code_ops` 合并文档)
-当任务涉及改/写项目内代码文件(.kt / .java / .xml / .gradle / 其它)时,按 4 步走:
+当任务涉及改/写项目内代码文件(.kt / .java / .xml / .gradle / 其它)时,按 5 步走:
 - **第 1 步:规划** —— 拆成 2-5 个子动作(读哪些、改哪些、查什么)。
 - **第 2 步:定位** —— `list_files`(找文件) / `search_in_files`(找内容) / `find_references`(找引用点) / `get_editor_file`(看当前打开)。
 - **第 3 步:阅读** —— `read_file`(单文件,支持分页) / `read_files`(批量 2-10 个,省 round-trip) / `file_info`(只查元信息)。
 - **第 4 步:改写** —— `edit_file`(整行定位修改,2026.x 取消列) / `create_file`(新建) / `delete_file`(删) / `move_file`(移动/重命名)。
+- **第 5 步:检错(整文件改完后再做)** —— 对**同一文件**的一组 edit_file **全部跑完之后**调
+  `read_diagnostics` 检错;**不要**在每次 edit_file 后都调(daemon 异步刷,立刻读会拿到旧结果;
+  且浪费 round-trip)。拿到诊断后**优先修 ERROR**,WEAK_WARNING 可暂不修;
+  修到 3 轮还没修完,直接 `task_complete(partial)` 报告「还有 N 个 error 未修」让用户决定。
+  跨文件写代码时,每个文件**各自**走第 4 步 + 第 5 步(不要混着读 diagnostics)。
 **关键点**:
 - 改完文件**不要**再 read_file "验证" —— 系统已自动让 IDE 编辑器/PSI/Daemon Code Analyzer 重读,
   写盘是原子的,直接进入下一个动作。
@@ -821,6 +826,15 @@ object AITranslator {
               - edit_file 的 line 1-based,read_file 返回的 `N: ` 前缀就是可直接传的行号,**不要** ±1 换算
               - **无列参数**(2026.x 取消):AI 给的列号常因 tab/全角空格等偏差 1~N 列导致写入错乱,整行粒度天然对列不敏感
               - 改完后**不要**再 read_file 验证(浪费 round-trip),直接进入下一个动作
+            **第 5 步:检错(整文件改完后再做)** —— 对**同一文件**的一组 edit_file **全部跑完之后**,
+            调 `read_diagnostics` 检错。**不要**在每次 edit_file 后都调(daemon 异步刷,立刻读会拿到
+            旧结果;且浪费 round-trip)。拿到诊断后:
+              - **优先修 ERROR**:`read_file` 看上下文 → `edit_file` 修复 → 再 `read_diagnostics`
+                验证 → 修完为止。
+              - WARNING / WEAK_WARNING 暂时可不修(尤其 lint/style 类),不阻塞推进。
+              - 修到 3 轮还没修完,直接 `task_complete(partial)` 报告「还有 N 个 error 未修」,
+                让用户决定要不要继续。
+              - 跨文件写代码时,每个文件**各自**走第 4 步 + 第 5 步(不要混着读 diagnostics)。
 
             ### 关键约束
             - **路径**:相对项目根(例 "app/src/main/java/Foo.kt")或项目内绝对路径,必须落在项目根内(越界会被拒)。
@@ -841,6 +855,7 @@ object AITranslator {
 
             ### 反例(常见错误)
             - ❌ 调了 edit_file 立刻 read_file 验证 → 浪费 round-trip,IDE 已自动重读
+            - ❌ 每次 edit_file 后都调 read_diagnostics → daemon 没追上、浪费 round-trip;**整文件改完后再调**
             - ❌ 一次性读 5 个大文件用 read_file 循环 → 改用 read_files 一次合并
             - ❌ 用 list_files 找代码 → 改用 search_in_files 找内容更精准
             - ❌ 多次连续 load_tool_doc 单工具 → 调一次 load_tool_doc("code_ops") 拿全部
@@ -1072,6 +1087,15 @@ object AITranslator {
             - minSeverity(可选):过滤级别。WEAK_WARNING(默认,收齐 3 种级别)/ WARNING / ERROR。
               想要只关注 ERROR 时显式传,否则一次性拿全再由 AI 自行筛选。
 
+            **写代码工作流中的位置(2026.x 明确)**:
+            对**同一文件**的一组 edit_file **全部跑完之后**调本工具检错;**不要**在每次 edit_file
+            后都调(daemon 异步刷,立刻读会拿到旧结果;且浪费 round-trip)。
+            拿到诊断后:
+              - **优先修 ERROR**:read_file 看上下文 → edit_file 修复 → 再 read_diagnostics 验证。
+              - WARNING / WEAK_WARNING 可暂不修(尤其 lint/style 类),不阻塞推进。
+              - 修到 3 轮还没修完,直接 task_complete(partial) 报告「还有 N 个 error 未修」让用户决定。
+              - 跨文件写代码时,每个文件**各自**走「edit_file 全跑完 → read_diagnostics」,不要混着读。
+
             范围与限制(必须读):
             1. **只覆盖打开的文件**:`FileEditorManager.getOpenFiles()` 决定范围。未打开的文件
                daemon 不会跑,结果一定是 0 条 — **不要**据此断言"项目没问题"。
@@ -1107,7 +1131,8 @@ object AITranslator {
               "note": "(可选)dumb mode 或 daemon 未完成,结果可能滞后"
             }
             ```
-            - `line` / `column` 0-based。
+            - `line` / `column` **1-based**(2026.x 调整,与 read_file / edit_file 一致;
+              AI 拿到的 `line: N` 可直接喂给 edit_file.line,**不要** ±1 换算)。
             - `symbol` 在 unresolved-ref 错误时是编译期看到的标识符文本(可能是 FQN 片段),
               其它错误退化为 highlighter 范围内的源码片段(取前 120 字符)。
             - `diagnosticCount = 0` 不代表"代码无错",可能是 dumb mode / 未打开文件
