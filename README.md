@@ -1,8 +1,8 @@
-# Android Strings Insert
+# Android Buddy
 
-一款面向 **Android Studio** 的国际化（i18n）字符串资源增强插件，专注于 `strings.xml` 的多语言编辑、AI 翻译与 Google Sheets 同步。
+一款面向 **Android Studio** 的全能助手插件，以 **AI 对话** 为首页，集成 `strings.xml` 多语言编辑、AI 翻译、Google Sheets 同步、快捷短语、Todo 提醒等能力。
 
-> 当前版本：`3.9.0`
+> 当前版本：`3.12.4`
 
 ---
 
@@ -54,7 +54,7 @@
    - 菜单栏 **Edit → Insert Strings**
    - 编辑器右键 **Insert Strings**
    - 快捷键 `Shift F1`（macOS 可用 `Control Shift F1`）
-3. 右侧 **InsertStrings** 工具窗口会自动打开，并按当前模块加载所有语言的字符串。
+3. 右侧 **Android Buddy** 工具窗口会自动打开，并按当前模块加载所有语言的字符串（默认进入 **Chat** 标签页）。
 
 ### 步骤 3：编辑与回写
 - **顶部输入框**：作为新 key 的 `name`，留空时表示批量替换当前选中行。
@@ -80,7 +80,7 @@
    - 「查找所有包含『订单』的 key 并翻译成日语」
    - 「把表格中缺失的法语补全」
 3. 可以使用底部 **快捷短语** 一键发送内置指令。
-4. AI 会按需调用工具（`insert_strings` / `update_string` / `delete_string` / `query_keys` / `read_string` / `find_keys_by_text` 等），所有写操作会先与你确认再执行。
+4. AI 会按需调用工具（`android.buddy` / `update_string` / `delete_string` / `query_keys` / `read_string` / `find_keys_by_text` 等），所有写操作会先与你确认再执行。
 5. 点击 **Stop** 可中断当前工具循环；**New Chat** 清空上下文重新开始。
 
 ### 步骤 6：使用 Ask AI 快速弹窗

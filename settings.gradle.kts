@@ -5,4 +5,4 @@ pluginManagement {
     }
 }
 
-rootProject.name = "InsertStrings"
+rootProject.name = "AndroidBuddy"

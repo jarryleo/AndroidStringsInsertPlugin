@@ -1,11 +1,11 @@
 <!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
 <idea-plugin>
     <!-- Unique identifier of the plugin. It should be FQN. It cannot be changed between the plugin versions. -->
-    <id>cn.jarryleo.insert_strings</id>
+    <id>cn.jarryleo.android_buddy</id>
 
     <!-- Public plugin name should be written in Title Case.
          Guidelines: https://plugins.jetbrains.com/docs/marketplace/plugin-overview-page.html#plugin-name -->
-    <name>Android Strings Insert</name>
+    <name>Android Buddy</name>
 
     <!-- A displayed Vendor name or Organization ID displayed on the Plugins Page. -->
     <vendor email="yjtx256@qq.com" url="https://www.github.com/jarryleo">Jarry Leo</vendor>
@@ -14,8 +14,8 @@
          Simple HTML elements (text formatting, paragraphs, and lists) can be added inside of <![CDATA[ ]]> tag.
          Guidelines: https://plugins.jetbrains.com/docs/marketplace/plugin-overview-page.html#plugin-description -->
     <description><![CDATA[
-    android studio insert strings for I18n.<br>
-    <em>一款面向 **Android Studio** 的国际化（i18n）字符串资源增强插件，专注于 `strings.xml` 的多语言编辑、AI 翻译与 Google Sheets 同步。</em>
+    Android Buddy — your Android Studio companion for strings, AI chat and more.<br>
+    <em>Android Buddy 是一款面向 **Android Studio** 的全能助手插件:以 AI 对话为首页,集成 `strings.xml` 多语言编辑、AI 翻译、Google Sheets 同步、快捷短语与 Todo 提醒等能力。</em>
     <em>by Jarry Leo</em>
   ]]></description>
 
@@ -26,36 +26,36 @@
     <!-- Extension points defined by the plugin.
          Read more: https://plugins.jetbrains.com/docs/intellij/plugin-extension-points.html -->
     <extensions defaultExtensionNs="com.intellij">
-        <applicationService serviceImplementation="cn.jarryleo.insert_strings.ai.AiSettingsService"/>
-        <applicationService serviceImplementation="cn.jarryleo.insert_strings.ai.AiRolesService"/>
-        <applicationService serviceImplementation="cn.jarryleo.insert_strings.ai.TodoService"/>
-        <applicationService serviceImplementation="cn.jarryleo.insert_strings.phrases.QuickPhrasesService"/>
-        <toolWindow factoryClass="cn.jarryleo.insert_strings.InsertStringsToolWindow"
-                    id="InsertStrings"
+        <applicationService serviceImplementation="cn.jarryleo.android.buddy.ai.AiSettingsService"/>
+        <applicationService serviceImplementation="cn.jarryleo.android.buddy.ai.AiRolesService"/>
+        <applicationService serviceImplementation="cn.jarryleo.android.buddy.ai.TodoService"/>
+        <applicationService serviceImplementation="cn.jarryleo.android.buddy.phrases.QuickPhrasesService"/>
+        <toolWindow factoryClass="cn.jarryleo.android.buddy.InsertStringsToolWindow"
+                    id="Android Buddy"
                     canCloseContents="false"
                     anchor="right"
                     icon="/META-INF/pluginIcon.svg"/>
 
         <!-- 启动时初始化 TodoReminderScheduler(把磁盘上的未来提醒塞进 Timer 队列) -->
-        <postStartupActivity implementation="cn.jarryleo.insert_strings.ai.TodoReminderStartupActivity"/>
+        <postStartupActivity implementation="cn.jarryleo.android.buddy.ai.TodoReminderStartupActivity"/>
 
         <!-- AI 提醒回复通知组(2026.x 新增):
              用户代办提醒触发时,AI 会生成一段简短友好的中文回复,
              通过这个组的 BALLOON 通知在 IDE 右下角弹出。 -->
-        <notificationGroup id="InsertStrings Todo Reminders"
+        <notificationGroup id="Android Buddy Todo Reminders"
                            displayType="BALLOON"
                            isLogByDefault="true"/>
     </extensions>
     <actions>
         <action id="ExtractStringsAction"
-                class="cn.jarryleo.insert_strings.ExtractStringsAction"
+                class="cn.jarryleo.android.buddy.ExtractStringsAction"
                 text="Extract strings.xml"
                 description="Extract the selected text into strings.xml and replace the selection with a reference">
             <add-to-group group-id="EditMenu" anchor="first"/>
             <add-to-group group-id="EditorPopupMenu" anchor="first"/>
         </action>
         <action id="AskAiAction"
-                class="cn.jarryleo.insert_strings.AskAiAction"
+                class="cn.jarryleo.android.buddy.AskAiAction"
                 text="Ask AI"
                 description="Ask AI about the selected text">
             <add-to-group group-id="EditMenu" anchor="first"/>
@@ -65,7 +65,7 @@
                     first-keystroke="shift F3"/>
         </action>
         <action id="InsertStringsAction"
-                class="cn.jarryleo.insert_strings.InsertStringsAction"
+                class="cn.jarryleo.android.buddy.InsertStringsAction"
                 text="Insert Strings"
                 icon="/META-INF/menuIcon.svg"
                 description="Insert strings to xml">
