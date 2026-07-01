@@ -184,6 +184,7 @@ object ToolDefinitions {
 
     private const val DESC_READ_FILE =
         "读项目内任意文件。> 1.5MB 拒绝(改用 search_in_files)。maxLines 默认 600,startLine/endLine 翻页。" +
+            "**行号 1-based**(与 IDE 一致),返回 content 每行带 `N: ` 前缀,直接喂给 edit_file 的 line。" +
             " → load_tool_doc(\"read_file\")。"
 
     private const val DESC_READ_FILES =
@@ -192,8 +193,10 @@ object ToolDefinitions {
             " → load_tool_doc(\"read_files\")。"
 
     private const val DESC_EDIT_FILE =
-        "按行/列定位修改项目内文件:insert_before / insert_after(光标处插入)或" +
-            "replace_range(范围替换)。行/列 1-based,read_file 返回的 N: 前的数字即可直传。" +
+        "整行粒度修改项目内文件:insert_before_line / insert_after_line(在某行前后插入)" +
+            "或 replace_line(整段替换 1-based 闭区间 [line, endLine])。line 1-based," +
+            "read_file 返回的 N: 前的数字即可直传。无列参数——AI 给的列号常因 tab/全角空格" +
+            "等偏差 1~N 列导致写入错乱,2026.x 起只接受整行粒度。" +
             "> 3MB 拒绝。原子写。IDE 缓存已自动重读。" +
             " → load_tool_doc(\"edit_file\")。"
 
@@ -1073,11 +1076,11 @@ object ToolDefinitions {
                 })
                 add("startLine", obj {
                     addProperty("type", "integer")
-                    addProperty("description", "可选,起始行 0-based(包含),默认 0。")
+                    addProperty("description", "可选,起始行 1-based(包含),与 IDE 行号一致,默认 1。")
                 })
                 add("endLine", obj {
                     addProperty("type", "integer")
-                    addProperty("description", "可选,结束行 0-based(包含),-1 表示到文件末尾,默认 -1。")
+                    addProperty("description", "可选,结束行 1-based(包含),-1 表示到文件末尾,默认 -1。")
                 })
                 add("maxLines", obj {
                     addProperty("type", "integer")
@@ -1090,9 +1093,9 @@ object ToolDefinitions {
 
     private fun openAiEditFileParams(): JsonObject {
         val modeEnum = JsonArray().apply {
-            add("insert_before")
-            add("insert_after")
-            add("replace_range")
+            add("insert_before_line")
+            add("insert_after_line")
+            add("replace_line")
         }
         return obj {
             addProperty("type", "object")
@@ -1105,26 +1108,18 @@ object ToolDefinitions {
                     addProperty("type", "integer")
                     addProperty("description", "必填,1-based 行号;read_file 返回的 N: 前的 N 即可直传。")
                 })
-                add("column", obj {
-                    addProperty("type", "integer")
-                    addProperty("description", "可选,1-based 列号(锚点),默认 1(行首)。insert_before/after 用作插入基准列;replace_range 用作范围起点列。")
-                })
                 add("mode", obj {
                     addProperty("type", "string")
                     add("enum", modeEnum)
-                    addProperty("description", "必填,三选一:insert_before / insert_after / replace_range。")
+                    addProperty("description", "必填,三选一:insert_before_line / insert_after_line / replace_line。")
                 })
                 add("text", obj {
                     addProperty("type", "string")
-                    addProperty("description", "必填,要插入或替换的文本(支持多行,自动按原行 column-1 的前导空白给后续行加缩进)。空串=在锚点处插入空内容(等价 no-op)。")
+                    addProperty("description", "必填,要插入或替换的文本(支持多行,行间用 \\n)。不以 \\n 结尾时,系统会自动补一个 \\n 保持行粒度(避免跟下一行粘连)。")
                 })
                 add("endLine", obj {
                     addProperty("type", "integer")
-                    addProperty("description", "replace_range 专用,1-based 结束行(包含);其它模式忽略。")
-                })
-                add("endColumn", obj {
-                    addProperty("type", "integer")
-                    addProperty("description", "replace_range 专用,1-based 结束列(包含);其它模式忽略。")
+                    addProperty("description", "replace_line 专用,1-based 结束行(包含);-1 或省略=单行替换(等价 endLine=line)。其它模式忽略。")
                 })
             })
             add("required", JsonArray().apply {

@@ -412,9 +412,12 @@ sealed class AiAction {
      * 读取项目内任意文件的内容。
      *
      * @param path       相对项目根路径(如 "app/src/main/AndroidManifest.xml")或项目内的绝对路径
-     * @param startLine  起始行 0-based(包含),默认 0
-     * @param endLine    结束行 0-based(包含),-1 表示到文件末尾,默认 -1
+     * @param startLine  起始行 **1-based(包含)**,与 IDE 行号一致,默认 1
+     * @param endLine    结束行 **1-based(包含)**,-1 表示到文件末尾,默认 -1
      * @param maxLines   单次返回最大行数(防止大文件爆 token),默认 600
+     *
+     * 2026.x 行为变更:行号从 0-based 改为 1-based,与 IDE / 编辑器一致;
+     * 返回的 content 每行带 `N: ` 前缀,数字可直接喂给 [EditFile] 的 line。
      */
     data class ReadFile(
         val path: String,
@@ -424,33 +427,29 @@ sealed class AiAction {
     ) : AiAction()
 
     /**
-     * 行/列定位的文件编辑(2026.x 重写,替代旧的 oldText/newText 字符串匹配)。
+     * 整行粒度的文件编辑(2026.x 取消列参数,避免 AI 列号偏差导致写入错位)。
      *
      * 位置语义与 [cn.jarryleo.insert_strings.file.FileOpsService.editFile] 完全一致:
-     * - [line] / [column] 1-based;`read_file` 返回的 `N: ` 前缀就是可以直接传的 [line] 值
+     * - [line] 1-based;`read_file` 返回的 `N: ` 前缀的 N 即可直接传
      * - [mode] 三选一:
-     *   - **insert_before**:`text` 插入到 (line, column) 之前
-     *   - **insert_after**:`text` 插入到 (line, column) 之后
-     *   - **replace_range**:用 [endLine] / [endColumn] 圈定 1-based 闭区间,用 [text] 替换
-     * - 多行 `text` 自动按原行 column-1 的前导空白缩进(除首行)
-     * - `text` 以 `\n` 开头/结尾时(before/after 模式)会被自动剥掉,避免产生空行
+     *   - **insert_before_line**:`text` 插入到 `line` 这一行之前
+     *   - **insert_after_line**:`text` 插入到 `line` 这一行之后
+     *   - **replace_line**:用 [endLine] 圈定 1-based 闭区间(单行替换 endLine=-1 或
+     *     endLine=line;多行替换 endLine>line),用 [text] 整段替换
+     * - `text` 不以 `\n` 结尾时,函数会**自动补一个 `\n`** 保持行粒度
      *
-     * @param path      文件路径(相对项目根或项目内绝对路径)
-     * @param line      1-based 行号
-     * @param column    1-based 列号,默认 1(行首)
-     * @param mode      insert_before / insert_after / replace_range
-     * @param text      要插入或替换的文本(支持多行)
-     * @param endLine   replace_range 专用,1-based 结束行(包含);其它模式忽略
-     * @param endColumn replace_range 专用,1-based 结束列(包含);其它模式忽略
+     * @param path     文件路径(相对项目根或项目内绝对路径)
+     * @param line     1-based 行号
+     * @param mode     insert_before_line / insert_after_line / replace_line
+     * @param text     要插入或替换的文本(支持多行,行间用 `\n`)
+     * @param endLine  replace_line 专用,1-based 结束行(包含);-1 等价单行替换
      */
     data class EditFile(
         val path: String,
         val line: Int,
-        val column: Int,
         val mode: String,
         val text: String,
-        val endLine: Int,
-        val endColumn: Int
+        val endLine: Int
     ) : AiAction()
 
     /**

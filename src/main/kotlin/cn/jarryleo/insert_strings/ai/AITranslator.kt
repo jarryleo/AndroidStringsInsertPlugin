@@ -216,7 +216,7 @@ object AITranslator {
   - 例:insert_strings 的 translations.values 可以是 `"**Hello**"`(字符串值含 markdown),不影响 JSON 解析,UI 端按 markdown 渲染。
 - 多行字符串值需要时,JSON 字符串内用 `\\n` 表示换行,**不要**在 JSON 里写裸换行(会破坏 JSON)。
   - 例:content 字段值可以写成 `"第一行\\n第二行"`(合法),不要写成 实际多行 文本(非法 JSON)。
-- 涉及正则时(useRegex=true,仅 search_in_files / find_references 仍支持正则匹配),pattern 是 Kotlin 正则,**不要**再包一层 markdown;`\\\\` 在 JSON 字符串里要写成 `\\\\\\\\`(双重转义)。edit_file 2026.x 已不再支持正则参数(改用行/列定位)。
+- 涉及正则时(useRegex=true,仅 search_in_files / find_references 仍支持正则匹配),pattern 是 Kotlin 正则,**不要**再包一层 markdown;`\\\\` 在 JSON 字符串里要写成 `\\\\\\\\`(双重转义)。edit_file 2026.x 已不再支持正则参数(改用整行定位,取消列)。
 - 任何工具的参数都对 JSON 严格,如果你不确定写法,先调 `load_tool_doc("<tool>")` 看示例,再发起实际调用。
 
 ## 翻译查重的标准 ask_user 格式
@@ -244,7 +244,7 @@ object AITranslator {
  - **通用**:ask_user / load_tool_doc / task_complete
  - 详细字段 / 枚举值 / 示例 → 先调 `load_tool_doc("<tool>")` 获取,再发起实际调用。
  - **多字段工具建议先 load_tool_doc 再调**(2026.x 优化):
-    - `sheets_operation`(7 大类操作枚举 + batchEdits 嵌套结构),`read_file` / `create_file`(路径/范围约束),`edit_file`(行/列/mode/endLine/endColumn),
+    - `sheets_operation`(7 大类操作枚举 + batchEdits 嵌套结构),`read_file` / `create_file`(路径/范围约束),`edit_file`(整行 line/mode/endLine,**无列**),
    - `search_in_files` / `find_references` / `list_files`(默认行为差异),
    - `todo_add` / `todo_update`(reminder 系列字段语义复杂)。
    这些工具的精简 description 只列了字段名+类型,不读文档直接调易因参数错误反复重试。
@@ -261,7 +261,7 @@ object AITranslator {
 - **第 1 步:规划** —— 拆成 2-5 个子动作(读哪些、改哪些、查什么)。
 - **第 2 步:定位** —— `list_files`(找文件) / `search_in_files`(找内容) / `find_references`(找引用点) / `get_editor_file`(看当前打开)。
 - **第 3 步:阅读** —— `read_file`(单文件,支持分页) / `read_files`(批量 2-10 个,省 round-trip) / `file_info`(只查元信息)。
-- **第 4 步:改写** —— `edit_file`(按行/列定位修改) / `create_file`(新建) / `delete_file`(删) / `move_file`(移动/重命名)。
+- **第 4 步:改写** —— `edit_file`(整行定位修改,2026.x 取消列) / `create_file`(新建) / `delete_file`(删) / `move_file`(移动/重命名)。
 **关键点**:
 - 改完文件**不要**再 read_file "验证" —— 系统已自动让 IDE 编辑器/PSI/Daemon Code Analyzer 重读,
   写盘是原子的,直接进入下一个动作。
@@ -643,55 +643,58 @@ object AITranslator {
             读取当前 IDE 项目内任意文件的内容。
             字段：
             - path（必填）：相对项目根的路径（如 "app/src/main/AndroidManifest.xml"），或项目内的绝对路径。
-            - startLine（可选，默认 0）：起始行 0-based（包含）。
-            - endLine（可选，默认 -1）：结束行 0-based（包含），-1 表示到文件末尾。
+            - startLine（可选，默认 1）：起始行 **1-based（包含）**，与 IDE 行号一致。**不要再传 0**。
+            - endLine（可选，默认 -1）：结束行 **1-based（包含）**，-1 表示到文件末尾。
             - maxLines（可选，默认 600）：单次返回最大行数（防止 token 爆炸），最大 2000。
             限制与约束：
             - 单文件 > 1.5MB（1_500_000 字节）会拒绝读取，请改用 search_in_files 检索指定内容。
             - 所有路径必须落在当前 IDE 打开的项目根目录内，绝对路径越界会被拒绝。
             - 返回时会带 `--- begin content ---` / `--- end content ---` 包裹，便于解析。
             - 内容被截断时返回里会提示「… 内容已截断，请用 startLine/endLine 分页继续读取」。
+            **2026.x 行号口径变更**：行号 1-based；返回的 content **每行带 `N: ` 前缀**
+            （数字宽度按 endLine 自动对齐），N 就是可以直接喂给 edit_file 的 `line` 的数字，
+            不需要再 ±1 换算。这是 edit_file 2026.x 取消列参数后保持行号精度的关键。
             典型场景：
             - AI 拿到文件路径（从 get_editor_file / search_in_files / find_references / list_files 取得）后想看完整内容。
-            - 大文件分页读：第 1 轮读 0-599，第 2 轮 startLine=600 读 600-1199。
+            - 大文件分页读：第 1 轮读 1-600，第 2 轮 startLine=601 读 601-1200。
             示例：
             {"type":"read_file","path":"app/src/main/AndroidManifest.xml"}
-            {"type":"read_file","path":"app/src/main/java/com/foo/MainActivity.kt","startLine":0,"endLine":200,"maxLines":200}
+            {"type":"read_file","path":"app/src/main/java/com/foo/MainActivity.kt","startLine":1,"endLine":200,"maxLines":200}
+            示例（拿到 content 后改第 17 行）：
+            1) read_file 看到 `  17:     val x = 1`
+            2) edit_file line=17, mode=replace_line, text="    val x = 2\n"
         """.trimIndent(),
 
         "edit_file" to """
             ## edit_file 详细用法
-            按「行/列」定位修改项目内任意文件（2026.x 替代旧的 oldText/newText 字符串匹配）。
+            **整行粒度**修改项目内任意文件（2026.x 起**取消列参数**，避免 AI 列号偏差导致写入错位）。
             字段：
             - path（必填）：文件路径（相对项目根或项目内绝对路径）。
-            - line（必填）：1-based 行号。read_file 返回 header 里的 `显示行:N-M/Total` 的 N~M 就是可直接传的行号。
-            - column（可选，默认 1）：1-based 列号（锚点），insert_before/after 用作插入基准列，replace_range 用作范围起点列。
+            - line（必填）：1-based 行号。read_file 返回的 content 每行带 `N: ` 前缀，N 就是可直接传给 line 的数字。
             - mode（必填，三选一）：
-              - **insert_before**：在 (line, column) 之前插入 text，不替换任何原文。
-              - **insert_after**：在 (line, column) 之后插入 text，不替换任何原文。
-              - **replace_range**：用 (line, column)..(endLine, endColumn) 划定的 1-based 闭区间被 text 替换。
-            - text（必填）：要插入或替换的文本（支持多行）。
-              - 多行插入时：从第 2 行起每行自动按「原行 column-1 的前导空白」缩进，保持视觉缩进。
-              - insert_before 时 text 以 `\n` 开头会被剥掉，避免产生空行；insert_after 时 text 以 `\n` 结尾会被剥掉。
-            - endLine / endColumn（replace_range 专用，1-based 闭区间包含端点；其它模式忽略）。
+              - **insert_before_line**：在 `line` 这一行**之前**插入 text，不替换任何原文。`line=1` 表示在文件最开头插入。
+              - **insert_after_line**：在 `line` 这一行**之后**插入 text，不替换任何原文。`line=totalLines` 表示在文件最末尾追加。
+              - **replace_line**：把 `[line, endLine]` 1-based 闭区间的整段文本用 text 替换；`endLine=-1` 或省略 = 单行替换（等价 `endLine=line`）；`endLine>line` = 多行替换。
+            - text（必填）：要插入或替换的文本（支持多行，行间用 `\n`）。**不以 `\n` 结尾时，系统会自动补一个 `\n`** 保持行粒度（避免跟下一行粘连）。
+            - endLine（replace_line 专用，1-based 结束行包含；-1 或省略 = 单行替换；其它模式忽略）。
             关键约束：
             - 原子写：写失败不会污染原文件（临时文件 + rename 模式）。
             - 限制：单文件 > 3MB（3_000_000 字节）拒绝编辑，需拆为多次小范围操作。
             - 路径必须落在项目根内。
-            - line 越界 / column < 1 / replace_range 起止倒置 都会失败并返回具体错误信息。
+            - line 越界 / replace_line 起止倒置 都会失败并返回具体错误信息。
             - 替换成功后 IDE 会自动重读该文件（如已打开），用户能立即看到变化。
             典型流程：
-            1. AI 先 read_file 拿原文，header 的 `显示行:N-M/Total` 就是 1-based 行号。
-            2. 在 (line, column) 处调用 insert_before / insert_after 插入；或划 (line, column)..(endLine, endColumn) 调 replace_range 替换。
-            3. 失败时根据错误信息调整 line/column（先 read_file 重新确认该行内容）或修正 endLine/endColumn 范围。
-            示例（在第 50 行行首前插入 import）：
-            {"type":"edit_file","path":"app/src/main/java/Foo.kt","line":50,"column":1,"mode":"insert_before","text":"import com.foo.Bar\n"}
-            示例（在第 12 行第 5 列后追加内容）：
-            {"type":"edit_file","path":"app/src/main/java/Foo.kt","line":12,"column":5,"mode":"insert_after","text":" // 注释"}
-            示例（把第 17-18 行替换为新两行）：
-            {"type":"edit_file","path":"app/src/main/java/Foo.kt","line":17,"column":1,"endLine":18,"endColumn":1,"mode":"replace_range","text":"    val x = 2\n    val y = 3\n"}
-            示例（单点替换：第 8 行第 13..25 列的 `val x = 1` 改成 `val x = 2`）：
-            {"type":"edit_file","path":"app/src/main/java/Foo.kt","line":8,"column":13,"endLine":8,"endColumn":25,"mode":"replace_range","text":"val x = 2"}
+            1. AI 先 read_file 拿原文，**每行带 `N: ` 前缀**，N 就是 1-based 行号。
+            2. 在目标行调用 insert_before_line / insert_after_line 插入；或划 `[line, endLine]` 调 replace_line 替换。
+            3. 失败时根据错误信息调整 line（先 read_file 重新确认该行内容）或修正 endLine。
+            示例（在第 50 行之前插入 import）：
+            {"type":"edit_file","path":"app/src/main/java/Foo.kt","line":50,"mode":"insert_before_line","text":"import com.foo.Bar\n"}
+            示例（在第 12 行之后追加内容）：
+            {"type":"edit_file","path":"app/src/main/java/Foo.kt","line":12,"mode":"insert_after_line","text":"// 注释\n"}
+            示例（把第 17-18 行整段替换为新两行）：
+            {"type":"edit_file","path":"app/src/main/java/Foo.kt","line":17,"endLine":18,"mode":"replace_line","text":"    val x = 2\n    val y = 3\n"}
+            示例（单行替换：把第 8 行整行换掉）：
+            {"type":"edit_file","path":"app/src/main/java/Foo.kt","line":8,"mode":"replace_line","text":"    val x = 2\n"}
         """.trimIndent(),
 
         "create_file" to """
@@ -797,7 +800,7 @@ object AITranslator {
             5. **read_files**(批量读):一次读 2-10 个文件,省 round-trip。"同时看 MainActivity + Adapter + Item"。
             6. **file_info**(查元信息):读大小/行数/mtime,不读全文。"这文件多大、有多少行"。
             7. **get_editor_file**(看当前打开):"我打开的哪个文件、选中了什么"。
-            8. **edit_file**(改文件):按行/列定位修改。"在第 50 行行首插入 import"、"把第 8 行第 13..25 列的 val x = 1 改成 val x = 2"、"把第 17-18 行整段替换"。
+            8. **edit_file**(改文件):**整行粒度**修改(2026.x 取消列参数,避免 AI 列号偏差错位)。"在第 50 行之前插入 import"、"把第 8 行整行替换"、"把第 17-18 行整段替换"。line 直接读自 read_file 返回的 `N: ` 前缀。
             9. **create_file**(创建新文件):"新建 Util.kt"。
             10. **delete_file**(删除):删文件或空目录。"删掉 Test.kt"。
             11. **move_file**(移动/重命名):"把 Util.kt 改名为 Helper.kt"。
@@ -810,17 +813,19 @@ object AITranslator {
               - 知道符号名想找引用 → find_references(symbol="X", kind="class")
               - 知道一段文本想找在哪 → search_in_files(pattern="...")
             **第 3 步:阅读** —— read_file / read_files 读全文,理解上下文。
-              - 一次读不完整(>600 行)→ 分页:read_file(path, startLine=600, endLine=1200)
+              - 一次读不完整(>600 行)→ 分页:read_file(path, startLine=601, endLine=1200)
               - 想一次读多个相关文件 → read_files([...])
               - 只关心文件存在/大小 → file_info(几行就够)
-            **第 4 步:改写** —— edit_file 按行/列定位修改,create_file 新建,delete_file 删,move_file 改名。
-              - edit_file 的 line/column 1-based,read_file header `显示行:N-M/Total` 的 N~M 就是可直接传的行号
+              - **返回 content 每行带 `N: ` 前缀**(1-based),N 就是直接喂给 edit_file 的 line
+            **第 4 步:改写** —— edit_file 整行粒度修改,create_file 新建,delete_file 删,move_file 改名。
+              - edit_file 的 line 1-based,read_file 返回的 `N: ` 前缀就是可直接传的行号,**不要** ±1 换算
+              - **无列参数**(2026.x 取消):AI 给的列号常因 tab/全角空格等偏差 1~N 列导致写入错乱,整行粒度天然对列不敏感
               - 改完后**不要**再 read_file 验证(浪费 round-trip),直接进入下一个动作
 
             ### 关键约束
             - **路径**:相对项目根(例 "app/src/main/java/Foo.kt")或项目内绝对路径,必须落在项目根内(越界会被拒)。
             - **文件大小**:read_file / read_files 单文件 > 1.5MB 拒绝;edit_file > 3MB 拒绝。
-            - **行/列越界**:edit_file 的 line 越界 / column < 1 / replace_range 起止倒置 都会失败,需调整。
+            - **行号越界**:edit_file 的 line 越界 / replace_line 模式下 endLine < line 或 endLine 越界 都会失败,需调整。
             - **IDE 缓存自动刷新**(2026.x 修复):edit_file / create_file / delete_file / move_file
               执行后系统自动让 IDE 编辑器/PSI/Daemon Code Analyzer 重读,**不要**再调
               read_file "验证" —— 写盘已原子,IDE 已重读,直接进入下一动作。
@@ -852,7 +857,8 @@ object AITranslator {
             限制(同 read_file):
             - 单文件 > 1.5MB 该文件会返回 [失败],其它文件继续。
             - 路径越界/不存在/二进制该文件会返回 [失败],其它文件继续。
-            返回:每个文件独立显示 [文件 N] + 路径 + 行范围 + 字节数 + begin/end content 块。
+            返回:每个文件独立显示 [文件 N] + 路径 + 行范围(1-based)+ 字节数 + begin/end content 块。
+            **2026.x 行为变更**:每行带 `N: ` 前缀(1-based,与 read_file 一致),N 可直接喂给 edit_file.line。
             与 read_file 的对比:
             - read_file 一次只读 1 个,无路径框架共享(每文件 4 行框架),N 个文件要 N 次 round-trip。
             - read_files 一次读 N 个,框架合并,token 更省,延迟更低(尤其 N 较大时)。
@@ -3308,7 +3314,8 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
             ToolDefinitions.TOOL_READ_FILE -> {
                 val path = args.get("path")?.asString?.trim() ?: return null
                 if (path.isEmpty()) return null
-                val startLine = args.get("startLine")?.let { runCatching { it.asInt }.getOrNull() } ?: 0
+                // 2026.x 起 read_file 行号 1-based;默认 startLine=1,endLine=-1(到末尾)
+                val startLine = args.get("startLine")?.let { runCatching { it.asInt }.getOrNull() } ?: 1
                 val endLine = args.get("endLine")?.let { runCatching { it.asInt }.getOrNull() } ?: -1
                 val maxLines = args.get("maxLines")?.let { runCatching { it.asInt }.getOrNull() } ?: 600
                 AiAction.ReadFile(path, startLine, endLine, maxLines)
@@ -3318,13 +3325,11 @@ fix 模式：{"fixes":[{"row":<行号>,"values":[<整行新值,列数同表头>]
                 val path = args.get("path")?.asString?.trim() ?: return null
                 val line = args.get("line")?.let { runCatching { it.asInt }.getOrNull() } ?: return null
                 if (path.isEmpty() || line < 1) return null
-                val column = args.get("column")?.let { runCatching { it.asInt }.getOrNull() } ?: 1
                 val mode = args.get("mode")?.asString?.trim()?.lowercase() ?: return null
-                if (mode !in setOf("insert_before", "insert_after", "replace_range")) return null
+                if (mode !in setOf("insert_before_line", "insert_after_line", "replace_line")) return null
                 val text = args.get("text")?.asString ?: return null
                 val endLine = args.get("endLine")?.let { runCatching { it.asInt }.getOrNull() } ?: -1
-                val endColumn = args.get("endColumn")?.let { runCatching { it.asInt }.getOrNull() } ?: -1
-                AiAction.EditFile(path, line, column, mode, text, endLine, endColumn)
+                AiAction.EditFile(path, line, mode, text, endLine)
             }
 
             ToolDefinitions.TOOL_CREATE_FILE -> {

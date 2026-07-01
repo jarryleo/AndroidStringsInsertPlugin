@@ -64,12 +64,17 @@ class FileOpsService(private val project: Project) {
 
     /**
      * 读取文件返回内容 + 元数据。
-     * @param content 全文(限定范围时为切片)
-     * @param totalLines 文件总行数
-     * @param startLine 实际返回内容的起始行(0-based,包含)
-     * @param endLine 实际返回内容的结束行(0-based,包含)
-     * @param truncated 是否因为行数超限被截断
-     * @param fileSize 文件字节数
+     * @param content     全文(限定范围时为切片)。**2026.x 新增:每行带 `N: ` 前缀**,
+     *                    1-based 行号,数字宽度按 `endLine` 自动对齐(如 `   1:` / `  17:`),
+     *                    方便 AI 把行号直接喂给 edit_file。controller 拿到后还会再嵌一层
+     *                    框架 `--- begin content ---`,前缀 `N: ` 与嵌套框架并存,行号仍是
+     *                    紧贴每行首字符的最左 token,不会破坏现有解析。
+     * @param totalLines  文件总行数
+     * @param startLine   实际返回内容的起始行(**1-based,包含**;与 IDE 行号一致,2026.x
+     *                    起从 0-based 改为 1-based,避免 AI 在 read/edit 之间反复 +1/-1)
+     * @param endLine     实际返回内容的结束行(1-based,包含)
+     * @param truncated   是否因为行数超限被截断
+     * @param fileSize    文件字节数
      */
     data class ReadResult(
         val content: String,
@@ -105,11 +110,11 @@ class FileOpsService(private val project: Project) {
     /**
      * 一次编辑的结果。
      * @param applied    是否真的写入了磁盘(false 表示定位失败/越界/参数非法,文件未变)
-     * @param mode       实际执行的模式(insert_before / insert_after / replace_range)
+     * @param mode       实际执行的模式(insert_before_line / insert_after_line / replace_line)
      * @param path       文件路径
-     * @param line       命中的行号(1-based;有 1-based↔0-based 转换时回显转换后的 1-based 行)
-     * @param column     命中的列号(1-based,替换模式时为结束列;插入模式时为锚点列)
-     * @param oldText    替换模式下被替换掉的原文(便于 AI 复查);插入模式为空
+     * @param line       命中/操作的行号(1-based;replace_line 模式下为起止行的 1-based 闭区间起点)
+     * @param endLine    replace_line 模式下的 1-based 结束行(包含);其它模式 -1
+     * @param oldText    replace_line 模式下被替换掉的原文(便于 AI 复查);插入模式为空
      * @param newText    实际写入的文本(可能含自动换行归一化,等价于 AI 想插入的内容 + 一个 `\n`)
      * @param newContent 替换后文件全文(便于 AI 复查;文件过大时为 null)
      */
@@ -118,7 +123,7 @@ class FileOpsService(private val project: Project) {
         val mode: String,
         val path: String,
         val line: Int,
-        val column: Int,
+        val endLine: Int,
         val oldText: String,
         val newText: String,
         val newContent: String?,
@@ -230,15 +235,21 @@ class FileOpsService(private val project: Project) {
     /**
      * 读取项目内文件(相对项目根 / 绝对路径均可,绝对路径必须落在项目根内)。
      *
+     * 2026.x 行为变更:行号口径从 0-based 改为 **1-based**,与 IDE / 编辑器一致;
+     * 返回的 `content` 每行带 `N: ` 前缀(数字宽度按 `endLine` 自动对齐),让 AI 看到的
+     * 数字就是它要喂给 [editFile] 的 `line` 参数,**零心智转换**。
+     *
      * @param path          路径(相对项目根或绝对路径)
-     * @param startLine     起始行 0-based,负数视为 0
-     * @param endLine       结束行 0-based(包含),负数或超界视为最后一行的 0-based 索引
+     * @param startLine     起始行 **1-based(包含)**,负数 / 0 视为 1,超界自动夹到 `totalLines`
+     * @param endLine       结束行 **1-based(包含)**,-1 / 0 表示到文件末尾
      * @param maxLines      单次最大返回行数,默认 [MAX_READ_LINES]
-     * @return 失败时返回 [ReadResult] 的 content 为空字符串 + truncated=true,或者抛 [IllegalArgumentException]
+     * @return 失败时返回 [ReadResult] 的 content 为错误信息 + truncated=false;成功时
+     *         content 每行格式为 `   17: actual content`(宽度对齐,前缀是行号,冒号+空格
+     *         分隔,后跟原始行内容,空行也带前缀)。
      */
     fun readFile(
         path: String,
-        startLine: Int = 0,
+        startLine: Int = 1,
         endLine: Int = -1,
         maxLines: Int = MAX_READ_LINES,
     ): ReadResult {
@@ -277,11 +288,12 @@ class FileOpsService(private val project: Project) {
         val text = file.readText(StandardCharsets.UTF_8)
         val lines = text.split('\n')
         val total = lines.size
-        val s = startLine.coerceAtLeast(0)
-        val e = if (endLine < 0) total - 1 else endLine.coerceAtMost(total - 1)
-        if (s > e) {
+        // 1-based → 0-based 切片下标;clamp 边界
+        val s1 = if (startLine < 1) 1 else startLine.coerceAtMost(total)
+        val e1 = if (endLine < 1) total else endLine.coerceAtMost(total)
+        if (s1 > e1) {
             return ReadResult(
-                content = "[失败] 起始行($s)大于结束行($e),文件总行数 $total。",
+                content = "[失败] 起始行($s1)大于结束行($e1),文件总行数 $total。",
                 totalLines = total,
                 startLine = 0,
                 endLine = 0,
@@ -289,67 +301,72 @@ class FileOpsService(private val project: Project) {
                 fileSize = size,
             )
         }
-        val slice = lines.subList(s, e + 1)
-        val truncatedFlag = slice.size > maxLines
-        val realSlice = if (truncatedFlag) slice.subList(0, maxLines) else slice
+        val slice0 = lines.subList(s1 - 1, e1)  // subList 左闭右开,end = e1(1-based 含)
+        val truncatedFlag = slice0.size > maxLines
+        val realSlice = if (truncatedFlag) slice0.subList(0, maxLines) else slice0
+        val lastLineNumber = s1 + realSlice.size - 1
+        // 行号前缀宽度 = lastLineNumber 的位数(1..9 用 1 位,10..99 用 2 位,...),
+        // 保证每行前缀宽度一致,AI 解析时只看冒号前的数字,不需要看对齐。
+        val width = lastLineNumber.toString().length
+        val content = realSlice.mapIndexed { idx, lineText ->
+            val n = s1 + idx
+            val pad = " ".repeat(width - n.toString().length)
+            "$pad$n: $lineText"
+        }.joinToString("\n")
         return ReadResult(
-            content = realSlice.joinToString("\n"),
+            content = content,
             totalLines = total,
-            startLine = s,
-            endLine = s + realSlice.size - 1,
+            startLine = s1,
+            endLine = lastLineNumber,
             truncated = truncatedFlag,
             fileSize = size,
         )
     }
 
     // ============================================================
-    // 3) 文件编辑:editFile(行/列定位 + 模式)
+    // 3) 文件编辑:editFile(整行模式,2026.x 取消列精度)
     // ============================================================
 
     /**
-     * 行/列定位的文件编辑(2026.x 重写,替代旧的 oldText/newText 字符串匹配)。
+     * 整行粒度的文件编辑(2026.x 重写,**取消列参数**)。
+     *
+     * 取消列的动机:AI 给出列号时常常因 IDE 渲染 / tab / 全角空格 / 缩进隐藏字符等偏差 1~N
+     * 列,导致在错位的位置写入,产生乱码。整行粒度天然对列不敏感,只要行号准就不会错位。
      *
      * 位置语义:
-     * - `line`(必填,1-based):目标行号。`read_file` 返回的内容已经带 `1: ` 形式的行号,
+     * - `line`(必填,1-based):目标行号,与 [readFile] 返回的 `N: ` 前缀的 N 一一对应,
      *   AI 可以直接把那个数字传进来。1-based → 0-based 在函数内做转换。
-     * - `column`(可选,1-based,默认 1):目标行内的列号,作为「插入锚点」/「替换起止」基准。
-     *   1 表示行首;超过该行长度的值会被夹到「行尾列」(行末换行前)。
      *
      * 模式(互斥,必填其一):
-     * - **insert_before**:`text` 插入到 (line, column) 之前。光标不替换任何原文。
-     *   - `text` 以 `\n` 开头时,`text` 前的换行会被去掉,避免在普通行首插入多产生一个空行。
-     *   - 多行 `text` 的每一行(除首行外)会自动按「原行 column-1 的前导空白」缩进,
-     *     让插入后的视觉缩进与原代码一致。
-     * - **insert_after**:`text` 插入到 (line, column) 之后。光标不替换任何原文。
-     *   - `text` 以 `\n` 结尾时,尾随换行会被去掉,避免多产生一个空行。
-     *   - 多行 `text` 的每一行(除首行外)同样按 column-1 的前导空白缩进。
-     * - **replace_range**:`endLine` / `endColumn` 划定的范围被 `text` 替换。
-     *   - 起止使用 1-based 闭区间(包含)。单点替换:`endLine=line, endColumn=column+1`。
-     *   - 整行替换(`endColumn=1` 且覆盖到下一行行首)等常见 case 都直接支持。
+     * - **insert_before_line**:`text` 插入到 `line` 这一行**之前**(等价于在 `line-1`
+     *   之后插入)。`line=1` 表示在文件最开头插入。光标不替换任何原文。
+     * - **insert_after_line**:`text` 插入到 `line` 这一行**之后**(等价于在 `line+1`
+     *   之前插入)。`line=totalLines` 表示在文件最末尾插入。光标不替换任何原文。
+     * - **replace_line**:`[line, endLine]` 闭区间内的整段文本(1-based 包含)被 `text` 替换;
+     *   `endLine=-1` / `endLine=line` 表示单行替换,`endLine > line` 表示多行替换。
+     *   替换后 `text` 内部用 `\n` 换行,`text` 不以 `\n` 结尾时,函数会**自动补一个 `\n`**
+     *   让文本保持「行」粒度(否则会跟下一行粘连成一行)。
      *
      * 边界 / 失败(抛 [IllegalArgumentException],controller 转成失败 tool_result):
      * - 路径越界 / 文件不存在 / 不是 regular file
      * - 文件 > [MAX_EDIT_BYTES]
-     * - `line < 1` 或 `line > 总行数`
-     * - `column < 1`(夹到 1)
-     * - replace_range 时 `endLine < line`,或 (endLine==line && endColumn <= column)
+     * - `line < 1` 或 `line > totalLines + 1`(insert_after_line 允许 line = totalLines + 1,
+     *   其它模式不允许越界)
+     * - `mode` 非法(不在三种之内)
+     * - replace_line 模式下 `endLine < line` 或 `endLine > totalLines`
      *
-     * @param path      路径(相对项目根或项目内绝对)
-     * @param line      1-based 行号
-     * @param column    1-based 列号,默认 1
-     * @param mode      insert_before / insert_after / replace_range
-     * @param text      要插入或替换的文本(支持多行)
-     * @param endLine   replace_range 专用,1-based 结束行(包含);其它模式忽略
-     * @param endColumn replace_range 专用,1-based 结束列(包含)
+     * @param path     路径(相对项目根或项目内绝对)
+     * @param line     1-based 行号
+     * @param mode     insert_before_line / insert_after_line / replace_line
+     * @param text     要插入或替换的文本(支持多行,行间用 `\n`)
+     * @param endLine  replace_line 专用,1-based 结束行(包含);-1 等价于 `line`;其它模式忽略
      */
     fun editFile(
         path: String,
         line: Int,
-        column: Int = 1,
         mode: String,
         text: String,
         endLine: Int = -1,
-        endColumn: Int = -1,
     ): EditResult {
         val resolved = resolveProjectPath(path)
             ?: error("[拒绝] 路径解析失败:'$path' 不在项目根目录 ${project.basePath} 内。")
@@ -361,57 +378,74 @@ class FileOpsService(private val project: Project) {
             error("[失败] 文件过大(${size} 字节,>${MAX_EDIT_BYTES} 字节),请拆分为多次小范围编辑。")
         }
 
-        // 1-based → 0-based;clamp column 到 [1, 行长度+1]
-        val line0 = (line - 1).coerceAtLeast(0)
         val original = Files.readString(resolved, StandardCharsets.UTF_8)
         val lines = original.split('\n')
         val totalLines = lines.size
-        if (line < 1 || line > totalLines) {
-            error("[失败] line=$line 越界(1..$totalLines)。")
-        }
-        val lineText = lines[line0]
-        // column 上限 = 该行字符数 + 1(允许在行末换行符前插入)。+1 之后仍包含行末列。
-        val colClamped = column.coerceIn(1, lineText.length + 1)
-
-        // 把 (line0, col0-based) 转换成字符 offset
-        val lineStartOffset = lines.subList(0, line0).sumOf { it.length + 1 } // +1 for '\n'
-        val anchorOffset = lineStartOffset + (colClamped - 1)
-
         val normalizedMode = mode.lowercase()
+
+        if (line < 1) {
+            error("[失败] line=$line 非法,必须 >= 1。")
+        }
+        when (normalizedMode) {
+            "insert_before_line", "replace_line" -> {
+                if (line > totalLines) {
+                    error("[失败] $normalizedMode 模式下 line=$line 越界(1..$totalLines)。")
+                }
+            }
+            "insert_after_line" -> {
+                // 允许 line == totalLines + 1(末尾插入)
+                if (line > totalLines + 1) {
+                    error("[失败] $normalizedMode 模式下 line=$line 越界(1..${totalLines + 1})。")
+                }
+            }
+            else -> error("[失败] mode='$mode' 非法,只支持 insert_before_line / insert_after_line / replace_line。")
+        }
+
+        // 行号 → 字符 offset
+        fun lineStartOffset(line1Based: Int): Int {
+            // 1-based line 之前所有行的长度 + 行间换行符
+            // lines[0..line1Based-2] 共 line1Based-1 行,每行 length + '\n'
+            return lines.subList(0, line1Based - 1).sumOf { it.length + 1 }
+        }
+
         val finalText: String
         val targetStart: Int
         val targetEnd: Int
         var oldTextSnapshot = ""
+        var actualEndLine = -1
 
         when (normalizedMode) {
-            "insert_before" -> {
-                finalText = normalizeInsertText(text, indentBase = lineText, anchorColumn = colClamped, side = InsertSide.BEFORE)
-                targetStart = anchorOffset
-                targetEnd = anchorOffset
+            "insert_before_line" -> {
+                finalText = ensureTrailingNewline(text)
+                targetStart = lineStartOffset(line)
+                targetEnd = targetStart
             }
-            "insert_after" -> {
-                finalText = normalizeInsertText(text, indentBase = lineText, anchorColumn = colClamped, side = InsertSide.AFTER)
-                targetStart = anchorOffset
-                targetEnd = anchorOffset
+            "insert_after_line" -> {
+                finalText = ensureTrailingNewline(text)
+                // 插入在 line 这一行的「之后」,等价于在 line+1 这一行「之前」。
+                // 当 line == totalLines 时,lineStartOffset(totalLines + 1) 是文件末尾。
+                if (line == totalLines) {
+                    // 文件末尾:直接 append,offset = original.length(注意 original 以 \n 结尾)
+                    targetStart = original.length
+                    targetEnd = targetStart
+                } else {
+                    targetStart = lineStartOffset(line + 1)
+                    targetEnd = targetStart
+                }
             }
-            "replace_range" -> {
-                val eLine0 = (endLine - 1).coerceAtLeast(0)
-                if (endLine < 1 || eLine0 >= totalLines) {
-                    error("[失败] endLine=$endLine 越界(1..$totalLines)。")
+            "replace_line" -> {
+                val eLine1 = if (endLine < 1) line else endLine.coerceAtLeast(line)
+                if (eLine1 > totalLines) {
+                    error("[失败] replace_line 模式下 endLine=$eLine1 越界(1..$totalLines)。")
                 }
-                val endLineText = lines[eLine0]
-                val eColClamped = endColumn.coerceIn(1, endLineText.length + 1)
-                val endLineStartOffset = lines.subList(0, eLine0).sumOf { it.length + 1 }
-                val endOffset = endLineStartOffset + (eColClamped - 1)
-                if (endOffset < anchorOffset) {
-                    error("[失败] 结束位置(endLine=$endLine, endColumn=$endColumn)在起始位置(line=$line, column=$column)之前。")
-                }
-                oldTextSnapshot = original.substring(anchorOffset, endOffset)
-                finalText = text
-                targetStart = anchorOffset
+                actualEndLine = eLine1
+                targetStart = lineStartOffset(line)
+                val endOffset = lineStartOffset(eLine1) + lines[eLine1 - 1].length
                 targetEnd = endOffset
+                oldTextSnapshot = original.substring(targetStart, targetEnd)
+                finalText = ensureTrailingNewline(text)
             }
-            else -> error("[失败] mode='$mode' 非法,只支持 insert_before / insert_after / replace_range。")
+            else -> error("[失败] mode='$mode' 非法,只支持 insert_before_line / insert_after_line / replace_line。")
         }
 
         val updated = original.replaceRange(targetStart, targetEnd, finalText)
@@ -422,44 +456,22 @@ class FileOpsService(private val project: Project) {
             mode = normalizedMode,
             path = path,
             line = line,
-            column = colClamped,
+            endLine = actualEndLine,
             oldText = oldTextSnapshot,
             newText = finalText,
             newContent = updated,
         )
     }
 
-    /** 内部枚举:用于 [editFile] 的缩进归一化分支。 */
-    private enum class InsertSide { BEFORE, AFTER }
-
     /**
-     * 对插入文本做边界归一化(去掉多余首/尾换行) + 多行缩进(让插入后视觉与原行缩进一致)。
-     *
-     * 规则:
-     * 1. before 模式:`text` 以 `\n` 开头时去掉前导换行(避免空行);
-     *    after 模式:`text` 以 `\n` 结尾时去掉尾随换行(避免空行)。
-     * 2. 多行插入(以 `\n` 切分后 >= 2 段)时,从第 2 行起每行追加
-     *    `indentBase.substring(0, (anchorColumn-1).coerceAtMost(indentBase.length))`
-     *    的前导空白。
-     * 3. 不修改首行;首行紧贴锚点列(根据 side 决定是列前/列后),让用户保留对缩进的完全控制。
+     * 保证插入/替换文本以 `\n` 结尾,保持行粒度:
+     * - text 为空 → 返回空字符串(由调用方自行判断是否合法,默认 replace_line 不接受空)
+     * - text 以 `\n` 结尾 → 原样返回
+     * - 否则 → 追加一个 `\n`
      */
-    private fun normalizeInsertText(
-        text: String,
-        indentBase: String,
-        anchorColumn: Int,
-        side: InsertSide,
-    ): String {
-        var t = text
-        if (side == InsertSide.BEFORE && t.startsWith("\n")) t = t.removePrefix("\n")
-        if (side == InsertSide.AFTER && t.endsWith("\n")) t = t.removeSuffix("\n")
-        if (!t.contains('\n')) return t
-        val indentLen = (anchorColumn - 1).coerceAtMost(indentBase.length)
-        val indent = indentBase.substring(0, indentLen)
-        if (indent.isEmpty()) return t
-        // 仅对「不是首行」的行加 indent;空行保留空(避免给空行也加空白)
-        return t.split('\n').mapIndexed { idx, segment ->
-            if (idx == 0) segment else if (segment.isEmpty()) segment else indent + segment
-        }.joinToString("\n")
+    private fun ensureTrailingNewline(text: String): String {
+        if (text.isEmpty()) return text
+        return if (text.endsWith("\n")) text else text + "\n"
     }
 
     /**

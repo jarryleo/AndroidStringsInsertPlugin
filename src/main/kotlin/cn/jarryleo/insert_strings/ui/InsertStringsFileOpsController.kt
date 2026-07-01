@@ -71,8 +71,8 @@ internal class InsertStringsFileOpsController(
             }
         }
         val header = "[工具执行结果] 类型:read_file 状态:成功 path:${action.path} " +
-            "显示行:${result.startLine + 1}-${result.endLine + 1}/${result.totalLines} " +
-            "字节:${result.fileSize}"
+            "显示行:${result.startLine}-${result.endLine}/${result.totalLines} " +
+            "字节:${result.fileSize} 行号口径:1-based(content 每行带 N: 前缀)"
         return buildString {
             append(header)
             append(tail)
@@ -89,25 +89,26 @@ internal class InsertStringsFileOpsController(
             service.editFile(
                 path = action.path,
                 line = action.line,
-                column = action.column,
                 mode = action.mode,
                 text = action.text,
                 endLine = action.endLine,
-                endColumn = action.endColumn,
             )
         } catch (e: Exception) {
             return "[工具执行结果] 类型:edit_file 状态:失败 path:${action.path} " +
-                "line:${action.line} col:${action.column} mode:${action.mode} " +
+                "line:${action.line} mode:${action.mode} endLine:${action.endLine} " +
                 "信息:${e.message ?: "unknown"}"
         }
         // 兜底通知 IDE(主流程已在 FileOpsService.writeAtomic 内部完成 VFS + Document +
         // FileEditor + PSI + Daemon 五层重读,这里 idempotent 再补一次)
         SwingUtilities.invokeLater { refreshOpenFile(action.path) }
-        val rangeDesc = if (result.mode == "replace_range" && result.oldText.isNotEmpty()) {
-            " 范围:line ${action.line}:${action.column} .. line ${action.endLine}:${action.endColumn} " +
-                "原文:${result.oldText.length}字符"
-        } else {
-            " 锚点:line ${result.line}:${result.column}"
+        val rangeDesc = when (result.mode) {
+            "replace_line" -> {
+                val eLine = if (result.endLine > 0) result.endLine else result.line
+                " 行范围:${result.line}..$eLine(共 ${eLine - result.line + 1} 行) 原文:${result.oldText.length}字符"
+            }
+            "insert_before_line" -> " 锚点行:${result.line}(在此行之前插入)"
+            "insert_after_line" -> " 锚点行:${result.line}(在此行之后插入)"
+            else -> " 锚点行:${result.line}"
         }
         val preview = result.newContent?.let { newContent ->
             if (newContent.length > 800) {
@@ -307,8 +308,8 @@ internal class InsertStringsFileOpsController(
                     return@forEachIndexed
                 }
                 appendLine()
-                append("[文件 ${idx + 1}] $path 行 ${r.startLine + 1}-${r.endLine + 1}/" +
-                    "${r.totalLines} 字节:${r.fileSize}")
+                append("[文件 ${idx + 1}] $path 行 ${r.startLine}-${r.endLine}/" +
+                    "${r.totalLines} 字节:${r.fileSize} 行号口径:1-based")
                 appendLine("--- begin content ---")
                 append(r.content)
                 if (!r.content.endsWith("\n")) append("\n")
