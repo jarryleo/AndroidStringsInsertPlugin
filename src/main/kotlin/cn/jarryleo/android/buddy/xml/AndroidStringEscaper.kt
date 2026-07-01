@@ -4,39 +4,48 @@ object AndroidStringEscaper {
     private val entityPattern = Regex("""&(amp|lt|gt|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);""")
 
     /**
-     * 保留原有 XML 包裹:若 [existing] 用了 `<![CDATA[...]]>` 或 `<Data>...</Data>` 包裹,
-     * 但 [new] 没有,自动给 [new] 套上同样的包裹 — 避免 AI 翻译/修改时漏写包裹,
-     * 导致「带 HTML 标签的翻译」回退成「被 `&lt;` 转义的纯文本」。
-     *
-     * 规则(只兜底,不主动改):
-     * - 原文本为空(新增场景)→ 原样返回 [new],不强行加包裹。
-     * - 原文本无包裹 → 原样返回 [new]。
-     * - 原文本有包裹,**新文本没有** → 沿用原包裹,套到新文本上。
-     * - 新文本**已经显式写了包裹**(无论 CDATA 还是 Data) → 原样返回,不动 AI 的选择。
-     * - 两种包裹混用(existing CDATA + new Data,或反之) → 原样返回 [new],
-     *   让 lint / Code Review 自然暴露这种不一致,而不是静默「修正」AI 的意图。
-     *
-     * 配套说明见 [StringsService.updateOrCreateInFile] 与
-     * [cn.jarryleo.android.buddy.ui.InsertStringsChatDriver] 中 android.buddy
-     * 批处理的 merge 逻辑 — 这两处会读「原文本」并调用本方法,让
-     * `<![CDATA[<b>粗体</b>]]>` 这种带格式的翻译在 AI 改写后不丢包裹。
-     */
+      * 保留原有 XML 包裹:若 [existing] 用了 `<![CDATA[...]]>` 或 `<Data>...</Data>` 包裹
+      * (支持多层嵌套,如 `<Data><![CDATA[...]]></Data>`),但 [new] 没有,自动给 [new]
+      * 套上同样的多层包裹 — 避免 AI 翻译/修改时漏写包裹,导致「带 HTML 标签的翻译」
+      * 回退成「被 `&lt;` 转义的纯文本」。
+      *
+      * 规则(只兜底,不主动改):
+      * - 原文本为空(新增场景)→ 原样返回 [new],不强行加包裹。
+      * - 原文本无包裹 → 原样返回 [new]。
+      * - 原文本有包裹(1 层 / 2 层嵌套均支持),**新文本没有** → 沿用原包裹结构,套到新文本上。
+      * - 新文本**已经显式写了外层包裹**(CDATA 或 Data 任一) → 原样返回,不动 AI 的选择。
+      * - 两种包裹混用(existing CDATA + new Data,或反之) → 原样返回 [new],
+      *   让 lint / Code Review 自然暴露这种不一致,而不是静默「修正」AI 的意图。
+      *
+      * 配套说明见 [StringsService.updateOrCreateInFile] 与
+      * [cn.jarryleo.android.buddy.ui.InsertStringsChatDriver] 中 android.buddy
+      * 批处理的 merge 逻辑 — 这两处会读「原文本」并调用本方法,让
+      * `<Data><![CDATA[<b>粗体</b>]]></Data>` 这种带格式的翻译在 AI 改写后不丢任何一层包裹。
+      */
     fun preserveWrapping(existing: String, new: String): String {
         val existingTrimmed = existing.trim()
         if (existingTrimmed.isEmpty()) return new
-        val hasCdata = existingTrimmed.startsWith("<![CDATA[", ignoreCase = true) &&
-            existingTrimmed.endsWith("]]>")
-        val hasData = existingTrimmed.startsWith("<Data>", ignoreCase = true) &&
-            existingTrimmed.endsWith("</Data>", ignoreCase = true)
-        if (!hasCdata && !hasData) return new
-        val newTrimmed = new.trim()
-        val newHasCdata = newTrimmed.startsWith("<![CDATA[", ignoreCase = true)
-        val newHasData = newTrimmed.startsWith("<Data>", ignoreCase = true)
-        return when {
-            hasCdata && !newHasCdata -> "<![CDATA[$newTrimmed]]>"
-            hasData && !newHasData -> "<Data>$newTrimmed</Data>"
-            else -> new
+
+        val (outerOpen, outerClose) = when {
+            existingTrimmed.startsWith("<![CDATA[", ignoreCase = true) &&
+                existingTrimmed.endsWith("]]>") -> "<![CDATA[" to "]]>"
+
+            existingTrimmed.startsWith("<Data>", ignoreCase = true) &&
+                existingTrimmed.endsWith("</Data>", ignoreCase = true) -> "<Data>" to "</Data>"
+
+            else -> return new
         }
+
+        val newTrimmed = new.trim()
+        val newHasOuterWrap = newTrimmed.startsWith("<![CDATA[", ignoreCase = true) ||
+            newTrimmed.startsWith("<Data>", ignoreCase = true)
+        if (newHasOuterWrap) return new
+
+        val existingInner = existingTrimmed.substring(
+            outerOpen.length,
+            existingTrimmed.length - outerClose.length
+        )
+        return "$outerOpen${preserveWrapping(existingInner, newTrimmed)}$outerClose"
     }
 
 
